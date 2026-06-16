@@ -32,6 +32,10 @@ from PySide6.QtGui import (
     QPainterPath, QPalette, QCursor, QAction, QPixmap, QIcon,
 )
 
+# ── App metadata ───────────────────────────────────────────────────────────
+__version__  = "1.0.0"
+APP_VERSION  = __version__
+
 # ── App data paths ─────────────────────────────────────────────────────────
 DATA_DIR   = Path.home() / ".daily-scheduler"
 DATA_FILE  = DATA_DIR / "activities.json"
@@ -2004,7 +2008,7 @@ class SetupWidget(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Daily Scheduler")
+        self.setWindowTitle(f"Daily Scheduler {APP_VERSION}")
         self.resize(1300, 860)
         self.setMinimumSize(960, 620)
 
@@ -2135,6 +2139,9 @@ class MainWindow(QMainWindow):
         logo = QLabel("◈ Daily Scheduler")
         logo.setStyleSheet(f"font-size:15px; font-weight:bold; color:{C_ACCENT.name()};")
         hl.addWidget(logo)
+        ver = QLabel(f"v{APP_VERSION}")
+        ver.setStyleSheet(f"color:{C_MUTED.name()}; font-size:10px; padding-top:4px;")
+        hl.addWidget(ver)
 
         prev_b = hbtn("‹"); prev_b.setFixedWidth(30)
         prev_b.clicked.connect(lambda: self._nav(-1))
@@ -2628,7 +2635,7 @@ class MainWindow(QMainWindow):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         self._tray = QSystemTrayIcon(self._make_app_icon(), self)
-        self._tray.setToolTip("Daily Scheduler")
+        self._tray.setToolTip(f"Daily Scheduler v{APP_VERSION}")
         menu = QMenu()
         menu.setStyleSheet(f"""
             QMenu {{ background: {C_SURFACE.name()}; color: {C_TEXT.name()};
@@ -2742,6 +2749,10 @@ class MainWindow(QMainWindow):
 
 # ── Entry point ────────────────────────────────────────────────────────────
 def main():
+    if "--version" in sys.argv or "-V" in sys.argv:
+        print(f"Daily Scheduler {APP_VERSION}")
+        return
+
     # Register an explicit AppUserModelID so Windows shows our tray toasts as banners
     # (without this, Qt balloon notifications are silently dropped into the action center).
     if sys.platform == "win32":
@@ -2754,6 +2765,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("Daily Scheduler")
+    app.setApplicationVersion(APP_VERSION)
     app.setStyle("Fusion")
     # Keep running in the tray after the window is closed, so reminders still fire.
     app.setQuitOnLastWindowClosed(False)
