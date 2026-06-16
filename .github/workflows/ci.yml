@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  check:
+    name: Syntax & lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ruff
+        run: pip install ruff
+
+      # Static checks only — no need to install the heavy GUI deps (PySide6),
+      # since both tools analyse the source without importing it.
+      - name: Syntax check
+        run: python -m py_compile app.py
+
+      - name: Lint (real-bug rules)
+        run: ruff check app.py --select E9,F63,F7,F82
