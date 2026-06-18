@@ -6,7 +6,6 @@ Pure Python + PySide6 (Qt6). No browser engine.
 
 import sys
 import json
-import threading
 import uuid
 import shutil
 import os
@@ -26,15 +25,15 @@ from PySide6.QtWidgets import (
     QMessageBox, QMenu, QGridLayout, QProgressBar, QSystemTrayIcon,
 )
 from PySide6.QtCore import (
-    Qt, QTimer, QThread, Signal, QRect, QSize, QTime,
+    Qt, QTimer, QThread, Signal, QRect, QTime,
 )
 from PySide6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont, QFontMetrics,
-    QPainterPath, QPalette, QCursor, QAction, QPixmap, QIcon,
+    QPainter, QColor, QPen, QFont, QFontMetrics,
+    QPalette, QPixmap, QIcon,
 )
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "1.0.2"
+__version__  = "1.1.0"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -45,11 +44,11 @@ TOKEN_FILE = DATA_DIR / "token.json"
 DATA_DIR.mkdir(exist_ok=True)
 
 # ── Layout constants ───────────────────────────────────────────────────────
-DAY_START_H = 7
-DAY_END_H   = 23
-DAY_START   = DAY_START_H * 60   # minutes from midnight
+DAY_START_H = 0
+DAY_END_H   = 24
+DAY_START   = DAY_START_H * 60   # minutes from midnight (full 24h day)
 DAY_END     = DAY_END_H   * 60
-HOUR_PX     = 96                  # pixels per hour on timeline
+HOUR_PX     = 96                  # pixels per hour on timeline (scrolls; centers on now)
 GUTTER_W    = 64                  # width of time-label column
 OLLAMA_URL  = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5:14b"     # better at tool-use/reasoning than llama3.1:8b
@@ -84,9 +83,8 @@ def y_to_min(y: int) -> int:
     return int(DAY_START + y / HOUR_PX * 60)
 
 def fmt_time(minutes: int) -> str:
-    h, m = divmod(minutes % (24 * 60), 60)
-    ap = "pm" if h >= 12 else "am"
-    return f"{h % 12 or 12}:{m:02d} {ap}"
+    h, m = divmod(int(minutes), 60)   # 24-hour HH:MM (e.g. 09:00, 14:30, 24:00)
+    return f"{h:02d}:{m:02d}"
 
 def fmt_dur(minutes: int) -> str:
     if minutes < 60:
@@ -627,6 +625,78 @@ AI_TOOLS = [
             "to_date":   {"type": "string", "description": "Target date YYYY-MM-DD."},
             "merge":     {"type": "boolean", "description": "If true, keep the target's existing blocks and add the copies alongside them. Default false (replace)."},
         }, "required": ["to_date"]}}},
+    {"type": "function", "function": {
+        "name": "add_recurring",
+        "description": "Add the SAME block to multiple days in one call — for repeating "
+                       "things like classes or a daily study slot. Specify the days either "
+                       "with 'weekdays' (e.g. ['monday','wednesday'], or 'weekdays'/'weekends'/"
+                       "'daily') optionally over several 'weeks', or with an explicit 'dates' list.",
+        "parameters": {"type": "object", "properties": {
+            "title":    {"type": "string"},
+            "start":    {"type": "string", "description": "24h HH:MM"},
+            "end":      {"type": "string", "description": "24h HH:MM"},
+            "type":     {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES]},
+            "weekdays": {"type": "array", "items": {"type": "string"},
+                          "description": "Weekday names and/or 'weekdays','weekends','daily'. Applied across the next 'weeks' starting from the viewed day."},
+            "weeks":    {"type": "integer", "description": "How many weeks for weekday recurrence (default 1, max 8)."},
+            "dates":    {"type": "array", "items": {"type": "string"},
+                          "description": "Explicit list of dates (YYYY-MM-DD, or 6/14, tomorrow…). Use instead of weekdays for specific days."},
+        }, "required": ["start", "end", "title"]}}},
+    {"type": "function", "function": {
+        "name": "clear_range",
+        "description": "Delete editable blocks that fall within a time window on a date "
+                       "(e.g. 'clear my afternoon' → 12:00–18:00). Use clear_day for the whole day.",
+        "parameters": {"type": "object", "properties": {
+            "date":  {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
+            "start": {"type": "string", "description": "Window start 24h HH:MM."},
+            "end":   {"type": "string", "description": "Window end 24h HH:MM."},
+        }, "required": ["start", "end"]}}},
+    {"type": "function", "function": {
+        "name": "find_free_time",
+        "description": "Read-only: list open gaps (free of editable blocks AND calendar "
+                       "events) on a date. Use to answer 'when am I free?' and to choose "
+                       "where to place new blocks. Does not modify anything.",
+        "parameters": {"type": "object", "properties": {
+            "date":     {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
+            "duration": {"type": "integer", "description": "Only return gaps at least this many minutes long."},
+            "after":    {"type": "string", "description": "Only consider time after this (24h HH:MM)."},
+            "before":   {"type": "string", "description": "Only consider time before this (24h HH:MM)."},
+        }}}},
+    {"type": "function", "function": {
+        "name": "split_block",
+        "description": "Split one existing block into focused chunks separated by short "
+                       "breaks (pomodoro-style), within its original time span. Identify the "
+                       "block by title and/or 'at' (start time).",
+        "parameters": {"type": "object", "properties": {
+            "date":   {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
+            "title":  {"type": "string", "description": "Title (or part) of the block to split."},
+            "at":     {"type": "string", "description": "Start time of the block to split, 24h HH:MM."},
+            "chunk":  {"type": "integer", "description": "Length of each focus chunk in minutes (default 30)."},
+            "break":  {"type": "integer", "description": "Length of each break in minutes (default 5; 0 for none)."},
+        }}}},
+    {"type": "function", "function": {
+        "name": "schedule_tasks",
+        "description": "INTELLIGENT PLANNING — your main tool for 'plan my day' / 'fit these "
+                       "things in'. You supply the tasks (with durations, urgency, and "
+                       "preferred time of day from your own reasoning); the app places each "
+                       "into a real free slot at reasonable hours, around existing blocks and "
+                       "calendar events. It NEVER deletes anything and never overlaps, so it's "
+                       "safe to plan around meals/classes the user is keeping. Higher-priority "
+                       "tasks get earlier slots.",
+        "parameters": {"type": "object", "properties": {
+            "date":      {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
+            "day_start": {"type": "string", "description": "Earliest time to schedule (24h HH:MM, default 08:00)."},
+            "day_end":   {"type": "string", "description": "Latest time to schedule (24h HH:MM, default 22:00)."},
+            "tasks": {"type": "array", "description": "Tasks to place, in any order.",
+                "items": {"type": "object", "properties": {
+                    "title":    {"type": "string"},
+                    "minutes":  {"type": "integer", "description": "How long the task needs."},
+                    "type":     {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES]},
+                    "priority": {"type": "string", "enum": ["high", "normal", "low"],
+                                  "description": "Urgent/important → 'high' (placed earliest)."},
+                    "prefer":   {"type": "string", "description": "Preferred time: 'morning'/'afternoon'/'evening' or a time like '15:00'. Optional."},
+                }, "required": ["title", "minutes"]}},
+        }, "required": ["tasks"]}}},
 ]
 
 AI_TOOL_NAMES = {t["function"]["name"] for t in AI_TOOLS}
@@ -796,7 +866,7 @@ class TimelineWidget(QWidget):
                 pen = QPen(QColor("#1e1e2e"), 1, Qt.DashLine)
                 p.setPen(pen)
                 p.drawLine(GUTTER_W, yh, self.width(), yh)
-            lbl = "12 pm" if h == 12 else (f"{h} am" if h < 12 else f"{h-12} pm")
+            lbl = f"{h:02d}:00"
             p.setPen(C_MUTED)
             p.drawText(QRect(0, y - 8, GUTTER_W - 6, 18),
                        Qt.AlignRight | Qt.AlignVCenter, lbl)
@@ -881,7 +951,7 @@ class TimelineWidget(QWidget):
                 blk  = {**blk, "startMin": ps, "endMin": pe}
 
             dur  = blk["endMin"] - blk["startMin"]
-            x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+            x, y, h = rect.x(), rect.y(), rect.height()
 
             c    = QColor(blk.get("color", "#7c6ff7"))
             bg   = QColor(c.red(), c.green(), c.blue(), 45)
@@ -921,13 +991,6 @@ class TimelineWidget(QWidget):
         p.drawLine(GUTTER_W + 4, y, self.width(), y)
 
     # ── mouse ──────────────────────────────────────────────────────────────
-    def _free_at(self, y: int):
-        m = y_to_min(y)
-        for s, e in self._free_intervals():
-            if s <= m <= e:
-                return (s, e)
-        return None
-
     def _edit_mode_for(self, rect: QRect, y: int) -> str:
         """Resize if near a tall-enough block's top/bottom edge, else move."""
         if rect.height() >= 2 * self.EDGE_PX + 6:
@@ -1127,11 +1190,13 @@ class AddActivityDialog(QDialog):
             grid.addWidget(btn, i // 3, i % 3)
         lay.addWidget(grid_w)
 
-        # Times — respect the exact range the user dragged/clicked
+        # Times — respect the exact range the user dragged/clicked (24-hour display)
         trow = QHBoxLayout()
         end_min = max(end_min, start_min + 15)
         self.t_start = QTimeEdit(QTime(start_min // 60, start_min % 60))
         self.t_end   = QTimeEdit(QTime((end_min // 60) % 24, end_min % 60))
+        self.t_start.setDisplayFormat("HH:mm")
+        self.t_end.setDisplayFormat("HH:mm")
         for lbl, w in [("Start", self.t_start), ("End", self.t_end)]:
             col = QVBoxLayout()
             ql  = QLabel(lbl.upper())
@@ -1160,10 +1225,10 @@ class AddActivityDialog(QDialog):
         cancel.clicked.connect(self.reject)
         if is_edit:
             delete = QPushButton("Delete")
-            delete.setStyleSheet(f"""
-                QPushButton {{ background: transparent; border: 1px solid rgba(239,68,68,.4);
-                color: #fca5a5; padding: 8px 16px; border-radius: 7px; }}
-                QPushButton:hover {{ background: rgba(239,68,68,.15); border-color: #ef4444; }}
+            delete.setStyleSheet("""
+                QPushButton { background: transparent; border: 1px solid rgba(239,68,68,.4);
+                color: #fca5a5; padding: 8px 16px; border-radius: 7px; }
+                QPushButton:hover { background: rgba(239,68,68,.15); border-color: #ef4444; }
             """)
             delete.clicked.connect(self._delete)
             brow.addWidget(delete)
@@ -1805,16 +1870,33 @@ class AIPanel(QWidget):
                      for a in acts) or "  (none yet)\n"
         p += (
             "\nTOOLS — pick the ONE that fits; never chain small calls for a bulk job:\n"
-            "  add_block     – add one block\n"
-            "  move_block    – change a block's time, length, day, or title (match by title)\n"
-            "  delete_block  – remove a block by title\n"
-            "  clear_day     – wipe a whole day\n"
-            "  shift_blocks  – move EVERY block on a day by an offset (\"push everything 2h later\")\n"
-            "  copy_day      – duplicate all blocks from one day to another (\"copy today to 6/14\")\n"
-            "  replace_day   – rebuild a whole day from a complete list (restructuring, splitting\n"
-            "                  into chunks, planning with breaks). It DELETES blocks you don't\n"
-            "                  include, so list everything you want to keep.\n"
-            "  list_blocks   – read a day's schedule\n\n"
+            "  add_block      – add one block\n"
+            "  add_recurring  – add the same block to many days (weekdays/weekends/daily or a dates list)\n"
+            "  move_block     – change a block's time, length, day, or title (match by title and/or 'at')\n"
+            "  delete_block   – remove a block by title and/or 'at' (its start time)\n"
+            "  clear_range    – delete blocks within a time window (\"clear my afternoon\")\n"
+            "  clear_day      – wipe a whole day\n"
+            "  shift_blocks   – move EVERY block on a day by an offset (\"push everything 2h later\")\n"
+            "  copy_day       – duplicate all blocks from one day to another (\"copy today to 6/14\")\n"
+            "  split_block    – split one block into focus chunks with breaks (pomodoro)\n"
+            "  schedule_tasks – PLAN: place a list of tasks into free time safely (never deletes)\n"
+            "  find_free_time – (read-only) list open gaps; use to answer \"when am I free?\"\n"
+            "  replace_day    – rebuild a whole day from a complete list (full reset).\n"
+            "                   It DELETES blocks you don't include, so list everything to keep.\n"
+            "  list_blocks    – read a day's schedule\n\n"
+            "PLANNING — when the user asks you to plan their day or fit tasks in, REASON it out, "
+            "then use schedule_tasks:\n"
+            "  - Infer sensible durations if not given (homework ~1h, big project ~2h, quick "
+            "errand ~30m); ask only if truly unclear. Pass each as minutes.\n"
+            "  - Judge urgency from wording: urgent / due today / ASAP → priority \"high\" (it gets "
+            "an earlier slot); \"sometime\" / \"if I have time\" → \"low\".\n"
+            "  - Use 'prefer' (morning/afternoon/evening or a time) when the task has a natural "
+            "time. Keep to waking hours via day_start/day_end (default 08:00–22:00) unless the "
+            "user is an early bird / night owl. Never plan work in the middle of the night.\n"
+            "  - schedule_tasks places tasks around existing blocks and calendar events and NEVER "
+            "deletes them — so meals, classes, and anything the user keeps are safe automatically. "
+            "Prefer it over replace_day for planning. Only use replace_day for an explicit "
+            "from-scratch rebuild (and then include every block to keep). Verify with list_blocks.\n\n"
             "RULES\n"
             "  - ALWAYS call a tool when asked to add/move/remove/rename/copy/clear/shift/plan "
             "— never just describe the change.\n"
@@ -1847,10 +1929,16 @@ class AIPanel(QWidget):
             "  \"make gym 30 minutes longer\"       → move_block(title=\"gym\", end=\"...\")\n"
             "  \"copy my schedule to 6/14\"         → copy_day(to_date=\"6/14\")\n"
             "  \"shift everything two hours later\"  → shift_blocks(minutes=120)\n"
-            "  \"clear tomorrow\"                   → clear_day(date=\"tomorrow\")\n"
-            "  \"split my afternoon into 45-min study blocks with breaks\" → replace_day(blocks=[...])\n")
-        add = {"plan": "\nThe user wants help planning. Propose a plan with explicit time "
-                       "ranges, then create the agreed blocks (replace_day for a full day).",
+            "  \"clear my afternoon\"               → clear_range(start=\"12:00\", end=\"18:00\")\n"
+            "  \"study 16:00-18:00 every weekday\"  → add_recurring(title=\"Study\", start=\"16:00\", end=\"18:00\", weekdays=[\"weekdays\"])\n"
+            "  \"when am I free for 2 hours?\"      → find_free_time(duration=120)\n"
+            "  \"split my study block into 30-min chunks\" → split_block(title=\"study\", chunk=30, break=5)\n"
+            "  \"plan my day: finish the essay (urgent), gym, read; keep dinner\" → "
+            "schedule_tasks(tasks=[{title:\"Finish essay\",minutes:120,priority:\"high\"}, "
+            "{title:\"Gym\",minutes:60,prefer:\"evening\"}, {title:\"Read\",minutes:30,priority:\"low\"}])\n")
+        add = {"plan": "\nThe user wants help planning. Gather what they need to get done, "
+                       "reason out durations / urgency / preferred times, then place them with "
+                       "ONE schedule_tasks call (it keeps existing blocks safe) and verify.",
                "suggest": "\nGive 3-5 specific, actionable schedule improvements."}.get(self.mode, "")
         return p + add
 
@@ -2296,17 +2384,12 @@ class MainWindow(QMainWindow):
         ds = (d or self._cur_date).isoformat()
         return [a for a in self._all_acts if a.get("date") == ds]
 
-    def _match_acts(self, title_q: str, ds: Optional[str]) -> List[Dict]:
-        """Fuzzy title match over user blocks: emoji/punctuation-insensitive,
-        case-insensitive substring in either direction. ds=None searches all dates."""
-        q = norm_title(title_q)
-        if not q:
-            return []
-        pool = self._all_acts if ds is None else \
-               [a for a in self._all_acts if a.get("date") == ds]
-        return [a for a in pool
-                if q in norm_title(a.get("title", ""))
-                or norm_title(a.get("title", "")) in q]
+    def _free_gaps(self, ds: str, after=DAY_START, before=DAY_END):
+        """Open intervals on `ds` not occupied by editable blocks OR calendar events,
+        within [after, before]. Returns [(start, end)] in minutes."""
+        occ = [(a["startMin"], a["endMin"]) for a in self._all_acts if a.get("date") == ds] + \
+              [(e["startMin"], e["endMin"]) for e in self._cal_by_date.get(ds, [])]
+        return [(s, e) for s, e in _free_slots(occ, after, before) if e > s]
 
     def _select_acts(self, ds: str, title=None, at=None) -> List[Dict]:
         """Select user blocks on date `ds` by fuzzy title and/or start time `at`
@@ -2649,7 +2732,7 @@ class MainWindow(QMainWindow):
                     return "Error: none of the blocks were valid (need start, end as 24h HH:MM, title)."
                 new_acts, n_adj, n_drop = sequentialize(new_acts)
                 if not new_acts:
-                    return "Error: the blocks don't fit within the day (7am–11pm)."
+                    return "Error: the blocks don't fit within the day (00:00–24:00)."
                 self._all_acts = [a for a in self._all_acts if a.get("date") != ds] + new_acts
                 save_all_activities(self._all_acts)
                 self._refresh_view()
@@ -2659,9 +2742,245 @@ class MainWindow(QMainWindow):
                 if n_adj:
                     out += f" ({n_adj} shifted to remove overlaps.)"
                 if n_drop:
-                    out += f" ({n_drop} dropped — didn't fit before 11pm.)"
+                    out += f" ({n_drop} dropped — didn't fit before 24:00.)"
                 if skipped:
                     out += f" ({skipped} invalid block(s) skipped.)"
+                return out
+
+            if name == "add_recurring":
+                sm = parse_hhmm(str(args["start"]))
+                em = parse_hhmm(str(args["end"]))
+                if em <= sm:
+                    return "Error: end must be after start."
+                tid = str(args.get("type", "study"))
+                at_t = next((t for t in ACTIVITY_TYPES if t["id"] == tid), ACTIVITY_TYPES[0])
+                title = str(args.get("title") or at_t["label"])
+                targets = []
+                if args.get("dates"):
+                    for d in args["dates"]:
+                        rd = resolve_date(d, self._cur_date)
+                        if rd:
+                            targets.append(rd)
+                elif args.get("weekdays"):
+                    wanted = set()
+                    for w in args["weekdays"]:
+                        wl = str(w).strip().lower()
+                        if wl in ("weekday", "weekdays"):
+                            wanted |= {0, 1, 2, 3, 4}
+                        elif wl in ("weekend", "weekends"):
+                            wanted |= {5, 6}
+                        elif wl in ("daily", "everyday", "every day", "all"):
+                            wanted |= set(range(7))
+                        elif wl in _WEEKDAYS:
+                            wanted.add(_WEEKDAYS[wl])
+                    if not wanted:
+                        return "Error: couldn't read 'weekdays'."
+                    try:
+                        weeks = max(1, min(8, int(args.get("weeks", 1))))
+                    except (TypeError, ValueError):
+                        weeks = 1
+                    for i in range(7 * weeks):
+                        d = self._cur_date + timedelta(days=i)
+                        if d.weekday() in wanted:
+                            targets.append(d.isoformat())
+                else:
+                    return "Error: give 'weekdays' (e.g. ['monday']) or a 'dates' list."
+                targets = sorted(set(targets))[:60]
+                if not targets:
+                    return "Error: no matching dates."
+                conflicts = []
+                for tds in targets:
+                    if any(b["startMin"] < em and b["endMin"] > sm
+                           for b in self._all_acts if b.get("date") == tds):
+                        conflicts.append(tds)
+                    self._all_acts.append({
+                        "id": new_id(), "date": tds, "startMin": sm, "endMin": em,
+                        "type": at_t["id"], "color": at_t["color"], "title": title,
+                    })
+                save_all_activities(self._all_acts)
+                self._refresh_view()
+                out = (f"Added '{title}' {fmt_time(sm)}–{fmt_time(em)} on {len(targets)} "
+                       f"day(s): {', '.join(targets)}.")
+                if conflicts:
+                    out += f" Note: overlaps existing blocks on {', '.join(conflicts)}."
+                return out
+
+            if name == "clear_range":
+                rs = parse_hhmm(str(args["start"]))
+                re_ = parse_hhmm(str(args["end"]))
+                if re_ <= rs:
+                    return "Error: end must be after start."
+                hits = [a for a in self._all_acts if a.get("date") == ds
+                        and a["startMin"] < re_ and a["endMin"] > rs]
+                if not hits:
+                    return f"Nothing editable between {fmt_time(rs)}–{fmt_time(re_)} on {ds}."
+                for a in hits:
+                    self._all_acts.remove(a)
+                save_all_activities(self._all_acts)
+                self._refresh_view()
+                return (f"Cleared {len(hits)} block(s) in {fmt_time(rs)}–{fmt_time(re_)} on "
+                        f"{ds}: " + ", ".join(f"'{a['title']}'" for a in hits))
+
+            if name == "find_free_time":
+                after  = parse_hhmm(str(args["after"]))  if args.get("after")  else DAY_START
+                before = parse_hhmm(str(args["before"])) if args.get("before") else DAY_END
+                dur = 0
+                if args.get("duration") not in (None, ""):
+                    try:
+                        dur = int(float(args["duration"]))
+                    except (TypeError, ValueError):
+                        return "Error: 'duration' must be a number of minutes."
+                gaps = self._free_gaps(ds, after, before)
+                if dur:
+                    gaps = [(s, e) for s, e in gaps if e - s >= dur]
+                if not gaps:
+                    return (f"No free {('≥ ' + fmt_dur(dur) + ' ') if dur else ''}slots on "
+                            f"{ds}{(' between ' + fmt_time(after) + '–' + fmt_time(before)) if (args.get('after') or args.get('before')) else ''}.")
+                return (f"Free time on {ds}: " +
+                        ", ".join(f"{fmt_time(s)}–{fmt_time(e)} ({fmt_dur(e - s)})"
+                                  for s, e in gaps))
+
+            if name == "split_block":
+                hits = self._select_acts(ds, args.get("title"), args.get("at"))
+                if not hits:
+                    avail = ", ".join(f"'{a['title']}' {fmt_time(a['startMin'])}"
+                                      for a in sorted(self._day_acts(),
+                                                      key=lambda x: x["startMin"])) or "none"
+                    return f"No block matching that on {ds}. Blocks: {avail}."
+                if len(hits) > 1:
+                    listing = "; ".join(f"'{a['title']}' at {fmt_time(a['startMin'])}"
+                                        for a in sorted(hits, key=lambda x: x["startMin"])[:5])
+                    return f"Ambiguous — {len(hits)} match: {listing}. Add 'at' to pick one."
+                a = hits[0]
+                try:
+                    chunk = max(5, int(args.get("chunk", 30)))
+                except (TypeError, ValueError):
+                    chunk = 30
+                try:
+                    brk = max(0, int(args.get("break", 5)))
+                except (TypeError, ValueError):
+                    brk = 5
+                s0, e0 = a["startMin"], a["endMin"]
+                segs, cur = [], s0
+                while cur < e0:
+                    cend = min(cur + chunk, e0)
+                    segs.append(("chunk", cur, cend)); cur = cend
+                    if cur < e0 and brk > 0:
+                        bend = min(cur + brk, e0)
+                        segs.append(("break", cur, bend)); cur = bend
+                while segs and segs[-1][0] == "break":   # no trailing break
+                    segs.pop()
+                n_chunks = sum(1 for k, _, _ in segs if k == "chunk")
+                if n_chunks < 2:
+                    return (f"'{a['title']}' ({fmt_dur(e0 - s0)}) is too short to split into "
+                            f"{chunk}-min chunks.")
+                brk_t = next((t for t in ACTIVITY_TYPES if t["id"] == "extra"), ACTIVITY_TYPES[0])
+                self._all_acts.remove(a)
+                ci = 0
+                for kind, ss, ee in segs:
+                    if kind == "chunk":
+                        ci += 1
+                        self._all_acts.append({
+                            "id": new_id(), "date": ds, "startMin": ss, "endMin": ee,
+                            "type": a["type"], "color": a["color"],
+                            "title": f"{a['title']} ({ci})"})
+                    else:
+                        self._all_acts.append({
+                            "id": new_id(), "date": ds, "startMin": ss, "endMin": ee,
+                            "type": brk_t["id"], "color": brk_t["color"], "title": "Break"})
+                save_all_activities(self._all_acts)
+                self._refresh_view()
+                return (f"Split '{a['title']}' into {n_chunks} × {chunk}-min chunks"
+                        f"{f' with {brk}-min breaks' if brk else ''}.")
+
+            if name == "schedule_tasks":
+                raw = args.get("tasks")
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except Exception:
+                        return "Error: 'tasks' must be a list of {title, minutes, ...}."
+                if not isinstance(raw, list) or not raw:
+                    return "Error: give a non-empty 'tasks' list."
+                ws = parse_hhmm(str(args["day_start"])) if args.get("day_start") else 8 * 60
+                we = parse_hhmm(str(args["day_end"]))   if args.get("day_end")   else 22 * 60
+                if we <= ws:
+                    we = DAY_END
+                windows = {"morning": (8*60, 12*60), "afternoon": (12*60, 17*60),
+                           "evening": (17*60, 22*60), "night": (20*60, 24*60)}
+                prio = {"high": 0, "urgent": 0, "important": 0, "normal": 1,
+                        "medium": 1, "low": 2}
+                tasks = []
+                for i, t in enumerate(raw[:20]):
+                    if not isinstance(t, dict):
+                        continue
+                    try:
+                        mins = int(float(t.get("minutes") or t.get("duration") or 60))
+                    except (TypeError, ValueError):
+                        mins = 60
+                    mins = max(15, min(mins, we - ws))
+                    tid = str(t.get("type", "study"))
+                    at_t = next((x for x in ACTIVITY_TYPES if x["id"] == tid), ACTIVITY_TYPES[0])
+                    tasks.append({
+                        "title": str(t.get("title") or at_t["label"]), "mins": mins,
+                        "type": at_t["id"], "color": at_t["color"],
+                        "pr": prio.get(str(t.get("priority", "normal")).lower(), 1),
+                        "prefer": str(t.get("prefer", "")).strip().lower(), "i": i,
+                    })
+                if not tasks:
+                    return "Error: no valid tasks."
+                tasks.sort(key=lambda x: (x["pr"], x["i"]))
+                occ = [(a["startMin"], a["endMin"]) for a in self._all_acts if a.get("date") == ds] + \
+                      [(e["startMin"], e["endMin"]) for e in self._cal_by_date.get(ds, [])]
+                # idempotent: don't re-add a task already on the day (repeat calls are safe)
+                have = {norm_title(a["title"]) for a in self._all_acts if a.get("date") == ds}
+                placed, unplaced, already = [], [], []
+                for t in tasks:
+                    if norm_title(t["title"]) in have:
+                        already.append(t["title"]); continue
+                    ranges = []
+                    if t["prefer"] in windows:
+                        pw = windows[t["prefer"]]
+                        ranges.append((max(ws, pw[0]), min(we, pw[1])))
+                    elif t["prefer"]:
+                        try:
+                            ps = parse_hhmm(t["prefer"]); ranges.append((max(ws, ps), we))
+                        except ValueError:
+                            pass
+                    ranges.append((ws, we))   # fallback: whole waking window
+                    slot = None
+                    for a0, b0 in ranges:
+                        if b0 - a0 < t["mins"]:
+                            continue
+                        for gs, ge in _free_slots(occ, a0, b0):
+                            if ge - gs >= t["mins"]:
+                                slot = (gs, gs + t["mins"]); break
+                        if slot:
+                            break
+                    if slot:
+                        occ.append(slot)
+                        have.add(norm_title(t["title"]))
+                        self._all_acts.append({
+                            "id": new_id(), "date": ds, "startMin": slot[0], "endMin": slot[1],
+                            "type": t["type"], "color": t["color"], "title": t["title"]})
+                        placed.append((t["title"], slot))
+                    else:
+                        unplaced.append(t["title"])
+                if not placed:
+                    if already and not unplaced:
+                        return ("Those are already on {}'s schedule — nothing to add."
+                                .format(ds))
+                    return ("Couldn't fit any task in the free time on {} ({}–{}). Try a wider "
+                            "window or shorter tasks.".format(ds, fmt_time(ws), fmt_time(we)))
+                save_all_activities(self._all_acts)
+                self._refresh_view()
+                placed.sort(key=lambda x: x[1][0])
+                out = "Scheduled on {}: ".format(ds) + ", ".join(
+                    f"'{ti}' {fmt_time(s)}–{fmt_time(e)}" for ti, (s, e) in placed)
+                if already:
+                    out += " | Already there: " + ", ".join(already)
+                if unplaced:
+                    out += " | Couldn't fit (no free slot): " + ", ".join(unplaced)
                 return out
 
             if name == "list_blocks":
