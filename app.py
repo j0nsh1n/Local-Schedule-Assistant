@@ -34,7 +34,7 @@ from PySide6.QtGui import (
 )
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "1.0.1"
+__version__  = "1.0.2"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -562,22 +562,29 @@ AI_TOOLS = [
         }, "required": ["start", "end", "title"]}}},
     {"type": "function", "function": {
         "name": "delete_block",
-        "description": "Delete user-created block(s) whose title contains the given text, on a date.",
+        "description": "Delete user-created block(s). Identify the block by title and/or by "
+                       "its time. To remove ONE specific time slot, pass its start time in "
+                       "'at' (e.g. at='14:00' deletes the block starting at 2pm). Combine "
+                       "'title' + 'at' to be exact when several blocks share a title.",
         "parameters": {"type": "object", "properties": {
             "date":  {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
-            "title": {"type": "string", "description": "Title (or part of it) of the block to delete"},
-        }, "required": ["title"]}}},
+            "title": {"type": "string", "description": "Title (or part of it) of the block to delete."},
+            "at":    {"type": "string", "description": "Start time of the specific block to delete, 24h HH:MM (e.g. '14:00'). Targets just that one time slot."},
+        }}}},
     {"type": "function", "function": {
         "name": "move_block",
-        "description": "Move or resize a user-created block (matched by title) to new times and/or a new date.",
+        "description": "Move, resize, or rename ONE user-created block. Identify which block "
+                       "with 'title' and/or 'at' (its current start time); use 'at' when "
+                       "several blocks share a title. Then set the new time/date/title.",
         "parameters": {"type": "object", "properties": {
             "date":     {"type": "string", "description": "Date the block is currently on (YYYY-MM-DD). Omit for the viewed day."},
-            "title":    {"type": "string", "description": "Title (or part) of the block to move"},
-            "start":    {"type": "string", "description": "New start time 24h HH:MM"},
-            "end":      {"type": "string", "description": "New end time 24h HH:MM"},
-            "new_date": {"type": "string", "description": "New date YYYY-MM-DD if moving to another day"},
-            "new_title": {"type": "string", "description": "New title, to rename the block"},
-        }, "required": ["title"]}}},
+            "title":    {"type": "string", "description": "Title (or part) of the block to move."},
+            "at":       {"type": "string", "description": "Current start time of the block to move, 24h HH:MM. Use to pick the exact block when titles repeat."},
+            "start":    {"type": "string", "description": "NEW start time 24h HH:MM."},
+            "end":      {"type": "string", "description": "NEW end time 24h HH:MM."},
+            "new_date": {"type": "string", "description": "New date YYYY-MM-DD if moving to another day."},
+            "new_title": {"type": "string", "description": "New title, to rename the block."},
+        }}}},
     {"type": "function", "function": {
         "name": "list_blocks",
         "description": "List everything on the schedule for a date.",
@@ -1814,7 +1821,12 @@ class AIPanel(QWidget):
             "  - Times are 24-hour HH:MM. For another day pass the date the user gave "
             "(e.g. \"6/14\", \"tomorrow\"); omit it for the day on screen.\n"
             "  - Blocks can't overlap — the app auto-adjusts, so don't fuss over exact gaps.\n"
-            "  - To move/delete/rename, match a block by its title (partial titles work).\n"
+            "  - To delete/move/rename a block, identify it by title and/or by its start "
+            "time using 'at' (24h HH:MM). To remove ONE time slot, use 'at' with that "
+            "block's start time — e.g. delete the 2pm block → delete_block(at=\"14:00\"). "
+            "When several blocks share a title, add 'at' to pick the exact one. Don't "
+            "delete by title alone if the user pointed at a specific time. To wipe the "
+            "WHOLE day use clear_day.\n"
             "  - Google Calendar events are READ-ONLY; if asked to change one, say it must "
             "be edited in Google Calendar.\n"
             "  - CHECK YOUR WORK: after any edit — especially several at once or a whole-day "
@@ -1827,10 +1839,14 @@ class AIPanel(QWidget):
             "schedule.\n"
             "  - Be friendly and concise.\n\n"
             "EXAMPLES\n"
-            "  \"copy my schedule to 6/14\"         → copy_day(to_date=\"6/14\")\n"
-            "  \"shift everything two hours later\"  → shift_blocks(minutes=120)\n"
+            "  \"delete the 2pm block\"             → delete_block(at=\"14:00\")\n"
+            "  \"delete the 9am study block\"       → delete_block(title=\"study\", at=\"09:00\")\n"
+            "  \"remove my gym session\"           → delete_block(title=\"gym\")\n"
+            "  \"move the 9am block to 11\"         → move_block(at=\"09:00\", start=\"11:00\")\n"
             "  \"move AP work to 1pm\"              → move_block(title=\"AP work\", start=\"13:00\")\n"
             "  \"make gym 30 minutes longer\"       → move_block(title=\"gym\", end=\"...\")\n"
+            "  \"copy my schedule to 6/14\"         → copy_day(to_date=\"6/14\")\n"
+            "  \"shift everything two hours later\"  → shift_blocks(minutes=120)\n"
             "  \"clear tomorrow\"                   → clear_day(date=\"tomorrow\")\n"
             "  \"split my afternoon into 45-min study blocks with breaks\" → replace_day(blocks=[...])\n")
         add = {"plan": "\nThe user wants help planning. Propose a plan with explicit time "
@@ -2292,6 +2308,24 @@ class MainWindow(QMainWindow):
                 if q in norm_title(a.get("title", ""))
                 or norm_title(a.get("title", "")) in q]
 
+    def _select_acts(self, ds: str, title=None, at=None) -> List[Dict]:
+        """Select user blocks on date `ds` by fuzzy title and/or start time `at`
+        (24h HH:MM). With `at`, matches the block starting at that time, or — if none
+        starts exactly then — the block that covers that minute. Combining title+at
+        narrows to blocks that satisfy both. Raises ValueError on a bad time."""
+        pool = [a for a in self._all_acts if a.get("date") == ds]
+        q = norm_title(title) if title else None
+        if q is not None:
+            pool = [a for a in pool
+                    if q in norm_title(a.get("title", ""))
+                    or norm_title(a.get("title", "")) in q]
+        if at:
+            tm = parse_hhmm(str(at))
+            exact = [a for a in pool if a["startMin"] == tm]
+            pool = exact if exact else [a for a in pool
+                                        if a["startMin"] <= tm < a["endMin"]]
+        return pool
+
     # ── Navigation ─────────────────────────────────────────────────────────
     def _set_view(self, v: str):
         self._view = v
@@ -2443,41 +2477,51 @@ class MainWindow(QMainWindow):
                 return f"Added '{title}' on {ds}, {fmt_time(sm)}–{fmt_time(em)}.{note}"
 
             if name == "delete_block":
-                title_q = str(args.get("title", ""))
-                if not title_q.strip():
-                    return ("Error: 'title' is required. To remove every block on a date, "
-                            "call clear_day instead.")
-                hits = self._match_acts(title_q, ds)
+                title = args.get("title")
+                at    = args.get("at")
+                if not (title and str(title).strip()) and not at:
+                    return ("Error: give a title and/or a time ('at'). To remove every "
+                            "block on a date, call clear_day instead.")
+                try:
+                    hits = self._select_acts(ds, title, at)
+                except ValueError as ex:
+                    return f"Error: {ex}"
                 if not hits:
-                    hits = self._match_acts(title_q, None)   # fall back: search every date
-                if not hits:
-                    avail = ", ".join(f"'{a['title']}'" for a in self._all_acts
-                                      if a.get("date") == ds) or "none"
-                    return (f"No editable block matching '{title_q}' on {ds}. "
-                            f"Editable blocks that day: {avail}.")
+                    avail = ", ".join(f"'{a['title']}' {fmt_time(a['startMin'])}"
+                                      for a in sorted(self._day_acts(),
+                                                      key=lambda x: x["startMin"])) or "none"
+                    sel = (f"title '{title}'" if title else "") + \
+                          (f" at {at}" if at else "")
+                    return (f"No editable block matching {sel.strip()} on {ds}. "
+                            f"Blocks that day: {avail}.")
                 for a in hits:
                     self._all_acts.remove(a)
                 save_all_activities(self._all_acts)
                 self._refresh_view()
-                return "Deleted: " + ", ".join(f"'{a['title']}' ({a['date']})" for a in hits)
+                return "Deleted: " + ", ".join(
+                    f"'{a['title']}' {fmt_time(a['startMin'])}–{fmt_time(a['endMin'])}"
+                    for a in hits)
 
             if name == "move_block":
-                title_q = str(args.get("title", ""))
-                if not title_q.strip():
-                    return "Error: 'title' is required."
-                hits = self._match_acts(title_q, ds)
+                title = args.get("title")
+                at    = args.get("at")
+                if not (title and str(title).strip()) and not at:
+                    return "Error: identify the block by 'title' and/or its time ('at')."
+                try:
+                    hits = self._select_acts(ds, title, at)
+                except ValueError as ex:
+                    return f"Error: {ex}"
                 if not hits:
-                    hits = self._match_acts(title_q, None)   # fall back: search every date
-                if not hits:
-                    avail = ", ".join(f"'{a['title']}' on {a['date']}"
-                                      for a in self._all_acts) or "none"
-                    return (f"No editable block matching '{title_q}'. "
-                            f"Editable blocks: {avail}.")
+                    avail = ", ".join(f"'{a['title']}' {fmt_time(a['startMin'])}"
+                                      for a in sorted(self._day_acts(),
+                                                      key=lambda x: x["startMin"])) or "none"
+                    return (f"No editable block matching that on {ds}. "
+                            f"Blocks that day: {avail}.")
                 if len(hits) > 1:
-                    listing = "; ".join(f"'{a['title']}' {a['date']} "
-                                        f"{fmt_time(a['startMin'])}" for a in hits[:5])
-                    return (f"Ambiguous — {len(hits)} blocks match '{title_q}': "
-                            f"{listing}. Use a more specific title.")
+                    listing = "; ".join(f"'{a['title']}' at {fmt_time(a['startMin'])}"
+                                        for a in sorted(hits, key=lambda x: x["startMin"])[:5])
+                    return (f"Ambiguous — {len(hits)} blocks match: {listing}. "
+                            f"Add 'at' with the exact start time to pick one.")
                 a = hits[0]
                 old_dur = a["endMin"] - a["startMin"]
                 if args.get("start"):
