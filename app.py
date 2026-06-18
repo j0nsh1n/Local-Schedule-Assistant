@@ -9,6 +9,7 @@ import json
 import threading
 import uuid
 import shutil
+import os
 import platform
 import subprocess
 import re
@@ -33,7 +34,7 @@ from PySide6.QtGui import (
 )
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "1.0.0"
+__version__  = "1.0.1"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -384,43 +385,72 @@ def start_ollama():
         return False, str(ex)
 
 
-# ── Run-at-login (Windows) ──────────────────────────────────────────────────
+# ── Run-at-login (Windows: Startup-folder shortcut) ─────────────────────────
+# A .lnk in the user's Startup folder is the most visible/reliable method — it shows
+# in Task Manager > Startup and Settings, and the user can see the file directly. (The
+# old HKCU Run-key method worked at boot but Task Manager was slow to display it.)
 _RUN_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _RUN_NAME = "DailyScheduler"
 
-def _startup_command() -> str:
-    """Command Windows should run at login. Launches the APP only (never Ollama),
-    with --startup so it opens quietly into the tray."""
-    if getattr(sys, "frozen", False):                 # packaged .exe
-        return f'"{sys.executable}" --startup'
-    return f'"{sys.executable}" "{Path(__file__).resolve()}" --startup'   # source
+def _startup_lnk() -> Path:
+    base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    return (Path(base) / "Microsoft" / "Windows" / "Start Menu"
+            / "Programs" / "Startup" / "Daily Scheduler.lnk")
+
+def _startup_target():
+    """(target, arguments, working_dir) the shortcut should launch — the APP only,
+    never Ollama, with --startup so it opens quietly into the tray."""
+    if getattr(sys, "frozen", False):                  # packaged .exe
+        return sys.executable, "--startup", str(Path(sys.executable).parent)
+    script = Path(__file__).resolve()                  # running from source
+    return sys.executable, f'"{script}" --startup', str(script.parent)
+
+def _ps_quote(s: str) -> str:
+    return "'" + s.replace("'", "''") + "'"
+
+def _remove_legacy_run_key():
+    """Drop the old HKCU Run entry so we don't launch twice after migrating."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0,
+                            winreg.KEY_SET_VALUE) as k:
+            winreg.DeleteValue(k, _RUN_NAME)
+    except OSError:
+        pass
 
 def is_startup_enabled() -> bool:
     if platform.system() != "Windows":
         return False
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
-            val, _ = winreg.QueryValueEx(k, _RUN_NAME)
-            return bool(val)
-    except OSError:
-        return False
+    return _startup_lnk().exists()
 
 def set_startup(enabled: bool) -> bool:
-    """Add/remove the HKCU Run entry. No admin rights needed. Returns success."""
+    """Create/remove the Startup-folder shortcut. No admin rights needed."""
     if platform.system() != "Windows":
         return False
     try:
-        import winreg
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
-            if enabled:
-                winreg.SetValueEx(k, _RUN_NAME, 0, winreg.REG_SZ, _startup_command())
-            else:
-                try:
-                    winreg.DeleteValue(k, _RUN_NAME)
-                except FileNotFoundError:
-                    pass
-        return True
+        lnk = _startup_lnk()
+        if enabled:
+            target, args, workdir = _startup_target()
+            lnk.parent.mkdir(parents=True, exist_ok=True)
+            ps = (
+                "$ws = New-Object -ComObject WScript.Shell; "
+                f"$s = $ws.CreateShortcut({_ps_quote(str(lnk))}); "
+                f"$s.TargetPath = {_ps_quote(target)}; "
+                f"$s.Arguments = {_ps_quote(args)}; "
+                f"$s.WorkingDirectory = {_ps_quote(workdir)}; "
+                "$s.Description = 'Daily Scheduler'; $s.Save()"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                capture_output=True, text=True, creationflags=0x08000000,
+            )
+            ok = lnk.exists()
+        else:
+            if lnk.exists():
+                lnk.unlink()
+            ok = not lnk.exists()
+        _remove_legacy_run_key()       # migrate away from the old Run-key method
+        return ok
     except Exception:
         return False
 
