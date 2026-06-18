@@ -33,7 +33,7 @@ from PySide6.QtGui import (
 )
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "1.1.0"
+__version__  = "1.1.1"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -67,13 +67,20 @@ C_NOW     = QColor("#f43f5e")
 
 # ── Activity types ─────────────────────────────────────────────────────────
 ACTIVITY_TYPES = [
-    {"id": "study",   "label": "Study",          "icon": "📚", "color": "#8b5cf6"},
-    {"id": "project", "label": "Project",         "icon": "🛠",  "color": "#f59e0b"},
-    {"id": "extra",   "label": "Extracurricular", "icon": "🎯", "color": "#ec4899"},
-    {"id": "gaming",  "label": "Gaming",          "icon": "🎮", "color": "#ef4444"},
-    {"id": "anime",   "label": "Anime",           "icon": "🍥", "color": "#06b6d4"},
-    {"id": "friends", "label": "Friends",         "icon": "📞", "color": "#f97316"},
+    {"id": "assignments", "label": "Assignments",      "icon": "📝", "color": "#ef4444"},
+    {"id": "project",     "label": "Projects",         "icon": "🛠",  "color": "#f59e0b"},
+    {"id": "study",       "label": "Study",            "icon": "📚", "color": "#8b5cf6"},
+    {"id": "extra",       "label": "Extracurriculars", "icon": "🎯", "color": "#ec4899"},
+    {"id": "gaming",      "label": "Anime/Gaming",     "icon": "🎮", "color": "#06b6d4"},
+    {"id": "exercise",    "label": "Exercise",         "icon": "💪", "color": "#10b981"},
+    {"id": "meals",       "label": "Meals",            "icon": "🍽", "color": "#f97316"},
+    {"id": "sleep",       "label": "Sleep",            "icon": "🌙", "color": "#6366f1"},
 ]
+
+# Map legacy type ids (from older data) onto the current set, so existing blocks
+# keep a sensible category/color after this change.
+_OLD_TYPE_MAP = {"anime": "gaming", "friends": "extra",
+                 "gym": "exercise", "workout": "exercise"}
 
 # ── Pure helper functions ──────────────────────────────────────────────────
 def min_to_y(minutes: int) -> int:
@@ -98,13 +105,23 @@ def today_str() -> str:
 def new_id() -> str:
     return str(uuid.uuid4())[:8]
 
-def qcolor(hex_str: str) -> QColor:
-    return QColor(hex_str)
-
 # ── Local storage ──────────────────────────────────────────────────────────
+def _migrate_types(acts: List[Dict]) -> List[Dict]:
+    """Remap any legacy/unknown activity type onto the current set and refresh the
+    block's colour to match the current palette. Runs silently on load."""
+    by_id = {t["id"]: t for t in ACTIVITY_TYPES}
+    for a in acts:
+        tid = a.get("type")
+        tid = _OLD_TYPE_MAP.get(tid, tid)
+        if tid not in by_id:
+            tid = "study"
+        a["type"]  = tid
+        a["color"] = by_id[tid]["color"]
+    return acts
+
 def load_all_activities() -> List[Dict]:
     try:
-        return json.loads(DATA_FILE.read_text())
+        return _migrate_types(json.loads(DATA_FILE.read_text()))
     except Exception:
         return []
 
@@ -2874,7 +2891,6 @@ class MainWindow(QMainWindow):
                 if n_chunks < 2:
                     return (f"'{a['title']}' ({fmt_dur(e0 - s0)}) is too short to split into "
                             f"{chunk}-min chunks.")
-                brk_t = next((t for t in ACTIVITY_TYPES if t["id"] == "extra"), ACTIVITY_TYPES[0])
                 self._all_acts.remove(a)
                 ci = 0
                 for kind, ss, ee in segs:
@@ -2884,10 +2900,10 @@ class MainWindow(QMainWindow):
                             "id": new_id(), "date": ds, "startMin": ss, "endMin": ee,
                             "type": a["type"], "color": a["color"],
                             "title": f"{a['title']} ({ci})"})
-                    else:
+                    else:   # breaks stay part of the same session (same type/colour)
                         self._all_acts.append({
                             "id": new_id(), "date": ds, "startMin": ss, "endMin": ee,
-                            "type": brk_t["id"], "color": brk_t["color"], "title": "Break"})
+                            "type": a["type"], "color": a["color"], "title": "Break"})
                 save_all_activities(self._all_acts)
                 self._refresh_view()
                 return (f"Split '{a['title']}' into {n_chunks} × {chunk}-min chunks"
