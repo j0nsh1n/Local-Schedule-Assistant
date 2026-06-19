@@ -2515,9 +2515,11 @@ class AlertPopup(QWidget):
         self.setFixedWidth(360)
 
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
-        card = QFrame()
+        card = QFrame(); card.setObjectName("alertCard")
+        # Scope to #alertCard so the border/background don't cascade onto child labels
+        # (QLabel subclasses QFrame, so a bare `QFrame {…}` rule boxes every label).
         card.setStyleSheet(
-            f"QFrame {{ background: {C_SURFACE.name()}; border: 1px solid {C_ACCENT.name()};"
+            f"#alertCard {{ background: {C_SURFACE.name()}; border: 1px solid {C_ACCENT.name()};"
             f" border-radius: {RAD_LG}px; }}")
         outer.addWidget(card)
         cl = QHBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
@@ -2527,7 +2529,7 @@ class AlertPopup(QWidget):
                           f" border-bottom-left-radius: {RAD_LG}px;")
         cl.addWidget(bar)
 
-        col = QVBoxLayout(); col.setContentsMargins(14, 12, 12, 12); col.setSpacing(3)
+        col = QVBoxLayout(); col.setContentsMargins(14, 11, 14, 12); col.setSpacing(5)
         head = QHBoxLayout(); head.setSpacing(8)
         ic = QLabel(); ic.setPixmap(icon.pixmap(18, 18))
         app_lbl = QLabel("Daily Scheduler")
