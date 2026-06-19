@@ -33,7 +33,7 @@ from PySide6.QtGui import (
 )
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "1.1.1"
+__version__  = "1.1.2"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -302,16 +302,16 @@ class CalFetchThread(QThread):
 
     def __init__(self, creds, start: date, end: date):
         super().__init__()
-        self.creds = creds
-        self.start = start
-        self.end   = end    # exclusive
+        self.creds  = creds
+        self._start = start     # NB: not 'self.start' — that is QThread.start()
+        self._end   = end       # exclusive
 
     def run(self):
         try:
             from googleapiclient.discovery import build
             svc = build("calendar", "v3", credentials=self.creds)
-            t0  = datetime.combine(self.start, datetime.min.time()).astimezone()
-            t1  = datetime.combine(self.end,   datetime.min.time()).astimezone()
+            t0  = datetime.combine(self._start, datetime.min.time()).astimezone()
+            t1  = datetime.combine(self._end,   datetime.min.time()).astimezone()
             by_date: Dict[str, List[Dict]] = {}
             page = None
             while True:
@@ -2154,6 +2154,63 @@ class SetupWidget(QWidget):
         self.proceed.emit()
 
 # ══════════════════════════════════════════════════════════════════════════
+#  ALERT POPUP — app-drawn, always-on-top. Bypasses the Windows notification
+#  pipeline, so it shows even with Do Not Disturb / Focus Assist on.
+# ══════════════════════════════════════════════════════════════════════════
+class AlertPopup(QWidget):
+    def __init__(self, title, body, icon: QIcon):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)   # don't steal focus
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_DeleteOnClose)           # free itself when dismissed
+        self.setFixedWidth(360)
+
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
+        card = QFrame()
+        card.setStyleSheet(
+            f"QFrame {{ background: {C_SURFACE.name()}; border: 1px solid {C_ACCENT.name()};"
+            f" border-radius: 10px; }}")
+        outer.addWidget(card)
+        cl = QHBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
+
+        bar = QFrame(); bar.setFixedWidth(5)
+        bar.setStyleSheet(f"background: {C_ACCENT.name()}; border-top-left-radius: 10px;"
+                          f" border-bottom-left-radius: 10px;")
+        cl.addWidget(bar)
+
+        col = QVBoxLayout(); col.setContentsMargins(14, 12, 12, 12); col.setSpacing(3)
+        head = QHBoxLayout(); head.setSpacing(8)
+        ic = QLabel(); ic.setPixmap(icon.pixmap(18, 18))
+        app_lbl = QLabel("Daily Scheduler")
+        app_lbl.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 10px; font-weight: bold;"
+                              " letter-spacing: 1px;")
+        head.addWidget(ic); head.addWidget(app_lbl); head.addStretch()
+        x = QLabel("✕"); x.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 11px;")
+        head.addWidget(x)
+        col.addLayout(head)
+
+        t = QLabel(title); t.setWordWrap(True)
+        t.setStyleSheet(f"color: {C_TEXT.name()}; font-size: 14px; font-weight: bold;")
+        col.addWidget(t)
+        b = QLabel(body); b.setWordWrap(True)
+        b.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 12px;")
+        col.addWidget(b)
+        cl.addLayout(col)
+
+        self._timer = QTimer(self); self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.close)
+        self._timer.start(12000)
+
+    def show_at(self, x, y):
+        self.adjustSize()
+        self.move(x, y - self.height())
+        self.show()
+
+    def mousePressEvent(self, _ev):
+        self.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  MAIN WINDOW
 # ══════════════════════════════════════════════════════════════════════════
 class MainWindow(QMainWindow):
@@ -2174,6 +2231,8 @@ class MainWindow(QMainWindow):
         # notifications
         self._tray         = None
         self._notify_on    = True
+        self._dnd_override = True           # break through Do Not Disturb via app-drawn popup
+        self._popups:      List[QWidget] = []
         self._notified:    set = set()     # (block_id, startMin) already announced today
         self._notified_day = date.today().isoformat()
         self._really_quit  = False
@@ -3056,8 +3115,14 @@ class MainWindow(QMainWindow):
         open_act.triggered.connect(self._show_from_tray)
         self._notify_act = menu.addAction("Notify when blocks start")
         self._notify_act.setCheckable(True)
-        self._notify_act.setChecked(True)
+        self._notify_act.setChecked(self._notify_on)
         self._notify_act.toggled.connect(lambda v: setattr(self, "_notify_on", v))
+        self._dnd_act = menu.addAction("Override Do Not Disturb")
+        self._dnd_act.setCheckable(True)
+        self._dnd_act.setChecked(self._dnd_override)
+        self._dnd_act.setToolTip("Show an always-on-top alert that breaks through "
+                                 "Do Not Disturb / Focus Assist")
+        self._dnd_act.toggled.connect(lambda v: setattr(self, "_dnd_override", v))
         test_act = menu.addAction("Test notification")
         test_act.triggered.connect(self._test_notification)
         menu.addSeparator()
@@ -3080,11 +3145,42 @@ class MainWindow(QMainWindow):
         self.showNormal(); self.raise_(); self.activateWindow()
 
     def _test_notification(self):
-        if self._tray:
-            self._tray.showMessage(
-                "✓ Notifications are working",
-                "You'll get a toast like this when a block starts.",
-                self._make_app_icon(), 8000)
+        self._alert("✓ Notifications are working",
+                    "This is how you'll be alerted when a block starts."
+                    + (" (Do Not Disturb override is ON.)" if self._dnd_override else ""))
+
+    # ── Alerting ─────────────────────────────────────────────────────────────
+    def _alert(self, title, body):
+        """Fire a block alert. With DND override on, draw our own always-on-top popup
+        (+ sound) so it shows even under Do Not Disturb; otherwise a normal tray toast."""
+        if self._dnd_override:
+            self._show_alert_popup(title, body)
+        elif self._tray:
+            self._tray.showMessage(title, body, self._make_app_icon(), 12000)
+
+    def _play_alert_sound(self):
+        try:
+            if platform.system() == "Windows":
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                return
+        except Exception:
+            pass
+        try:
+            QApplication.beep()
+        except Exception:
+            pass
+
+    def _show_alert_popup(self, title, body):
+        self._play_alert_sound()
+        popup = AlertPopup(title, body, self._make_app_icon())
+        popup.destroyed.connect(lambda *_: self._popups.remove(popup)
+                                if popup in self._popups else None)
+        self._popups.append(popup)
+        geo = QApplication.primaryScreen().availableGeometry()
+        idx = max(0, len(self._popups) - 1)
+        popup.show_at(geo.right() - popup.width() - 16,
+                      geo.bottom() - 16 - idx * 92)
 
     def _toggle_startup(self, enabled):
         ok = set_startup(enabled)
@@ -3117,7 +3213,7 @@ class MainWindow(QMainWindow):
         window). Using a tight window — rather than 'anything since the last check' —
         means a forward clock jump (waking from sleep, manual time change) can't replay
         a backlog of notifications all at once; only a genuinely-now block fires."""
-        if not self._tray or not self._notify_on:
+        if not self._notify_on:
             return
         now = datetime.now()
         now_min = now.hour * 60 + now.minute
@@ -3134,10 +3230,9 @@ class MainWindow(QMainWindow):
                 continue
             if now_min - self.NOTIFY_WINDOW <= sm <= now_min:
                 self._notified.add(key)
-                self._tray.showMessage(
+                self._alert(
                     f"▶ {b['title']}",
-                    f"Starting now · {fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}",
-                    self._make_app_icon(), 12000)
+                    f"Starting now · {fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
 
     def closeEvent(self, ev):
         # Closing the window keeps the app alive in the tray so reminders still fire.
