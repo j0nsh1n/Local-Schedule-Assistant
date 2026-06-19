@@ -811,14 +811,17 @@ AI_TOOLS = [
     {"type": "function", "function": {
         "name": "split_block",
         "description": "Split one existing block into focused chunks separated by short "
-                       "breaks (pomodoro-style), within its original time span. Identify the "
-                       "block by title and/or 'at' (start time).",
+                       "breaks (pomodoro-style), within its original time span. The focus "
+                       "chunks keep the block's type; the breaks are downtime (see break_type). "
+                       "Identify the block by title and/or 'at' (start time).",
         "parameters": {"type": "object", "properties": {
             "date":   {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
             "title":  {"type": "string", "description": "Title (or part) of the block to split."},
             "at":     {"type": "string", "description": "Start time of the block to split, 24h HH:MM."},
             "chunk":  {"type": "integer", "description": "Length of each focus chunk in minutes (default 30)."},
             "break":  {"type": "integer", "description": "Length of each break in minutes (default 5; 0 for none)."},
+            "break_type": {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES],
+                            "description": "Category for the breaks (default 'gaming' = downtime). A break is rest, not study — don't reuse the work block's type."},
         }}}},
     {"type": "function", "function": {
         "name": "schedule_tasks",
@@ -2180,7 +2183,6 @@ class AIPanel(QWidget):
 
     def _sys_prompt(self):
         ctx = self.get_ctx()
-        types_line = " · ".join(f"{t['id']} ({t['label']})" for t in ACTIVITY_TYPES)
         p = (
             "You are the scheduling assistant built into Daily Scheduler, a desktop "
             "day-planner. You help the user (a high-school student) plan study, projects, "
@@ -2199,8 +2201,24 @@ class AIPanel(QWidget):
             "another day the user names it (e.g. \"6/14\", \"tomorrow\") — pass that "
             "straight into the tool's date argument; the app resolves the exact date. "
             "Omit the date for the day on screen.\n\n"
-            "ACTIVITY TYPES (use the id in a block's \"type\" field; pick the best fit):\n"
-            f"  {types_line}\n\n"
+            "ACTIVITY TYPES — set each block's \"type\" to what the user will actually be "
+            "DOING during it (judge by the activity itself, not the blocks around it):\n"
+            "  assignments – homework/tasks that are due (worksheets, problem sets)\n"
+            "  project     – longer-term project or build work\n"
+            "  study       – focused studying / revision / reading. ONLY for real studying.\n"
+            "  extra       – extracurriculars, clubs, lessons, social or other commitments\n"
+            "  gaming      – Anime/Gaming and general downtime/relaxation — USE THIS FOR BREAKS\n"
+            "  exercise    – workouts, sports, walks (also fine for an active break)\n"
+            "  meals       – eating: breakfast / lunch / dinner / snacks\n"
+            "  sleep       – sleeping or naps\n"
+            "TYPE RULES (the model often gets these wrong — follow them):\n"
+            "  - A BREAK or REST between work is downtime → use \"gaming\" (or \"exercise\" "
+            "for a physical break, \"meals\" for a snack). NEVER label a break as \"study\", "
+            "\"assignments\", or \"project\".\n"
+            "  - A break between two study blocks is still a break, NOT study — don't copy the "
+            "surrounding block's type onto it.\n"
+            "  - When you split a study block into chunks with breaks, the focus chunks are "
+            "\"study\" and the breaks are \"gaming\" (pass break_type to split_block).\n\n"
             "SCHEDULE (day on screen)\n"
             "Google Calendar (READ-ONLY — you cannot change these):\n")
         cal = ctx.get("cal_events", [])
@@ -3433,6 +3451,12 @@ class MainWindow(QMainWindow):
                     brk = max(0, int(args.get("break", 5)))
                 except (TypeError, ValueError):
                     brk = 5
+                # Breaks are downtime, not a continuation of the work block — give them their
+                # own category (default gaming = Anime/Gaming) instead of inheriting the type.
+                btid = str(args.get("break_type") or "gaming")
+                b_at = next((t for t in ACTIVITY_TYPES if t["id"] == btid), None)
+                if b_at is None:
+                    b_at = next((t for t in ACTIVITY_TYPES if t["id"] == "gaming"), ACTIVITY_TYPES[0])
                 s0, e0 = a["startMin"], a["endMin"]
                 segs, cur = [], s0
                 while cur < e0:
@@ -3456,10 +3480,10 @@ class MainWindow(QMainWindow):
                             "id": new_id(), "date": ds, "startMin": ss, "endMin": ee,
                             "type": a["type"], "color": a["color"],
                             "title": f"{a['title']} ({ci})"})
-                    else:   # breaks stay part of the same session (same type/colour)
+                    else:   # breaks are downtime — their own category, not the work block's
                         self._all_acts.append({
                             "id": new_id(), "date": ds, "startMin": ss, "endMin": ee,
-                            "type": a["type"], "color": a["color"], "title": "Break"})
+                            "type": b_at["id"], "color": b_at["color"], "title": "Break"})
                 save_all_activities(self._all_acts)
                 self._refresh_view()
                 return (f"Split '{a['title']}' into {n_chunks} × {chunk}-min chunks"
