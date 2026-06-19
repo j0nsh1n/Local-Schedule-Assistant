@@ -1087,7 +1087,7 @@ class TimelineWidget(QWidget):
     activity_edit_req   = Signal(str)        # activity id — open the edit dialog
     activity_changed    = Signal(str, int, int)  # id, new_start, new_end (drag move/resize)
 
-    SNAP   = 15   # minutes — selection snaps to this grid (like Google Calendar)
+    SNAP   = 5    # minutes — drag/resize snaps to this grid (5-min precision)
     EDGE_PX = 7   # pixels near a block's top/bottom that trigger resize
 
     def __init__(self, parent=None):
@@ -1228,7 +1228,10 @@ class TimelineWidget(QWidget):
         out = []
         for blk in self._assign_cols(self._all_blocks()):
             y  = min_to_y(blk["startMin"])
-            h  = max(min_to_y(blk["endMin"]) - y, 20)
+            # Floor must stay <= the height of the shortest real block (a 5-min break is
+            # 8px) so short blocks never overrun the next one. 20px caused breaks to
+            # visually overlap the following study block.
+            h  = max(min_to_y(blk["endMin"]) - y, 6)
             cw = area_w / blk["_tcols"]
             x  = int(GUTTER_W + 4 + blk["_col"] * cw)
             w  = int(cw - 4)
@@ -1251,7 +1254,7 @@ class TimelineWidget(QWidget):
             # apply live drag preview to the block being moved/resized
             if self._preview and blk.get("_btype") == "user" and blk["id"] == self._preview[0]:
                 ps, pe = self._preview[1], self._preview[2]
-                y = min_to_y(ps); h = max(min_to_y(pe) - y, 20)
+                y = min_to_y(ps); h = max(min_to_y(pe) - y, 6)
                 rect = QRect(rect.x(), y, rect.width(), h)
                 blk  = {**blk, "startMin": ps, "endMin": pe}
 
@@ -3010,12 +3013,17 @@ class MainWindow(QMainWindow):
             acts   = self._day_acts()
             self._timeline.set_data(cal_ev, acts, d)
             self._sidebar.update_summary(cal_ev, acts)
-            if d == date.today():
-                now_min = datetime.now().hour * 60 + datetime.now().minute
-                y = max(0, min_to_y(max(now_min - 60, DAY_START)))
-            else:
-                y = 0
-            QTimer.singleShot(50, lambda: self._scroll.verticalScrollBar().setValue(y))
+            # Only re-center the timeline when the shown day actually changes (initial
+            # load or navigation). On an in-place refresh — an edit, drag, or calendar
+            # fetch — keep the user's scroll position instead of jumping back to now/top.
+            if getattr(self, "_last_day_shown", None) != d:
+                self._last_day_shown = d
+                if d == date.today():
+                    now_min = datetime.now().hour * 60 + datetime.now().minute
+                    y = max(0, min_to_y(max(now_min - 60, DAY_START)))
+                else:
+                    y = 0
+                QTimer.singleShot(50, lambda: self._scroll.verticalScrollBar().setValue(y))
         elif self._view == "month":
             self._date_lbl.setText(d.strftime("%B %Y"))
             ev: Dict[str, List[Dict]] = {}
