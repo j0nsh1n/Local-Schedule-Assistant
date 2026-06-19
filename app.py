@@ -34,7 +34,7 @@ from PySide6.QtGui import (
 )
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.1.0"
+__version__  = "2.1.1"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
