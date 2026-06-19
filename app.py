@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QTextEdit, QScrollArea, QFrame,
     QDialog, QFileDialog, QTimeEdit, QStackedWidget, QSizePolicy,
     QMessageBox, QMenu, QGridLayout, QProgressBar, QSystemTrayIcon,
+    QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox, QFormLayout,
 )
 from PySide6.QtCore import (
     Qt, QTimer, QThread, Signal, QRect, QTime,
@@ -33,7 +34,7 @@ from PySide6.QtGui import (
 )
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "1.1.2"
+__version__  = "2.0.0"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -52,18 +53,78 @@ HOUR_PX     = 96                  # pixels per hour on timeline (scrolls; center
 GUTTER_W    = 64                  # width of time-label column
 OLLAMA_URL  = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5:14b"     # better at tool-use/reasoning than llama3.1:8b
+# Curated picks that fit a 16 GB GPU and are strong at tool-calling (this app is
+# tool-heavy). Shown in the model picker alongside whatever `ollama list` reports.
+RECOMMENDED_MODELS = ["qwen3:14b", "gpt-oss:20b", "deepseek-r1:14b", "qwen2.5:14b"]
 
-# ── Colour palette (matches original dark theme) ───────────────────────────
-C_BG      = QColor("#0d0d14")
-C_SURFACE = QColor("#15151f")
-C_SURF2   = QColor("#1c1c2a")
-C_BORDER  = QColor("#262636")
-C_BORDER2 = QColor("#2f2f45")
-C_TEXT    = QColor("#e4e4f0")
-C_MUTED   = QColor("#7a7a9a")
-C_ACCENT  = QColor("#7c6ff7")
-C_ACCENT2 = QColor("#5c56c4")
-C_NOW     = QColor("#f43f5e")
+# ── Theme system ───────────────────────────────────────────────────────────
+# Two built-in themes, chosen in Settings and applied at startup. Every piece of
+# chrome reads its colour from the C_* globals below, so re-pointing them with
+# apply_theme() re-themes the whole app. Category colours (ACTIVITY_TYPES) are
+# deliberately theme-independent. Corners are driven by RAD / RAD_LG (sharp by
+# design — a small radius, or 0 for fully square).
+THEMES = {
+    "nocturne": {   # high-contrast dark, fully square corners
+        "label": "Nocturne — dark",
+        "bg": "#0a0a0b", "surface": "#141416", "surf2": "#1c1c20",
+        "border": "#2b2b2f", "border2": "#3a3a40",
+        "text": "#f5f5f6", "muted": "#8a8a92",
+        "accent": "#e0a93b", "accent2": "#b9852a", "on_accent": "#0a0a0b",
+        "now": "#e5564b", "grid": "#1e1e22", "ghost": "#3a3a40",
+        "ok": "#5fb87a", "ok_txt": "#8fd9a3", "err": "#e5564b", "err_txt": "#f0938c",
+        "warn": "#e0a93b", "info": "#6f9bd9",
+        "rad": 0, "rad_lg": 0, "mono": True,
+    },
+    "slate": {      # cool enterprise light, crisp corners
+        "label": "Slate — light",
+        "bg": "#f6f7f9", "surface": "#ffffff", "surf2": "#f0f2f5",
+        "border": "#e3e6eb", "border2": "#d2d7de",
+        "text": "#1a2430", "muted": "#6a737d",
+        "accent": "#2563eb", "accent2": "#1d4fd0", "on_accent": "#ffffff",
+        "now": "#e2574c", "grid": "#eceef2", "ghost": "#c4cbd4",
+        "ok": "#2ba37e", "ok_txt": "#1e7a5e", "err": "#dc2626", "err_txt": "#b91c1c",
+        "warn": "#d97706", "info": "#2563eb",
+        "rad": 3, "rad_lg": 4, "mono": False,
+    },
+}
+DEFAULT_THEME = "nocturne"
+
+# Chrome colour globals — (re)assigned by apply_theme(); initialised at import.
+C_BG = C_SURFACE = C_SURF2 = C_BORDER = C_BORDER2 = None
+C_TEXT = C_MUTED = C_ACCENT = C_ACCENT2 = C_ON_ACCENT = C_NOW = None
+C_GRID = C_GHOST = C_OK = C_OK_TXT = C_ERR = C_ERR_TXT = C_WARN = C_INFO = None
+RAD = RAD_LG = 0
+THEME_MONO = False
+THEME_NAME = DEFAULT_THEME
+
+def _rgba(color, alpha) -> str:
+    """'rgba(r,g,b,a)' from a QColor (or hex) + 0..1 alpha — for hover/fill tints
+    that must follow the active theme."""
+    c = color if isinstance(color, QColor) else QColor(color)
+    return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
+
+def apply_theme(name: str):
+    """Point every C_* global at the named theme. Call before building the UI."""
+    global C_BG, C_SURFACE, C_SURF2, C_BORDER, C_BORDER2, C_TEXT, C_MUTED
+    global C_ACCENT, C_ACCENT2, C_ON_ACCENT, C_NOW, C_GRID, C_GHOST
+    global C_OK, C_OK_TXT, C_ERR, C_ERR_TXT, C_WARN, C_INFO
+    global RAD, RAD_LG, THEME_MONO, THEME_NAME
+    THEME_NAME = name if name in THEMES else DEFAULT_THEME
+    t = THEMES[THEME_NAME]
+    C_BG        = QColor(t["bg"]);        C_SURFACE   = QColor(t["surface"])
+    C_SURF2     = QColor(t["surf2"]);     C_BORDER    = QColor(t["border"])
+    C_BORDER2   = QColor(t["border2"]);   C_TEXT      = QColor(t["text"])
+    C_MUTED     = QColor(t["muted"]);     C_ACCENT    = QColor(t["accent"])
+    C_ACCENT2   = QColor(t["accent2"]);   C_ON_ACCENT = QColor(t["on_accent"])
+    C_NOW       = QColor(t["now"]);       C_GRID      = QColor(t["grid"])
+    C_GHOST     = QColor(t["ghost"])
+    C_OK        = QColor(t["ok"]);        C_OK_TXT    = QColor(t["ok_txt"])
+    C_ERR       = QColor(t["err"]);       C_ERR_TXT   = QColor(t["err_txt"])
+    C_WARN      = QColor(t["warn"]);      C_INFO      = QColor(t["info"])
+    RAD         = t["rad"];               RAD_LG      = t["rad_lg"]
+    THEME_MONO  = t["mono"]
+
+apply_theme(DEFAULT_THEME)
 
 # ── Activity types ─────────────────────────────────────────────────────────
 ACTIVITY_TYPES = [
@@ -128,6 +189,39 @@ def load_all_activities() -> List[Dict]:
 def save_all_activities(acts: List[Dict]) -> None:
     try:
         DATA_FILE.write_text(json.dumps(acts, indent=2))
+    except Exception:
+        pass
+
+# ── Settings (persisted to ~/.daily-scheduler/settings.json) ────────────────
+# Replaces the old behaviour where model / notify / DND reset to defaults every
+# launch (only "Start with Windows" survived, via its Startup-folder .lnk).
+SETTINGS_FILE = DATA_DIR / "settings.json"
+DEFAULT_SETTINGS = {
+    "theme":            DEFAULT_THEME,
+    "model":            DEFAULT_MODEL,
+    "notify_on":        True,
+    "notify_lead_min":  0,        # alert this many minutes before a block starts (0 = at start)
+    "dnd_override":     True,
+    "plan_day_start":   "08:00",  # default waking window the planner schedules within
+    "plan_day_end":     "22:00",
+    "ollama_autostart": False,    # keep Ollama off at launch unless the user opts in
+    "temperature":      0.3,
+    "num_ctx":          16384,
+}
+
+def load_settings() -> Dict:
+    s = dict(DEFAULT_SETTINGS)
+    try:
+        data = json.loads(SETTINGS_FILE.read_text())
+        if isinstance(data, dict):
+            s.update({k: v for k, v in data.items() if k in DEFAULT_SETTINGS})
+    except Exception:
+        pass
+    return s
+
+def save_settings(s: Dict) -> None:
+    try:
+        SETTINGS_FILE.write_text(json.dumps(s, indent=2))
     except Exception:
         pass
 
@@ -335,7 +429,7 @@ class CalFetchThread(QThread):
                     by_date.setdefault(s.date().isoformat(), []).append({
                         "id": ev.get("id", new_id()), "title": ev.get("summary", "(no title)"),
                         "startMin": sm, "endMin": em, "type": "calendar",
-                        "color": "#3b82f6", "date": s.date().isoformat(),
+                        "color": C_INFO.name(), "date": s.date().isoformat(),
                     })
                 page = res.get("nextPageToken")
                 if not page:
@@ -470,6 +564,32 @@ def set_startup(enabled: bool) -> bool:
         return False
 
 
+def list_ollama_models() -> List[str]:
+    """Installed model tags via `ollama list` (best-effort; [] on any failure).
+    Used to populate the model picker alongside the curated RECOMMENDED_MODELS."""
+    try:
+        flags = 0x08000000 if platform.system() == "Windows" else 0   # CREATE_NO_WINDOW
+        out = subprocess.run(["ollama", "list"], capture_output=True, text=True,
+                             timeout=5, creationflags=flags)
+        names = []
+        for ln in out.stdout.splitlines()[1:]:   # skip the header row
+            parts = ln.split()
+            if parts and ":" in parts[0]:
+                names.append(parts[0])
+        return names
+    except Exception:
+        return []
+
+
+def strip_think(s: str) -> str:
+    """Remove reasoning-model chain-of-thought (<think>…</think>) from streamed
+    content. Drops complete blocks and any still-open trailing block, so DeepSeek-R1
+    style models don't dump their reasoning into the chat."""
+    s = re.sub(r"<think>.*?</think>", "", s, flags=re.S)
+    i = s.find("<think>")
+    return s[:i] if i != -1 else s
+
+
 def unload_ollama_model(model):
     """Unload a model from memory but keep the Ollama server running.
     Uses keep_alive=0, the documented way to free VRAM/RAM immediately."""
@@ -504,19 +624,22 @@ class OllamaThread(QThread):
     tool_calls = Signal(list)
     error      = Signal(str)
 
-    def __init__(self, messages, model, tools=None):
+    def __init__(self, messages, model, tools=None, num_ctx=16384, temperature=0.3):
         super().__init__()
-        self.messages = messages
-        self.model    = model
-        self.tools    = tools
-        self._stop    = False
+        self.messages    = messages
+        self.model       = model
+        self.tools       = tools
+        self.num_ctx     = num_ctx
+        self.temperature = temperature
+        self._stop       = False
 
     def stop(self): self._stop = True
 
     def run(self):
         try:
             payload = {"model": self.model, "messages": self.messages, "stream": True,
-                       "options": {"num_ctx": 16384, "temperature": 0.3, "top_p": 0.9}}
+                       "options": {"num_ctx": self.num_ctx,
+                                   "temperature": self.temperature, "top_p": 0.9}}
             if self.tools:
                 payload["tools"] = self.tools
             resp = requests.post(
@@ -539,6 +662,7 @@ class OllamaThread(QThread):
                 return
             resp.raise_for_status()
             calls = []
+            raw, sent = "", 0          # raw = full content; sent = chars already emitted
             for line in resp.iter_lines():
                 if self._stop: break
                 if not line: continue
@@ -546,7 +670,11 @@ class OllamaThread(QThread):
                     data = json.loads(line)
                     msg  = data.get("message") or {}
                     c    = msg.get("content", "")
-                    if c: self.token.emit(c)
+                    if c:                       # strip <think> reasoning, emit only the delta
+                        raw += c
+                        vis = strip_think(raw)
+                        if len(vis) > sent:
+                            self.token.emit(vis[sent:]); sent = len(vis)
                     if msg.get("tool_calls"):
                         calls.extend(msg["tool_calls"])
                     if data.get("done"): break
@@ -618,6 +746,7 @@ AI_TOOLS = [
         "parameters": {"type": "object", "properties": {
             "date":    {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
             "minutes": {"type": "integer", "description": "Offset in minutes. Positive = later, negative = earlier (120 = 2 hours later)."},
+            "hours":   {"type": "integer", "description": "Optional whole-hour offset, added to 'minutes' (hours=2 → 120 min later). Use either field."},
         }, "required": ["minutes"]}}},
     {"type": "function", "function": {
         "name": "replace_day",
@@ -702,7 +831,7 @@ AI_TOOLS = [
                        "tasks get earlier slots.",
         "parameters": {"type": "object", "properties": {
             "date":      {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
-            "day_start": {"type": "string", "description": "Earliest time to schedule (24h HH:MM, default 08:00)."},
+            "day_start": {"type": "string", "description": "Earliest time to schedule (24h HH:MM). Defaults to the user's waking-hours start (and not earlier than now when planning today)."},
             "day_end":   {"type": "string", "description": "Latest time to schedule (24h HH:MM, default 22:00)."},
             "tasks": {"type": "array", "description": "Tasks to place, in any order.",
                 "items": {"type": "object", "properties": {
@@ -714,6 +843,42 @@ AI_TOOLS = [
                     "prefer":   {"type": "string", "description": "Preferred time: 'morning'/'afternoon'/'evening' or a time like '15:00'. Optional."},
                 }, "required": ["title", "minutes"]}},
         }, "required": ["tasks"]}}},
+    {"type": "function", "function": {
+        "name": "reflow_from_now",
+        "description": "\"I'm running late\" — push the blocks still to come on a day later "
+                       "(or earlier) by an offset, leaving past/ongoing blocks alone. Use when "
+                       "the user has fallen behind and wants the rest of the day shifted.",
+        "parameters": {"type": "object", "properties": {
+            "date":    {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
+            "minutes": {"type": "integer", "description": "How far to push upcoming blocks. Positive = later (running behind), negative = earlier (ahead)."},
+            "from":    {"type": "string", "description": "Only move blocks starting at/after this time (24h HH:MM). Default: the current time when the day is today, else the start of the day."},
+        }, "required": ["minutes"]}}},
+    {"type": "function", "function": {
+        "name": "plan_for_deadline",
+        "description": "Spread work for a deadline across the days leading up to it. Give the "
+                       "total time the job needs and (optionally) a session length; the app "
+                       "places one focus session per day into free time across the days before "
+                       "the deadline, never overlapping existing blocks. Use for 'study 4 hours "
+                       "before Friday's exam' or 'plan my essay over the week'. Idempotent — "
+                       "re-running doesn't duplicate sessions already placed.",
+        "parameters": {"type": "object", "properties": {
+            "title":    {"type": "string", "description": "What the work is (e.g. 'Study for chem exam')."},
+            "deadline": {"type": "string", "description": "Due date YYYY-MM-DD, or words like 'friday' / '6/20'."},
+            "minutes":  {"type": "integer", "description": "Total time the whole job needs, in minutes."},
+            "session":  {"type": "integer", "description": "Length of each daily focus session in minutes (default 60)."},
+            "type":     {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES], "description": "Activity category (default study)."},
+            "start_date": {"type": "string", "description": "First day to start from (YYYY-MM-DD; default today)."},
+        }, "required": ["title", "deadline", "minutes"]}}},
+    {"type": "function", "function": {
+        "name": "week_summary",
+        "description": "Read-only: total time per category over a date range (default the week "
+                       "containing the viewed day), with a per-day average. Use to answer 'how "
+                       "much sleep/study/exercise did I get this week?' and to spot balance "
+                       "problems. Modifies nothing.",
+        "parameters": {"type": "object", "properties": {
+            "start": {"type": "string", "description": "Range start (YYYY-MM-DD or words). Omit for the start of the viewed week."},
+            "end":   {"type": "string", "description": "Range end (YYYY-MM-DD or words). Omit for the end of the viewed week."},
+        }}}},
 ]
 
 AI_TOOL_NAMES = {t["function"]["name"] for t in AI_TOOLS}
@@ -791,6 +956,128 @@ AI_GREETING = (
     "What would you like to do with your day?"
 )
 
+# ── Per-model prompt tuning ─────────────────────────────────────────────────
+# Each local model has different failure modes on this tool-heavy task. The base
+# system prompt is the same for all; model_guidance() appends an extensively
+# detailed, model-specific addendum that targets that family's known weaknesses.
+# Common thread: emit NATIVE tool calls (not prose, not printed JSON), use the
+# correct single bulk tool, keep exact argument shapes, and verify with list_blocks.
+
+_R1_GUIDANCE = (
+    "\n\n══ MODEL-SPECIFIC INSTRUCTIONS — DeepSeek-R1 (reasoning model) ══\n"
+    "Your private chain-of-thought is HIDDEN from the user and is stripped out before "
+    "anything is shown. Reasoning therefore changes NOTHING on its own — only tool calls "
+    "do. Obey these rules exactly:\n"
+    "1. THINK BRIEFLY, THEN ACT. Do a short reasoning pass, then stop and act. Do not loop "
+    "or re-derive the whole day repeatedly; long reasoning wastes the context window.\n"
+    "2. A TOOL CALL IS MANDATORY for any request to add / move / delete / rename / clear / "
+    "shift / copy / split / plan / replace. Writing 'I will add…', 'You could…', or showing "
+    "the finished schedule as text DOES NOTHING. If you catch yourself describing the change "
+    "in prose, STOP and emit the tool call instead.\n"
+    "3. USE THE NATIVE FUNCTION-CALL CHANNEL. Never print the call as text, as a JSON object, "
+    "as an array, or inside ``` fences. If — and only if — your runtime truly cannot call "
+    "functions, output ONE single JSON object {\"name\":\"<tool>\",\"arguments\":{…}} and "
+    "absolutely nothing else (no prose, no fences, no <think> around it).\n"
+    "4. EXACT ARGUMENT SHAPES (R1 is the most likely to get these wrong):\n"
+    "   • Times are STRINGS in 24-hour zero-padded 'HH:MM' — '09:00', '14:30', not '9', "
+    "'9am', or 900.\n"
+    "   • Dates are 'YYYY-MM-DD', or pass the user's own words ('6/14', 'tomorrow', "
+    "'monday'); NEVER invent or change the year.\n"
+    "   • schedule_tasks → 'tasks' is an ARRAY of objects, each at least {\"title\":str, "
+    "\"minutes\":int}; optional \"type\", \"priority\" (high/normal/low), \"prefer\".\n"
+    "   • replace_day → 'blocks' is an ARRAY of {\"start\",\"end\",\"title\",\"type\"}.\n"
+    "5. ONE TOOL CALL PER STEP. After each call, READ the result text that comes back, then "
+    "decide the next step. When done editing, call list_blocks ONCE to verify, fix anything "
+    "wrong, then write ONE short confirmation sentence.\n"
+    "6. NEVER chain many add_block calls for a bulk job — use the single matching bulk tool "
+    "(schedule_tasks, replace_day, shift_blocks, clear_day, copy_day, add_recurring).\n"
+    "7. If genuinely ambiguous, ask ONE short question. But if the user named a time, target "
+    "that block with 'at' = its start time; don't ask.\n"
+)
+
+_GPTOSS_GUIDANCE = (
+    "\n\n══ MODEL-SPECIFIC INSTRUCTIONS — gpt-oss ══\n"
+    "1. ACT, DON'T NARRATE. The moment the user asks for a schedule change, call the matching "
+    "tool. Do NOT first write an analysis, a numbered plan, or 'Here's what I'll do' — the "
+    "tool call IS the action. Keep all reasoning short and low-effort; this is simple "
+    "scheduling, not a puzzle.\n"
+    "2. NATIVE TOOL CALLS ONLY. Use the function-calling channel. Never emit the call as "
+    "prose, as printed JSON, or inside a code block, and never narrate it in an analysis "
+    "channel.\n"
+    "3. ONE BEST TOOL PER REQUEST. For whole-day or bulk changes use the bulk tool "
+    "(schedule_tasks to plan, replace_day to rebuild, shift_blocks to move everything, "
+    "clear_day/clear_range to wipe, copy_day to duplicate, add_recurring to repeat) — never "
+    "a sequence of single add_block calls.\n"
+    "4. EXACT SHAPES. Times = 24-hour 'HH:MM' strings; dates = 'YYYY-MM-DD' or the user's "
+    "words (never invent the year). schedule_tasks.tasks and replace_day.blocks are JSON "
+    "arrays of objects with the required keys.\n"
+    "5. After multi-step edits, verify ONCE with list_blocks, fix if needed, then confirm in "
+    "a single sentence — do not restate the whole schedule.\n"
+)
+
+_QWEN3_GUIDANCE = (
+    "\n\n══ MODEL-SPECIFIC INSTRUCTIONS — Qwen3 ══\n"
+    "Your tool-calling is strong — use it decisively and avoid over-thinking.\n"
+    "1. DECIDE QUICKLY. This is a straightforward scheduling assistant; don't enumerate many "
+    "alternatives or second-guess. Keep any thinking brief, then call the tool.\n"
+    "2. A TOOL CALL IS REQUIRED for every add / move / delete / rename / clear / shift / "
+    "copy / split / plan / replace request — never just describe the change in words.\n"
+    "3. ONE TOOL FOR BULK JOBS: schedule_tasks to plan, replace_day to rebuild from scratch, "
+    "shift_blocks to move the whole day, add_recurring for repeats. Don't chain single "
+    "add_block calls.\n"
+    "4. EXACT SHAPES. Times = zero-padded 24-hour 'HH:MM' strings; dates = 'YYYY-MM-DD' or "
+    "the user's words (never invent the year). schedule_tasks.tasks and replace_day.blocks "
+    "are arrays of objects.\n"
+    "5. Verify with list_blocks after multi-step edits, fix anything wrong, then confirm in "
+    "one short sentence.\n"
+)
+
+_QWEN25_GUIDANCE = (
+    "\n\n══ MODEL-SPECIFIC INSTRUCTIONS — Qwen2.5 ══\n"
+    "1. ALWAYS CALL A TOOL for any schedule change (add / move / delete / rename / clear / "
+    "shift / copy / split / plan / replace). Prose alone changes nothing — the calendar only "
+    "updates through tool calls.\n"
+    "2. NATIVE CHANNEL ONLY. Use the function-calling interface; do not print the call as "
+    "text, JSON, an array, or inside ``` fences.\n"
+    "3. ONE TOOL PER JOB. For bulk or whole-day work use schedule_tasks / replace_day / "
+    "shift_blocks / clear_day / copy_day / add_recurring instead of repeated add_block "
+    "calls.\n"
+    "4. EXACT SHAPES. Times = 24-hour 'HH:MM' strings; dates = 'YYYY-MM-DD' or the user's "
+    "words (never invent the year). schedule_tasks.tasks and replace_day.blocks are arrays "
+    "of objects.\n"
+    "5. Be concise: after verifying with list_blocks, confirm in one short sentence — don't "
+    "restate the whole schedule.\n"
+)
+
+_GENERIC_GUIDANCE = (
+    "\n\n══ MODEL-SPECIFIC INSTRUCTIONS ══\n"
+    "1. ALWAYS call the matching tool for any schedule change; never only describe it.\n"
+    "2. Prefer the native tool-calling channel. If your runtime cannot call functions, emit "
+    "ONE single JSON object {\"name\":\"<tool>\",\"arguments\":{…}} and nothing else — no "
+    "prose, no code fences.\n"
+    "3. Use ONE tool for bulk jobs (schedule_tasks / replace_day / shift_blocks / clear_day / "
+    "copy_day / add_recurring); never chain single add_block calls.\n"
+    "4. EXACT SHAPES. Times = 24-hour 'HH:MM' strings; dates = 'YYYY-MM-DD' or the user's "
+    "words (never invent the year). schedule_tasks.tasks and replace_day.blocks are arrays "
+    "of objects.\n"
+    "5. Verify with list_blocks after multi-step edits, then confirm in one short sentence.\n"
+)
+
+def model_guidance(model: str) -> str:
+    """Extensively detailed, model-specific addendum to the system prompt, chosen by
+    matching the model tag. Targets each family's known weaknesses on this tool-heavy
+    scheduling task."""
+    m = (model or "").lower()
+    if "deepseek" in m or "r1" in m:
+        return _R1_GUIDANCE
+    if "gpt-oss" in m or "gpt_oss" in m or "gptoss" in m:
+        return _GPTOSS_GUIDANCE
+    if "qwen3" in m:
+        return _QWEN3_GUIDANCE
+    if "qwen2" in m or "qwen-2" in m or "qwen2.5" in m:
+        return _QWEN25_GUIDANCE
+    return _GENERIC_GUIDANCE
+
 # ══════════════════════════════════════════════════════════════════════════
 #  TIMELINE WIDGET  (custom-painted — pure Qt, no browser)
 # ══════════════════════════════════════════════════════════════════════════
@@ -800,7 +1087,7 @@ class TimelineWidget(QWidget):
     activity_edit_req   = Signal(str)        # activity id — open the edit dialog
     activity_changed    = Signal(str, int, int)  # id, new_start, new_end (drag move/resize)
 
-    SNAP   = 15   # minutes — selection snaps to this grid (like Google Calendar)
+    SNAP   = 5    # minutes — drag/resize snaps to this grid (5-min precision)
     EDGE_PX = 7   # pixels near a block's top/bottom that trigger resize
 
     def __init__(self, parent=None):
@@ -880,7 +1167,7 @@ class TimelineWidget(QWidget):
             p.drawLine(GUTTER_W, y, self.width(), y)
             if h < DAY_END_H:
                 yh = min_to_y(h * 60 + 30)
-                pen = QPen(QColor("#1e1e2e"), 1, Qt.DashLine)
+                pen = QPen(C_GRID, 1, Qt.DashLine)
                 p.setPen(pen)
                 p.drawLine(GUTTER_W, yh, self.width(), yh)
             lbl = f"{h:02d}:00"
@@ -924,11 +1211,12 @@ class TimelineWidget(QWidget):
         x = GUTTER_W + 4
         w = self.width() - GUTTER_W - 8
         rect = QRect(x, y, w, h)
-        p.fillRect(rect, QColor(124, 111, 247, 60))
+        fill = QColor(C_ACCENT); fill.setAlpha(60)
+        p.fillRect(rect, fill)
         p.setPen(QPen(C_ACCENT, 1.5))
         p.setBrush(Qt.NoBrush)
         p.drawRect(rect)
-        p.setPen(QColor("white"))
+        p.setPen(C_TEXT)
         p.setFont(QFont("Segoe UI", 9, QFont.Bold))
         p.drawText(rect.adjusted(10, 4, -8, -4), Qt.AlignTop | Qt.AlignLeft,
                    f"{fmt_time(s)} – {fmt_time(e)}  ·  {fmt_dur(e - s)}")
@@ -940,7 +1228,10 @@ class TimelineWidget(QWidget):
         out = []
         for blk in self._assign_cols(self._all_blocks()):
             y  = min_to_y(blk["startMin"])
-            h  = max(min_to_y(blk["endMin"]) - y, 20)
+            # Floor must stay <= the height of the shortest real block (a 5-min break is
+            # 8px) so short blocks never overrun the next one. 20px caused breaks to
+            # visually overlap the following study block.
+            h  = max(min_to_y(blk["endMin"]) - y, 6)
             cw = area_w / blk["_tcols"]
             x  = int(GUTTER_W + 4 + blk["_col"] * cw)
             w  = int(cw - 4)
@@ -963,14 +1254,14 @@ class TimelineWidget(QWidget):
             # apply live drag preview to the block being moved/resized
             if self._preview and blk.get("_btype") == "user" and blk["id"] == self._preview[0]:
                 ps, pe = self._preview[1], self._preview[2]
-                y = min_to_y(ps); h = max(min_to_y(pe) - y, 20)
+                y = min_to_y(ps); h = max(min_to_y(pe) - y, 6)
                 rect = QRect(rect.x(), y, rect.width(), h)
                 blk  = {**blk, "startMin": ps, "endMin": pe}
 
             dur  = blk["endMin"] - blk["startMin"]
             x, y, h = rect.x(), rect.y(), rect.height()
 
-            c    = QColor(blk.get("color", "#7c6ff7"))
+            c    = QColor(blk.get("color") or C_ACCENT.name())
             bg   = QColor(c.red(), c.green(), c.blue(), 45)
 
             p.fillRect(rect, bg)
@@ -1138,7 +1429,7 @@ class TimelineWidget(QWidget):
         menu.setStyleSheet(f"""
             QMenu {{ background: {C_SURFACE.name()}; color: {C_TEXT.name()};
                      border: 1px solid {C_BORDER2.name()}; padding: 4px; }}
-            QMenu::item {{ padding: 6px 14px; border-radius: 4px; }}
+            QMenu::item {{ padding: 6px 14px; border-radius: {RAD}px; }}
             QMenu::item:selected {{ background: {C_SURF2.name()}; }}
         """)
         edit_act = menu.addAction(f"✏  Edit '{act['title']}'…")
@@ -1180,7 +1471,7 @@ class AddActivityDialog(QDialog):
             QLabel    {{ background: transparent; color: {C_TEXT.name()}; }}
             QTimeEdit, QLineEdit {{
                 background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-                color: {C_TEXT.name()}; padding: 7px 10px; border-radius: 6px;
+                color: {C_TEXT.name()}; padding: 7px 10px; border-radius: {RAD}px;
             }}
             QTimeEdit:focus, QLineEdit:focus {{ border-color: {C_ACCENT.name()}; }}
         """)
@@ -1236,24 +1527,24 @@ class AddActivityDialog(QDialog):
         cancel = QPushButton("Cancel")
         cancel.setStyleSheet(f"""
             QPushButton {{ background: transparent; border: 1px solid {C_BORDER.name()};
-            color: {C_MUTED.name()}; padding: 8px 16px; border-radius: 7px; }}
+            color: {C_MUTED.name()}; padding: 8px 16px; border-radius: {RAD}px; }}
             QPushButton:hover {{ color: {C_TEXT.name()}; border-color: {C_BORDER2.name()}; }}
         """)
         cancel.clicked.connect(self.reject)
         if is_edit:
             delete = QPushButton("Delete")
-            delete.setStyleSheet("""
-                QPushButton { background: transparent; border: 1px solid rgba(239,68,68,.4);
-                color: #fca5a5; padding: 8px 16px; border-radius: 7px; }
-                QPushButton:hover { background: rgba(239,68,68,.15); border-color: #ef4444; }
+            delete.setStyleSheet(f"""
+                QPushButton {{ background: transparent; border: 1px solid {_rgba(C_ERR, .5)};
+                color: {C_ERR_TXT.name()}; padding: 8px 16px; border-radius: {RAD}px; }}
+                QPushButton:hover {{ background: {_rgba(C_ERR, .15)}; border-color: {C_ERR.name()}; }}
             """)
             delete.clicked.connect(self._delete)
             brow.addWidget(delete)
         brow.addStretch()
         save = QPushButton("Save Changes" if is_edit else "Add to Schedule")
         save.setStyleSheet(f"""
-            QPushButton {{ background: {C_ACCENT.name()}; color: white; padding: 8px 16px;
-            border-radius: 7px; font-weight: bold; border: none; }}
+            QPushButton {{ background: {C_ACCENT.name()}; color: {C_ON_ACCENT.name()}; padding: 8px 16px;
+            border-radius: {RAD}px; font-weight: bold; border: none; }}
             QPushButton:hover {{ background: {C_ACCENT2.name()}; }}
         """)
         save.clicked.connect(self._save)
@@ -1264,13 +1555,13 @@ class AddActivityDialog(QDialog):
         c = at["color"]
         if selected:
             btn.setStyleSheet(f"""
-                QPushButton {{ background: {c}30; border: 1.5px solid {c}; color: white;
-                font-weight: bold; padding: 5px 4px; border-radius: 6px; font-size: 11px; }}
+                QPushButton {{ background: {c}30; border: 1.5px solid {c}; color: {C_TEXT.name()};
+                font-weight: bold; padding: 5px 4px; border-radius: {RAD}px; font-size: 11px; }}
             """)
         else:
             btn.setStyleSheet(f"""
                 QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-                color: {C_MUTED.name()}; padding: 5px 4px; border-radius: 6px; font-size: 11px; }}
+                color: {C_MUTED.name()}; padding: 5px 4px; border-radius: {RAD}px; font-size: 11px; }}
                 QPushButton:hover {{ border-color: {C_BORDER2.name()}; color: {C_TEXT.name()}; }}
             """)
 
@@ -1363,13 +1654,13 @@ class SidebarWidget(QWidget):
         c = at["color"]
         if selected:
             btn.setStyleSheet(f"""
-                QPushButton {{ background: {c}28; border: 1.5px solid {c}; color: white;
-                font-weight: bold; padding: 4px 5px; border-radius: 6px; font-size: 10px; }}
+                QPushButton {{ background: {c}28; border: 1.5px solid {c}; color: {C_TEXT.name()};
+                font-weight: bold; padding: 4px 5px; border-radius: {RAD}px; font-size: 10px; }}
             """)
         else:
             btn.setStyleSheet(f"""
                 QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-                color: {C_MUTED.name()}; padding: 4px 5px; border-radius: 6px; font-size: 10px; }}
+                color: {C_MUTED.name()}; padding: 4px 5px; border-radius: {RAD}px; font-size: 10px; }}
                 QPushButton:hover {{ border-color: {C_BORDER2.name()}; color: {C_TEXT.name()}; }}
             """)
 
@@ -1395,7 +1686,7 @@ class SidebarWidget(QWidget):
             totals[b["type"]] = totals.get(b["type"], 0) + (b["endMin"] - b["startMin"])
 
         cats = [
-            {"id": "calendar", "label": "Meetings", "color": "#3b82f6"},
+            {"id": "calendar", "label": "Meetings", "color": C_INFO.name()},
         ] + [{"id": t["id"], "label": t["label"], "color": t["color"]} for t in ACTIVITY_TYPES]
 
         for cat in cats:
@@ -1418,8 +1709,8 @@ class SidebarWidget(QWidget):
             bar.setRange(0, DAY_T)
             bar.setValue(mins)
             bar.setStyleSheet(f"""
-                QProgressBar {{ background: {C_BORDER.name()}; border-radius: 2px; border: none; }}
-                QProgressBar::chunk {{ background: {cat['color']}; border-radius: 2px; }}
+                QProgressBar {{ background: {C_BORDER.name()}; border-radius: {RAD}px; border: none; }}
+                QProgressBar::chunk {{ background: {cat['color']}; border-radius: {RAD}px; }}
             """)
             rl.addWidget(bar)
             self._sum_area.addWidget(row)
@@ -1481,9 +1772,9 @@ class MonthViewWidget(QWidget):
                 if d == today:
                     p.setBrush(C_ACCENT); p.setPen(Qt.NoPen)
                     p.drawEllipse(QRect(x + 5, y + 3, 20, 20))
-                    p.setPen(QColor("white"))
+                    p.setPen(C_ON_ACCENT)
                 else:
-                    p.setPen(C_TEXT if in_month else QColor("#3c3c52"))
+                    p.setPen(C_TEXT if in_month else C_GHOST)
                 p.setFont(fn_day)
                 p.drawText(QRect(x + 5, y + 3, 20, 20), Qt.AlignCenter, str(d.day))
 
@@ -1497,7 +1788,7 @@ class MonthViewWidget(QWidget):
                 for i, ev in enumerate(shown):
                     cy   = y + 27 + i * 17
                     chip = QRect(x + 4, int(cy), int(cw) - 8, 14)
-                    col  = QColor(ev.get("color", "#7c6ff7"))
+                    col  = QColor(ev.get("color") or C_ACCENT.name())
                     if not in_month:
                         col.setAlpha(120)
                     bg = QColor(col); bg.setAlpha(45)
@@ -1583,7 +1874,7 @@ class YearViewWidget(QWidget):
                     if d == today:
                         p.setBrush(C_ACCENT); p.setPen(Qt.NoPen)
                         p.drawEllipse(cell.center(), rad, rad)
-                        p.setPen(QColor("white"))
+                        p.setPen(C_ON_ACCENT)
                     elif d.isoformat() in self._busy:
                         bg = QColor(C_ACCENT); bg.setAlpha(55)
                         p.setBrush(bg); p.setPen(Qt.NoPen)
@@ -1608,7 +1899,10 @@ class AIPanel(QWidget):
     def __init__(self, get_ctx_fn, parent=None):
         super().__init__(parent)
         self.get_ctx    = get_ctx_fn
-        self.model      = DEFAULT_MODEL
+        self.model       = DEFAULT_MODEL
+        self.temperature = DEFAULT_SETTINGS["temperature"]
+        self.num_ctx     = DEFAULT_SETTINGS["num_ctx"]
+        self.on_model_edited = None       # set by MainWindow to persist model changes
         self.mode       = "chat"
         self.history: Dict[str, List[Dict]] = {
             "chat": [{"role": "assistant", "content": AI_GREETING}],
@@ -1631,7 +1925,7 @@ class AIPanel(QWidget):
         hl  = QVBoxLayout(hdr); hl.setContentsMargins(12,10,12,8); hl.setSpacing(6)
 
         tr = QHBoxLayout()
-        t  = QLabel("🤖 AI Assistant"); t.setStyleSheet("font-size: 13px; font-weight: bold;")
+        t  = QLabel("Assistant"); t.setStyleSheet("font-size: 13px; font-weight: bold;")
         tr.addWidget(t)
         self._dot = QLabel("●"); self._dot.setStyleSheet(f"color: {C_MUTED.name()};")
         self._stxt = QLabel("Checking…"); self._stxt.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 11px;")
@@ -1644,8 +1938,8 @@ class AIPanel(QWidget):
         self._unload_btn.setEnabled(False)
         self._unload_btn.setStyleSheet(f"""
             QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-            color: {C_MUTED.name()}; border-radius: 5px; font-size: 12px; }}
-            QPushButton:hover {{ background: rgba(124,111,247,.18); border-color: {C_ACCENT.name()}; color: {C_ACCENT.name()}; }}
+            color: {C_MUTED.name()}; border-radius: {RAD}px; font-size: 12px; }}
+            QPushButton:hover {{ background: {_rgba(C_ACCENT, .18)}; border-color: {C_ACCENT.name()}; color: {C_ACCENT.name()}; }}
             QPushButton:disabled {{ color: {C_BORDER2.name()}; border-color: {C_BORDER.name()}; }}
         """)
         self._unload_btn.clicked.connect(self._unload_model)
@@ -1661,15 +1955,18 @@ class AIPanel(QWidget):
 
         mr = QHBoxLayout()
         mr.addWidget(QLabel("Model:", styleSheet=f"color:{C_MUTED.name()}; font-size:10px;"))
-        self._model_in = QLineEdit(self.model)
+        self._model_in = QComboBox(); self._model_in.setEditable(True)
         self._model_in.setFixedHeight(24)
+        self._model_in.addItems(self._model_choices())
+        self._model_in.setCurrentText(self.model)
         self._model_in.setStyleSheet(f"""
-            QLineEdit {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-            color: {C_TEXT.name()}; padding: 3px 8px; border-radius: 5px; font-size: 11px; }}
+            QComboBox {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
+            color: {C_TEXT.name()}; padding: 2px 6px; border-radius: {RAD}px; font-size: 11px; }}
+            QComboBox QAbstractItemView {{ background: {C_SURFACE.name()}; color: {C_TEXT.name()};
+            selection-background-color: {C_SURF2.name()}; }}
         """)
-        self._model_in.editingFinished.connect(
-            lambda: setattr(self, "model", self._model_in.text().strip() or DEFAULT_MODEL))
-        mr.addWidget(self._model_in)
+        self._model_in.currentTextChanged.connect(self._on_model_changed)
+        mr.addWidget(self._model_in, 1)
         hl.addLayout(mr)
         lay.addWidget(hdr)
 
@@ -1677,7 +1974,7 @@ class AIPanel(QWidget):
         tabs = QWidget(); tabs.setStyleSheet(f"border-bottom: 1px solid {C_BORDER.name()};")
         tl   = QHBoxLayout(tabs); tl.setContentsMargins(0,0,0,0); tl.setSpacing(0)
         self._tabs = {}
-        for mode, lbl in [("chat","💬 Chat"), ("plan","📋 Plan"), ("suggest","✨ Analyze")]:
+        for mode, lbl in [("chat","Chat"), ("plan","Plan"), ("suggest","Analyze")]:
             b = QPushButton(lbl); b.setCheckable(True); b.setChecked(mode=="chat")
             b.setStyleSheet(self._tab_style(mode == "chat"))
             b.clicked.connect(lambda _, m=mode: self._set_mode(m))
@@ -1705,20 +2002,20 @@ class AIPanel(QWidget):
         self._inp.setPlaceholderText("Ask me anything about your day…")
         self._inp.setStyleSheet(f"""
             QTextEdit {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-            color: {C_TEXT.name()}; padding: 6px; border-radius: 6px; font-size: 12px; }}
+            color: {C_TEXT.name()}; padding: 6px; border-radius: {RAD}px; font-size: 12px; }}
             QTextEdit:focus {{ border-color: {C_ACCENT.name()}; }}
         """)
         il.addWidget(self._inp)
 
         br = QHBoxLayout()
         self._stop_btn = QPushButton("■ Stop")
-        self._stop_btn.setStyleSheet("background:rgba(239,68,68,.2); color:#fca5a5; border-radius:5px; padding:3px 10px;")
+        self._stop_btn.setStyleSheet(f"background:{_rgba(C_ERR, .2)}; color:{C_ERR_TXT.name()}; border-radius:{RAD}px; padding:3px 10px;")
         self._stop_btn.hide()
         self._stop_btn.clicked.connect(self._stop)
 
         send = QPushButton("Send ↑")
         send.setStyleSheet(f"""
-            QPushButton {{ background:{C_ACCENT.name()}; color:white; border-radius:6px;
+            QPushButton {{ background:{C_ACCENT.name()}; color:{C_ON_ACCENT.name()}; border-radius:{RAD}px;
             font-weight:bold; padding:5px 14px; border:none; }}
             QPushButton:hover {{ background:{C_ACCENT2.name()}; }}
         """)
@@ -1730,6 +2027,27 @@ class AIPanel(QWidget):
         self._render()
         self._poll_ollama()
         self._timer = QTimer(self); self._timer.timeout.connect(self._poll_ollama); self._timer.start(30_000)
+
+    def _model_choices(self):
+        seen, out = set(), []
+        for m in list_ollama_models() + RECOMMENDED_MODELS:
+            if m and m not in seen:
+                seen.add(m); out.append(m)
+        return out
+
+    def _on_model_changed(self, text):
+        self.model = text.strip() or DEFAULT_MODEL
+        if callable(self.on_model_edited):
+            self.on_model_edited(self.model)
+
+    def apply_settings(self, s):
+        """Apply persisted AI settings — on launch and after the Settings dialog."""
+        self.model       = s.get("model", DEFAULT_MODEL)
+        self.temperature = float(s.get("temperature", 0.3))
+        self.num_ctx     = int(s.get("num_ctx", 16384))
+        self._model_in.blockSignals(True)
+        self._model_in.setCurrentText(self.model)
+        self._model_in.blockSignals(False)
 
     def _tab_style(self, active):
         return (f"QPushButton {{ background:transparent; border:none; border-bottom:2px solid {C_ACCENT.name()};"
@@ -1745,7 +2063,7 @@ class AIPanel(QWidget):
 
     def _on_ollama(self, ok: bool):
         self._ollama_up = ok
-        self._dot.setStyleSheet(f"color: {'#10b981' if ok else '#ef4444'};")
+        self._dot.setStyleSheet(f"color: {(C_OK if ok else C_ERR).name()};")
         if not self._stxt.text().startswith("Starting"):
             self._stxt.setText("Connected" if ok else "Not running")
         self._set_power_state(ok)
@@ -1758,16 +2076,16 @@ class AIPanel(QWidget):
             self._power_btn.setToolTip("Stop Ollama (shuts down the local LLM server)")
             self._power_btn.setStyleSheet(f"""
                 QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-                color: {C_MUTED.name()}; border-radius: 5px; font-size: 13px; }}
-                QPushButton:hover {{ background: rgba(239,68,68,.18); border-color: #ef4444; color: #fca5a5; }}
+                color: {C_MUTED.name()}; border-radius: {RAD}px; font-size: 13px; }}
+                QPushButton:hover {{ background: {_rgba(C_ERR, .18)}; border-color: {C_ERR.name()}; color: {C_ERR_TXT.name()}; }}
             """)
         else:
             self._power_btn.setText("▶")
             self._power_btn.setToolTip("Start Ollama (launches the local LLM server)")
             self._power_btn.setStyleSheet(f"""
                 QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-                color: {C_MUTED.name()}; border-radius: 5px; font-size: 12px; }}
-                QPushButton:hover {{ background: rgba(16,185,129,.18); border-color: #10b981; color: #6ee7b7; }}
+                color: {C_MUTED.name()}; border-radius: {RAD}px; font-size: 12px; }}
+                QPushButton:hover {{ background: {_rgba(C_OK, .18)}; border-color: {C_OK.name()}; color: {C_OK_TXT.name()}; }}
             """)
 
     def _toggle_power(self):
@@ -1782,7 +2100,7 @@ class AIPanel(QWidget):
             QMessageBox.information(self, "Ollama", msg)
             return
         self._stxt.setText("Starting…")
-        self._dot.setStyleSheet("color: #f59e0b;")  # amber while booting
+        self._dot.setStyleSheet(f"color: {C_WARN.name()};")  # amber while booting
         # Server takes a moment to bind the port — poll a few times as it comes up
         for delay in (700, 1500, 2500, 4000, 6000, 9000):
             QTimer.singleShot(delay, self._poll_ollama)
@@ -1841,22 +2159,22 @@ class AIPanel(QWidget):
             r = msg["role"]
             if r == "user":
                 html += (f'<div style="text-align:right;margin:4px 0;">'
-                         f'<span style="background:{C_ACCENT.name()};color:white;padding:6px 10px;'
-                         f'border-radius:10px 10px 2px 10px;display:inline-block;max-width:88%;font-size:12px;">'
+                         f'<span style="background:{C_ACCENT.name()};color:{C_ON_ACCENT.name()};padding:6px 10px;'
+                         f'border-radius:{RAD}px;display:inline-block;max-width:88%;font-size:12px;">'
                          f'{c}</span></div>')
             elif r == "assistant":
                 html += (f'<div style="margin:4px 0;">'
                          f'<span style="background:{C_SURF2.name()};border:1px solid {C_BORDER.name()};'
-                         f'color:{C_TEXT.name()};padding:8px 10px;border-radius:2px 10px 10px 10px;'
+                         f'color:{C_TEXT.name()};padding:8px 10px;border-radius:{RAD}px;'
                          f'display:inline-block;font-size:12px;white-space:pre-wrap;">{c}</span></div>')
             elif r == "tool_note":
-                html += (f'<div style="margin:4px 0;background:rgba(16,185,129,.08);'
-                         f'border:1px solid rgba(16,185,129,.25);color:#6ee7b7;padding:6px 8px;'
-                         f'border-radius:6px;font-size:11px;">{c}</div>')
+                html += (f'<div style="margin:4px 0;background:{_rgba(C_OK, .08)};'
+                         f'border:1px solid {_rgba(C_OK, .25)};color:{C_OK_TXT.name()};padding:6px 8px;'
+                         f'border-radius:{RAD}px;font-size:11px;">{c}</div>')
             elif r == "error":
-                html += (f'<div style="margin:4px 0;background:rgba(239,68,68,.1);'
-                         f'border:1px solid rgba(239,68,68,.3);color:#fca5a5;padding:8px;'
-                         f'border-radius:6px;font-size:12px;">{c}</div>')
+                html += (f'<div style="margin:4px 0;background:{_rgba(C_ERR, .1)};'
+                         f'border:1px solid {_rgba(C_ERR, .3)};color:{C_ERR_TXT.name()};padding:8px;'
+                         f'border-radius:{RAD}px;font-size:12px;">{c}</div>')
         self._msgs_view.setHtml(html)
         self._msgs_view.verticalScrollBar().setValue(self._msgs_view.verticalScrollBar().maximum())
 
@@ -1868,11 +2186,19 @@ class AIPanel(QWidget):
             "day-planner. You help the user (a high-school student) plan study, projects, "
             "exercise, downtime, and social time, and you edit their calendar directly "
             "with tools.\n\n"
+            "RIGHT NOW\n"
+            f"It is {ctx.get('weekday', '')}, {ctx.get('today', '')} at "
+            f"{fmt_time(ctx.get('now_min', 0))} (24-hour clock). "
+            f"The day on screen is {ctx.get('view_date', '')}"
+            f"{' — that is today.' if ctx.get('viewing_today') else ' (not today).'}\n"
+            "Use this real date and time to judge urgency and deadlines, to resolve "
+            "'today' / 'tomorrow' / weekday names, and — when scheduling on today — to "
+            "avoid placing anything earlier than the current time.\n\n"
             "THE DAY\n"
-            "\"Today\" is the day currently shown on screen. Anything asked for without a "
-            "date goes on that day. For another day the user names it (e.g. \"6/14\", "
-            "\"tomorrow\") — pass that straight into the tool's date argument; the app "
-            "resolves the exact date. Omit the date for the day on screen.\n\n"
+            "Anything the user asks for without a date goes on the day on screen. For "
+            "another day the user names it (e.g. \"6/14\", \"tomorrow\") — pass that "
+            "straight into the tool's date argument; the app resolves the exact date. "
+            "Omit the date for the day on screen.\n\n"
             "ACTIVITY TYPES (use the id in a block's \"type\" field; pick the best fit):\n"
             f"  {types_line}\n\n"
             "SCHEDULE (day on screen)\n"
@@ -1898,6 +2224,9 @@ class AIPanel(QWidget):
             "  split_block    – split one block into focus chunks with breaks (pomodoro)\n"
             "  schedule_tasks – PLAN: place a list of tasks into free time safely (never deletes)\n"
             "  find_free_time – (read-only) list open gaps; use to answer \"when am I free?\"\n"
+            "  reflow_from_now– push the rest of today later/earlier when running late\n"
+            "  plan_for_deadline – spread work across the days before a due date\n"
+            "  week_summary   – (read-only) time per category over a week; balance check\n"
             "  replace_day    – rebuild a whole day from a complete list (full reset).\n"
             "                   It DELETES blocks you don't include, so list everything to keep.\n"
             "  list_blocks    – read a day's schedule\n\n"
@@ -1908,7 +2237,8 @@ class AIPanel(QWidget):
             "  - Judge urgency from wording: urgent / due today / ASAP → priority \"high\" (it gets "
             "an earlier slot); \"sometime\" / \"if I have time\" → \"low\".\n"
             "  - Use 'prefer' (morning/afternoon/evening or a time) when the task has a natural "
-            "time. Keep to waking hours via day_start/day_end (default 08:00–22:00) unless the "
+            "time. Keep to waking hours via day_start/day_end (defaults to the user's waking-hours "
+            "setting; on today, planning starts no earlier than the current time) unless the "
             "user is an early bird / night owl. Never plan work in the middle of the night.\n"
             "  - schedule_tasks places tasks around existing blocks and calendar events and NEVER "
             "deletes them — so meals, classes, and anything the user keeps are safe automatically. "
@@ -1957,7 +2287,7 @@ class AIPanel(QWidget):
                        "reason out durations / urgency / preferred times, then place them with "
                        "ONE schedule_tasks call (it keeps existing blocks safe) and verify.",
                "suggest": "\nGive 3-5 specific, actionable schedule improvements."}.get(self.mode, "")
-        return p + add
+        return p + add + model_guidance(self.model)
 
     def _send(self):
         txt = self._inp.toPlainText().strip()
@@ -1980,7 +2310,8 @@ class AIPanel(QWidget):
         self._spawn_thread()
 
     def _spawn_thread(self):
-        self._thread = OllamaThread(self._loop_msgs, self.model, tools=AI_TOOLS)
+        self._thread = OllamaThread(self._loop_msgs, self.model, tools=AI_TOOLS,
+                                    num_ctx=self.num_ctx, temperature=self.temperature)
         self._thread.token.connect(self._on_token)
         self._thread.done.connect(self._on_done)
         self._thread.tool_calls.connect(self._on_tool_calls)
@@ -2003,7 +2334,7 @@ class AIPanel(QWidget):
                 except Exception: args = {}
             result = self.execute_tool(name, args) if callable(self.execute_tool) \
                      else "Tool execution unavailable."
-            h.append({"role": "tool_note", "content": f"🛠 {name} → {result}"})
+            h.append({"role": "tool_note", "content": f"{name} → {result}"})
             self._loop_msgs.append({"role": "tool", "tool_name": name,
                                     "name": name, "content": str(result)})
         self._render()
@@ -2071,7 +2402,7 @@ class SetupWidget(QWidget):
 
         card = QWidget(); card.setFixedWidth(520)
         card.setStyleSheet(f"""
-            QWidget {{ background: {C_SURFACE.name()}; border-radius: 14px; color: {C_TEXT.name()}; }}
+            QWidget {{ background: {C_SURFACE.name()}; border-radius: {RAD_LG}px; color: {C_TEXT.name()}; }}
             QLabel  {{ background: transparent; }}
         """)
         cl = QVBoxLayout(card); cl.setSpacing(14); cl.setContentsMargins(40,36,40,36)
@@ -2102,13 +2433,13 @@ class SetupWidget(QWidget):
 
         have = CREDS_FILE.exists()
         self._creds_lbl = QLabel("✓ credentials.json loaded" if have else "No credentials loaded")
-        self._creds_lbl.setStyleSheet(f"color: {'#10b981' if have else C_MUTED.name()}; font-size: 12px;")
+        self._creds_lbl.setStyleSheet(f"color: {C_OK.name() if have else C_MUTED.name()}; font-size: 12px;")
         cl.addWidget(self._creds_lbl)
 
         load_btn = QPushButton("Load credentials.json…")
         load_btn.setStyleSheet(f"""
             QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-            color: {C_TEXT.name()}; padding: 7px 14px; border-radius: 7px; font-size: 12px; border-style:solid; }}
+            color: {C_TEXT.name()}; padding: 7px 14px; border-radius: {RAD}px; font-size: 12px; border-style:solid; }}
             QPushButton:hover {{ border-color: {C_BORDER2.name()}; }}
         """)
         load_btn.clicked.connect(self._load)
@@ -2120,8 +2451,8 @@ class SetupWidget(QWidget):
         ar = QHBoxLayout()
         go = QPushButton("Connect Google & Open")
         go.setStyleSheet(f"""
-            QPushButton {{ background:{C_ACCENT.name()}; color:white; padding:9px 18px;
-            border-radius:7px; font-weight:bold; border:none; font-size:13px; }}
+            QPushButton {{ background:{C_ACCENT.name()}; color:{C_ON_ACCENT.name()}; padding:9px 18px;
+            border-radius:{RAD}px; font-weight:bold; border:none; font-size:13px; }}
             QPushButton:hover {{ background:{C_ACCENT2.name()}; }}
         """)
         go.clicked.connect(self._connect)
@@ -2129,14 +2460,14 @@ class SetupWidget(QWidget):
         skip = QPushButton("Use Without Google")
         skip.setStyleSheet(f"""
             QPushButton {{ background:transparent; border:1px solid {C_BORDER.name()};
-            color:{C_MUTED.name()}; padding:9px 18px; border-radius:7px; font-size:13px; }}
+            color:{C_MUTED.name()}; padding:9px 18px; border-radius:{RAD}px; font-size:13px; }}
             QPushButton:hover {{ color:{C_TEXT.name()}; border-color:{C_BORDER2.name()}; }}
         """)
         skip.clicked.connect(self.proceed.emit)
         ar.addWidget(go); ar.addWidget(skip)
         cl.addLayout(ar)
 
-        self._warn = QLabel(""); self._warn.setStyleSheet("color: #fca5a5; font-size: 12px;")
+        self._warn = QLabel(""); self._warn.setStyleSheet(f"color: {C_ERR_TXT.name()}; font-size: 12px;")
         self._warn.setWordWrap(True); self._warn.hide(); cl.addWidget(self._warn)
 
         outer.addWidget(card)
@@ -2146,7 +2477,7 @@ class SetupWidget(QWidget):
         if path:
             shutil.copy(path, str(CREDS_FILE))
             self._creds_lbl.setText("✓ credentials.json loaded")
-            self._creds_lbl.setStyleSheet("color: #10b981; font-size: 12px;")
+            self._creds_lbl.setStyleSheet(f"color: {C_OK.name()}; font-size: 12px;")
 
     def _connect(self):
         if not CREDS_FILE.exists():
@@ -2169,13 +2500,13 @@ class AlertPopup(QWidget):
         card = QFrame()
         card.setStyleSheet(
             f"QFrame {{ background: {C_SURFACE.name()}; border: 1px solid {C_ACCENT.name()};"
-            f" border-radius: 10px; }}")
+            f" border-radius: {RAD_LG}px; }}")
         outer.addWidget(card)
         cl = QHBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
 
         bar = QFrame(); bar.setFixedWidth(5)
-        bar.setStyleSheet(f"background: {C_ACCENT.name()}; border-top-left-radius: 10px;"
-                          f" border-bottom-left-radius: 10px;")
+        bar.setStyleSheet(f"background: {C_ACCENT.name()}; border-top-left-radius: {RAD_LG}px;"
+                          f" border-bottom-left-radius: {RAD_LG}px;")
         cl.addWidget(bar)
 
         col = QVBoxLayout(); col.setContentsMargins(14, 12, 12, 12); col.setSpacing(3)
@@ -2213,6 +2544,151 @@ class AlertPopup(QWidget):
 # ══════════════════════════════════════════════════════════════════════════
 #  MAIN WINDOW
 # ══════════════════════════════════════════════════════════════════════════
+class SettingsDialog(QDialog):
+    """Central settings — persisted to settings.json. Most changes apply live; a
+    theme change takes effect on the next launch."""
+    def __init__(self, settings: Dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(440)
+        self.values = dict(settings)
+        self.startup_requested = is_startup_enabled()
+        self.setStyleSheet(f"""
+            QDialog {{ background: {C_SURFACE.name()}; color: {C_TEXT.name()}; }}
+            QLabel  {{ background: transparent; color: {C_TEXT.name()}; }}
+            QComboBox, QSpinBox, QDoubleSpinBox, QTimeEdit, QLineEdit {{
+                background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
+                color: {C_TEXT.name()}; padding: 5px 8px; border-radius: {RAD}px; }}
+            QComboBox QAbstractItemView {{ background: {C_SURFACE.name()}; color: {C_TEXT.name()};
+                selection-background-color: {C_SURF2.name()}; }}
+            QCheckBox {{ color: {C_TEXT.name()}; spacing: 8px; }}
+            QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
+                color: {C_TEXT.name()}; padding: 6px 12px; border-radius: {RAD}px; }}
+            QPushButton:hover {{ border-color: {C_BORDER2.name()}; }}
+        """)
+        lay = QVBoxLayout(self); lay.setSpacing(8); lay.setContentsMargins(22, 18, 22, 18)
+
+        def section(text, top=True):
+            lbl = QLabel(text)
+            lbl.setStyleSheet(f"color:{C_MUTED.name()}; font-size:10px; font-weight:bold; "
+                              f"letter-spacing:1px; margin-top:{10 if top else 0}px;")
+            lay.addWidget(lbl)
+
+        def hhmm_qtime(s):
+            m = parse_hhmm(s)
+            return QTime(m // 60, m % 60)
+
+        section("GENERAL", top=False)
+        g = QFormLayout(); g.setSpacing(8)
+        self.theme_cb = QComboBox()
+        for key, t in THEMES.items():
+            self.theme_cb.addItem(t["label"], key)
+        self.theme_cb.setCurrentIndex(max(0, self.theme_cb.findData(settings.get("theme", DEFAULT_THEME))))
+        g.addRow("Theme", self.theme_cb)
+        self.startup_cb = QCheckBox("Open Daily Scheduler when Windows starts")
+        self.startup_cb.setChecked(is_startup_enabled())
+        g.addRow("Startup", self.startup_cb)
+        self.autostart_cb = QCheckBox("Start the Ollama server when the app launches")
+        self.autostart_cb.setChecked(bool(settings.get("ollama_autostart")))
+        g.addRow("AI server", self.autostart_cb)
+        lay.addLayout(g)
+
+        section("NOTIFICATIONS")
+        n = QFormLayout(); n.setSpacing(8)
+        self.notify_cb = QCheckBox("Alert me when a block starts")
+        self.notify_cb.setChecked(bool(settings.get("notify_on")))
+        n.addRow("Reminders", self.notify_cb)
+        self.lead_sb = QSpinBox(); self.lead_sb.setRange(0, 60); self.lead_sb.setSuffix(" min before")
+        self.lead_sb.setValue(int(settings.get("notify_lead_min", 0)))
+        n.addRow("Lead time", self.lead_sb)
+        self.dnd_cb = QCheckBox("Break through Do Not Disturb / Focus Assist")
+        self.dnd_cb.setChecked(bool(settings.get("dnd_override")))
+        n.addRow("Priority alert", self.dnd_cb)
+        lay.addLayout(n)
+
+        section("AI ASSISTANT")
+        a = QFormLayout(); a.setSpacing(8)
+        self.model_cb = QComboBox(); self.model_cb.setEditable(True)
+        seen, models = set(), []
+        for m in list_ollama_models() + RECOMMENDED_MODELS:
+            if m and m not in seen:
+                seen.add(m); models.append(m)
+        self.model_cb.addItems(models)
+        self.model_cb.setCurrentText(settings.get("model", DEFAULT_MODEL))
+        a.addRow("Model", self.model_cb)
+        self.temp_sb = QDoubleSpinBox(); self.temp_sb.setRange(0.0, 1.5); self.temp_sb.setSingleStep(0.1)
+        self.temp_sb.setValue(float(settings.get("temperature", 0.3)))
+        a.addRow("Temperature", self.temp_sb)
+        self.ctx_cb = QComboBox()
+        for v in (4096, 8192, 16384, 32768):
+            self.ctx_cb.addItem(f"{v} tokens", v)
+        self.ctx_cb.setCurrentIndex(max(0, self.ctx_cb.findData(int(settings.get("num_ctx", 16384)))))
+        a.addRow("Context window", self.ctx_cb)
+        self.pstart = QTimeEdit(hhmm_qtime(settings.get("plan_day_start", "08:00")))
+        self.pend   = QTimeEdit(hhmm_qtime(settings.get("plan_day_end", "22:00")))
+        for w in (self.pstart, self.pend):
+            w.setDisplayFormat("HH:mm")
+        wrow = QHBoxLayout(); wrow.setContentsMargins(0, 0, 0, 0)
+        wrow.addWidget(self.pstart); wrow.addWidget(QLabel("to"))
+        wrow.addWidget(self.pend); wrow.addStretch()
+        ww = QWidget(); ww.setLayout(wrow)
+        a.addRow("Planning hours", ww)
+        lay.addLayout(a)
+
+        section("DATA")
+        drow = QHBoxLayout()
+        openf = QPushButton("Open data folder"); openf.clicked.connect(self._open_folder)
+        expt  = QPushButton("Export schedule…"); expt.clicked.connect(self._export)
+        drow.addWidget(openf); drow.addWidget(expt); drow.addStretch()
+        lay.addLayout(drow)
+
+        br = QHBoxLayout(); br.addStretch()
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
+        save = QPushButton("Save")
+        save.setStyleSheet(f"QPushButton {{ background:{C_ACCENT.name()}; color:{C_ON_ACCENT.name()}; "
+                           f"border:none; padding:7px 18px; border-radius:{RAD}px; font-weight:bold; }}")
+        save.clicked.connect(self._save)
+        br.addWidget(cancel); br.addWidget(save)
+        lay.addSpacing(4); lay.addLayout(br)
+
+    def _open_folder(self):
+        try:
+            if platform.system() == "Windows":
+                os.startfile(str(DATA_DIR))            # type: ignore[attr-defined]
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", str(DATA_DIR)])
+            else:
+                subprocess.run(["xdg-open", str(DATA_DIR)])
+        except Exception:
+            pass
+
+    def _export(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export schedule", str(Path.home() / "daily-scheduler-export.json"),
+            "JSON (*.json)")
+        if path:
+            try:
+                shutil.copyfile(DATA_FILE, path)
+            except Exception:
+                pass
+
+    def _save(self):
+        self.startup_requested = self.startup_cb.isChecked()
+        self.values.update({
+            "theme":            self.theme_cb.currentData(),
+            "ollama_autostart": self.autostart_cb.isChecked(),
+            "notify_on":        self.notify_cb.isChecked(),
+            "notify_lead_min":  self.lead_sb.value(),
+            "dnd_override":     self.dnd_cb.isChecked(),
+            "model":            self.model_cb.currentText().strip() or DEFAULT_MODEL,
+            "temperature":      round(self.temp_sb.value(), 2),
+            "num_ctx":          self.ctx_cb.currentData(),
+            "plan_day_start":   self.pstart.time().toString("HH:mm"),
+            "plan_day_end":     self.pend.time().toString("HH:mm"),
+        })
+        self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2220,6 +2696,7 @@ class MainWindow(QMainWindow):
         self.resize(1300, 860)
         self.setMinimumSize(960, 620)
 
+        self._settings     = load_settings()
         self._creds        = None
         self._cal_by_date: Dict[str, List[Dict]] = {}
         self._fetched_keys: set = set()
@@ -2228,10 +2705,11 @@ class MainWindow(QMainWindow):
         self._cur_date:    date = date.today()
         self._view         = "day"
         self._ai_visible   = False
-        # notifications
+        # notifications (persisted in settings.json)
         self._tray         = None
-        self._notify_on    = True
-        self._dnd_override = True           # break through Do Not Disturb via app-drawn popup
+        self._notify_act = self._dnd_act = self._startup_act = None   # set in _setup_tray
+        self._notify_on    = self._settings["notify_on"]
+        self._dnd_override = self._settings["dnd_override"]   # break through DND via app-drawn popup
         self._popups:      List[QWidget] = []
         self._notified:    set = set()     # (block_id, startMin) already announced today
         self._notified_day = date.today().isoformat()
@@ -2303,6 +2781,10 @@ class MainWindow(QMainWindow):
 
         # AI Panel (hidden by default) — wired to edit the schedule via tools
         self._ai_panel = AIPanel(self._ai_ctx)
+        self._ai_panel.apply_settings(self._settings)
+        self._ai_panel.on_model_edited = lambda m: self._update_setting("model", m)
+        if self._settings.get("ollama_autostart"):
+            QTimer.singleShot(800, self._ai_panel._start_ollama)
         self._ai_panel.execute_tool = self._ai_execute
         self._ai_panel.hide()
         body_l.addWidget(self._ai_panel)
@@ -2339,10 +2821,10 @@ class MainWindow(QMainWindow):
             b.setCheckable(checked)
             b.setStyleSheet(f"""
                 QPushButton {{ background:{C_SURF2.name()}; border:1px solid {C_BORDER.name()};
-                color:{C_MUTED.name()}; padding:5px 13px; border-radius:6px; font-size:12px; }}
+                color:{C_MUTED.name()}; padding:5px 13px; border-radius:{RAD}px; font-size:12px; }}
                 QPushButton:hover {{ color:{C_TEXT.name()}; border-color:{C_BORDER2.name()}; }}
-                QPushButton:checked {{ background:rgba(124,111,247,.15);
-                border-color:rgba(124,111,247,.5); color:{C_ACCENT.name()}; }}
+                QPushButton:checked {{ background:{_rgba(C_ACCENT, .15)};
+                border-color:{_rgba(C_ACCENT, .5)}; color:{C_ACCENT.name()}; }}
             """)
             return b
 
@@ -2373,7 +2855,7 @@ class MainWindow(QMainWindow):
             self._view_btns[vid] = b
             hl.addWidget(b)
 
-        self._ai_btn = hbtn("🤖 AI", checked=True)
+        self._ai_btn = hbtn("AI", checked=True)
         self._ai_btn.clicked.connect(self._toggle_ai)
         hl.addWidget(self._ai_btn)
 
@@ -2381,10 +2863,15 @@ class MainWindow(QMainWindow):
         self._refresh_btn.clicked.connect(self._refresh_cal)
         hl.addWidget(self._refresh_btn)
 
-        self._auth_btn = QPushButton("👤 Connect Google")
+        settings_b = hbtn("⚙"); settings_b.setFixedWidth(34)
+        settings_b.setToolTip("Settings")
+        settings_b.clicked.connect(self._open_settings)
+        hl.addWidget(settings_b)
+
+        self._auth_btn = QPushButton("Connect Google")
         self._auth_btn.setStyleSheet(f"""
-            QPushButton {{ background:{C_ACCENT.name()}; color:white; padding:5px 13px;
-            border-radius:6px; font-size:12px; border:none; }}
+            QPushButton {{ background:{C_ACCENT.name()}; color:{C_ON_ACCENT.name()}; padding:5px 13px;
+            border-radius:{RAD}px; font-size:12px; border:none; }}
             QPushButton:hover {{ background:{C_ACCENT2.name()}; }}
         """)
         self._auth_btn.clicked.connect(self._auth_google)
@@ -2408,9 +2895,9 @@ class MainWindow(QMainWindow):
     def _on_auth(self, creds):
         self._creds = creds
         self._auth_btn.setText("● Connected")
-        self._auth_btn.setStyleSheet("""
-            QPushButton { background: transparent; border: 1px solid #262636;
-            color: #10b981; padding: 5px 13px; border-radius: 6px; font-size: 12px; }
+        self._auth_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: 1px solid {C_BORDER.name()};
+            color: {C_OK.name()}; padding: 5px 13px; border-radius: {RAD}px; font-size: 12px; }}
         """)
         self._set_status("Google connected. Fetching events…")
         self._refresh_cal()
@@ -2526,12 +3013,17 @@ class MainWindow(QMainWindow):
             acts   = self._day_acts()
             self._timeline.set_data(cal_ev, acts, d)
             self._sidebar.update_summary(cal_ev, acts)
-            if d == date.today():
-                now_min = datetime.now().hour * 60 + datetime.now().minute
-                y = max(0, min_to_y(max(now_min - 60, DAY_START)))
-            else:
-                y = 0
-            QTimer.singleShot(50, lambda: self._scroll.verticalScrollBar().setValue(y))
+            # Only re-center the timeline when the shown day actually changes (initial
+            # load or navigation). On an in-place refresh — an edit, drag, or calendar
+            # fetch — keep the user's scroll position instead of jumping back to now/top.
+            if getattr(self, "_last_day_shown", None) != d:
+                self._last_day_shown = d
+                if d == date.today():
+                    now_min = datetime.now().hour * 60 + datetime.now().minute
+                    y = max(0, min_to_y(max(now_min - 60, DAY_START)))
+                else:
+                    y = 0
+                QTimer.singleShot(50, lambda: self._scroll.verticalScrollBar().setValue(y))
         elif self._view == "month":
             self._date_lbl.setText(d.strftime("%B %Y"))
             ev: Dict[str, List[Dict]] = {}
@@ -2594,9 +3086,14 @@ class MainWindow(QMainWindow):
         self._ai_btn.setChecked(self._ai_visible)
 
     def _ai_ctx(self):
+        now = datetime.now()
         return {"cal_events": self._day_cal(),
                 "activities": self._day_acts(),
-                "view_date":  self._cur_date.isoformat()}
+                "view_date":  self._cur_date.isoformat(),
+                "today":      date.today().isoformat(),
+                "weekday":    now.strftime("%A"),
+                "now_min":    now.hour * 60 + now.minute,
+                "viewing_today": self._cur_date == date.today()}
 
     def _ai_execute(self, name: str, args: Dict) -> str:
         """Run one AI tool call against the schedule. Returns a result string
@@ -2977,8 +3474,13 @@ class MainWindow(QMainWindow):
                         return "Error: 'tasks' must be a list of {title, minutes, ...}."
                 if not isinstance(raw, list) or not raw:
                     return "Error: give a non-empty 'tasks' list."
-                ws = parse_hhmm(str(args["day_start"])) if args.get("day_start") else 8 * 60
-                we = parse_hhmm(str(args["day_end"]))   if args.get("day_end")   else 22 * 60
+                ws = (parse_hhmm(str(args["day_start"])) if args.get("day_start")
+                      else parse_hhmm(self._settings.get("plan_day_start", "08:00")))
+                we = (parse_hhmm(str(args["day_end"]))   if args.get("day_end")
+                      else parse_hhmm(self._settings.get("plan_day_end", "22:00")))
+                # Planning today with no explicit start → don't place tasks in the past.
+                if ds == date.today().isoformat() and not args.get("day_start"):
+                    ws = max(ws, datetime.now().hour * 60 + datetime.now().minute)
                 if we <= ws:
                     we = DAY_END
                 windows = {"morning": (8*60, 12*60), "afternoon": (12*60, 17*60),
@@ -2993,6 +3495,7 @@ class MainWindow(QMainWindow):
                         mins = int(float(t.get("minutes") or t.get("duration") or 60))
                     except (TypeError, ValueError):
                         mins = 60
+                    want = mins
                     mins = max(15, min(mins, we - ws))
                     tid = str(t.get("type", "study"))
                     at_t = next((x for x in ACTIVITY_TYPES if x["id"] == tid), ACTIVITY_TYPES[0])
@@ -3001,6 +3504,7 @@ class MainWindow(QMainWindow):
                         "type": at_t["id"], "color": at_t["color"],
                         "pr": prio.get(str(t.get("priority", "normal")).lower(), 1),
                         "prefer": str(t.get("prefer", "")).strip().lower(), "i": i,
+                        "clamped": mins < want,
                     })
                 if not tasks:
                     return "Error: no valid tasks."
@@ -3009,7 +3513,7 @@ class MainWindow(QMainWindow):
                       [(e["startMin"], e["endMin"]) for e in self._cal_by_date.get(ds, [])]
                 # idempotent: don't re-add a task already on the day (repeat calls are safe)
                 have = {norm_title(a["title"]) for a in self._all_acts if a.get("date") == ds}
-                placed, unplaced, already = [], [], []
+                placed, unplaced, already, shortened = [], [], [], []
                 for t in tasks:
                     if norm_title(t["title"]) in have:
                         already.append(t["title"]); continue
@@ -3039,6 +3543,8 @@ class MainWindow(QMainWindow):
                             "id": new_id(), "date": ds, "startMin": slot[0], "endMin": slot[1],
                             "type": t["type"], "color": t["color"], "title": t["title"]})
                         placed.append((t["title"], slot))
+                        if t.get("clamped"):
+                            shortened.append(t["title"])
                     else:
                         unplaced.append(t["title"])
                 if not placed:
@@ -3056,6 +3562,9 @@ class MainWindow(QMainWindow):
                     out += " | Already there: " + ", ".join(already)
                 if unplaced:
                     out += " | Couldn't fit (no free slot): " + ", ".join(unplaced)
+                if shortened:
+                    out += (f" | Shortened to fit the {fmt_time(ws)}–{fmt_time(we)} "
+                            f"window: " + ", ".join(shortened))
                 return out
 
             if name == "list_blocks":
@@ -3070,6 +3579,151 @@ class MainWindow(QMainWindow):
                 return (f"Schedule for {ds}:\n" + "\n".join(lines)) if lines \
                        else f"Nothing scheduled on {ds}."
 
+            if name == "reflow_from_now":
+                try:
+                    delay = int(float(args.get("minutes")))
+                except (TypeError, ValueError):
+                    return ("Error: 'minutes' must be a number (how far to push upcoming "
+                            "blocks; positive = later, negative = earlier).")
+                if delay == 0:
+                    return "Error: give a non-zero 'minutes' (positive = later, negative = earlier)."
+                if args.get("from"):
+                    try:
+                        cutoff = parse_hhmm(str(args["from"]))
+                    except ValueError:
+                        return "Error: couldn't read 'from' — use 24h HH:MM."
+                elif ds == date.today().isoformat():
+                    cutoff = datetime.now().hour * 60 + datetime.now().minute
+                else:
+                    cutoff = DAY_START
+                movers = [a for a in self._all_acts
+                          if a.get("date") == ds and a["startMin"] >= cutoff]
+                if not movers:
+                    return f"No blocks starting at or after {fmt_time(cutoff)} on {ds} to reflow."
+                for a in movers:
+                    dur = a["endMin"] - a["startMin"]
+                    ns  = max(DAY_START, min(a["startMin"] + delay, DAY_END - dur))
+                    a["startMin"], a["endMin"] = ns, ns + dur
+                day = [a for a in self._all_acts if a.get("date") == ds]
+                fixed, n_adj, n_drop = sequentialize(day)
+                self._all_acts = [a for a in self._all_acts if a.get("date") != ds] + fixed
+                save_all_activities(self._all_acts)
+                self._refresh_view()
+                direction = "later" if delay > 0 else "earlier"
+                out = (f"Reflowed {len(movers)} upcoming block(s) on {ds} {abs(delay)} min "
+                       f"{direction} (from {fmt_time(cutoff)}).")
+                if n_drop:
+                    out += f" ({n_drop} no longer fit and were dropped.)"
+                return out
+
+            if name == "plan_for_deadline":
+                title = str(args.get("title") or "").strip()
+                if not title:
+                    return "Error: give a 'title' for the work."
+                dd = resolve_date(args.get("deadline"), self._cur_date)
+                if dd is None:
+                    return ("Error: couldn't understand 'deadline' — use a date like 6/20 "
+                            "or a weekday like 'friday'.")
+                try:
+                    total = int(float(args.get("minutes") or args.get("total_minutes") or 0))
+                except (TypeError, ValueError):
+                    total = 0
+                if total <= 0:
+                    return "Error: give 'minutes' = the total time the whole job needs."
+                try:
+                    sess = max(15, int(float(args.get("session", 60))))
+                except (TypeError, ValueError):
+                    sess = 60
+                tid  = str(args.get("type", "study"))
+                at_t = next((t for t in ACTIVITY_TYPES if t["id"] == tid), ACTIVITY_TYPES[0])
+                start_iso = resolve_date(args.get("start_date"), self._cur_date) or date.today().isoformat()
+                start    = max(date.fromisoformat(start_iso), date.today())
+                deadline = date.fromisoformat(dd)
+                days, d = [], start
+                while d < deadline:               # days strictly before the deadline
+                    days.append(d); d += timedelta(days=1)
+                if not days and deadline >= date.today():
+                    days = [deadline]             # deadline is today → use the day itself
+                if not days:
+                    return f"Error: the deadline {dd} has already passed."
+                full, rem = divmod(total, sess)   # split total into daily sessions
+                sizes = [sess] * full
+                if rem >= 15:
+                    sizes.append(rem)
+                elif rem and sizes:
+                    sizes[-1] += rem
+                if not sizes:
+                    sizes = [total]
+                ws = parse_hhmm(self._settings.get("plan_day_start", "08:00"))
+                we = parse_hhmm(self._settings.get("plan_day_end", "22:00"))
+                placed, skipped, already, di = [], [], [], 0
+                for k, length in enumerate(sizes, 1):
+                    stitle, done = f"{title} ({k}/{len(sizes)})", False
+                    for _ in range(len(days)):
+                        day_d = days[di % len(days)]; di += 1
+                        dstr  = day_d.isoformat()
+                        have  = {norm_title(a["title"]) for a in self._all_acts if a.get("date") == dstr}
+                        if norm_title(stitle) in have:
+                            already.append(stitle); done = True; break
+                        lo = ws
+                        if dstr == date.today().isoformat():
+                            lo = max(ws, datetime.now().hour * 60 + datetime.now().minute)
+                        occ = [(a["startMin"], a["endMin"]) for a in self._all_acts if a.get("date") == dstr] + \
+                              [(e["startMin"], e["endMin"]) for e in self._cal_by_date.get(dstr, [])]
+                        slot = None
+                        for gs, ge in _free_slots(occ, lo, we):
+                            if ge - gs >= length:
+                                slot = (gs, gs + length); break
+                        if slot:
+                            self._all_acts.append({
+                                "id": new_id(), "date": dstr, "startMin": slot[0], "endMin": slot[1],
+                                "type": at_t["id"], "color": at_t["color"], "title": stitle})
+                            placed.append((dstr, slot)); done = True; break
+                    if not done:
+                        skipped.append(stitle)
+                if not placed and already:
+                    return f"All {len(already)} session(s) for '{title}' are already planned before {dd}."
+                if not placed:
+                    return (f"Couldn't fit any session for '{title}' before {dd} within "
+                            f"{fmt_time(ws)}–{fmt_time(we)}. Try shorter sessions or a wider window.")
+                save_all_activities(self._all_acts)
+                self._refresh_view()
+                placed.sort(key=lambda x: (x[0], x[1][0]))
+                out = (f"Planned '{title}' for {dd}: {len(placed)} session(s) — " +
+                       ", ".join(f"{dstr} {fmt_time(s)}–{fmt_time(e)}" for dstr, (s, e) in placed))
+                if already:
+                    out += f" | {len(already)} already there"
+                if skipped:
+                    out += f" | couldn't fit {len(skipped)} (no free slot before the deadline)"
+                return out
+
+            if name == "week_summary":
+                if args.get("start") or args.get("end"):
+                    s = resolve_date(args.get("start"), self._cur_date) or self._cur_date.isoformat()
+                    e = resolve_date(args.get("end"), self._cur_date) or s
+                else:
+                    monday = self._cur_date - timedelta(days=self._cur_date.weekday())
+                    s = monday.isoformat()
+                    e = (monday + timedelta(days=6)).isoformat()
+                if e < s:
+                    s, e = e, s
+                ndays = (date.fromisoformat(e) - date.fromisoformat(s)).days + 1
+                totals = {}
+                for a in self._all_acts:
+                    if s <= a.get("date", "") <= e:
+                        totals[a["type"]] = totals.get(a["type"], 0) + (a["endMin"] - a["startMin"])
+                for dstr, evs in self._cal_by_date.items():
+                    if s <= dstr <= e:
+                        for ev in evs:
+                            totals["calendar"] = totals.get("calendar", 0) + (ev["endMin"] - ev["startMin"])
+                if not totals:
+                    return f"Nothing scheduled between {s} and {e}."
+                labels = {t["id"]: t["label"] for t in ACTIVITY_TYPES}
+                labels["calendar"] = "Calendar"
+                parts = [f"{labels.get(k, k)} {fmt_dur(v)} (~{fmt_dur(v // ndays)}/day)"
+                         for k, v in sorted(totals.items(), key=lambda x: -x[1])]
+                return f"{s} → {e} ({ndays} days): " + "; ".join(parts)
+
             return f"Unknown tool '{name}'."
         except KeyError as ex:
             return f"Error: missing argument {ex}."
@@ -3081,7 +3735,7 @@ class MainWindow(QMainWindow):
     # ── Status ─────────────────────────────────────────────────────────────
     def _set_status(self, msg, error=False):
         self._status_lbl.setText(msg)
-        color = "#fca5a5" if error else C_MUTED.name()
+        color = C_ERR_TXT.name() if error else C_MUTED.name()
         self._status_lbl.setStyleSheet(
             f"color:{color}; font-size:11px; padding:3px 14px;"
             f"border-top:1px solid {C_BORDER.name()}; background:{C_SURFACE.name()};")
@@ -3092,9 +3746,9 @@ class MainWindow(QMainWindow):
         p = QPainter(pm); p.setRenderHint(QPainter.Antialiasing)
         p.setBrush(C_ACCENT); p.setPen(Qt.NoPen)
         p.drawRoundedRect(6, 6, 52, 52, 14, 14)
-        p.setBrush(QColor("white"))
+        p.setBrush(C_ON_ACCENT)
         p.drawRoundedRect(16, 14, 32, 6, 2, 2)        # calendar top bar
-        p.setFont(QFont("Segoe UI", 20, QFont.Bold)); p.setPen(QColor("white"))
+        p.setFont(QFont("Segoe UI", 20, QFont.Bold)); p.setPen(C_ON_ACCENT)
         p.drawText(QRect(0, 14, 64, 50), Qt.AlignCenter, "◈")
         p.end()
         return QIcon(pm)
@@ -3108,7 +3762,7 @@ class MainWindow(QMainWindow):
         menu.setStyleSheet(f"""
             QMenu {{ background: {C_SURFACE.name()}; color: {C_TEXT.name()};
                      border: 1px solid {C_BORDER2.name()}; padding: 4px; }}
-            QMenu::item {{ padding: 6px 16px; border-radius: 4px; }}
+            QMenu::item {{ padding: 6px 16px; border-radius: {RAD}px; }}
             QMenu::item:selected {{ background: {C_SURF2.name()}; }}
         """)
         open_act = menu.addAction("Open Daily Scheduler")
@@ -3116,16 +3770,18 @@ class MainWindow(QMainWindow):
         self._notify_act = menu.addAction("Notify when blocks start")
         self._notify_act.setCheckable(True)
         self._notify_act.setChecked(self._notify_on)
-        self._notify_act.toggled.connect(lambda v: setattr(self, "_notify_on", v))
+        self._notify_act.toggled.connect(self._toggle_notify)
         self._dnd_act = menu.addAction("Override Do Not Disturb")
         self._dnd_act.setCheckable(True)
         self._dnd_act.setChecked(self._dnd_override)
         self._dnd_act.setToolTip("Show an always-on-top alert that breaks through "
                                  "Do Not Disturb / Focus Assist")
-        self._dnd_act.toggled.connect(lambda v: setattr(self, "_dnd_override", v))
+        self._dnd_act.toggled.connect(self._toggle_dnd)
         test_act = menu.addAction("Test notification")
         test_act.triggered.connect(self._test_notification)
         menu.addSeparator()
+        settings_act = menu.addAction("Settings…")
+        settings_act.triggered.connect(self._open_settings)
         self._startup_act = menu.addAction("Start with Windows")
         self._startup_act.setCheckable(True)
         self._startup_act.setChecked(is_startup_enabled())
@@ -3136,6 +3792,42 @@ class MainWindow(QMainWindow):
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
+
+    def _update_setting(self, key, value):
+        self._settings[key] = value
+        save_settings(self._settings)
+
+    def _toggle_notify(self, v):
+        self._notify_on = v
+        self._update_setting("notify_on", v)
+
+    def _toggle_dnd(self, v):
+        self._dnd_override = v
+        self._update_setting("dnd_override", v)
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self._settings, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        old_theme = self._settings.get("theme")
+        self._settings = dlg.values
+        save_settings(self._settings)
+        # Startup shortcut (a filesystem .lnk, so it persists on its own)
+        if dlg.startup_requested != is_startup_enabled():
+            set_startup(dlg.startup_requested)
+        # Live-apply everything except the theme (which needs a rebuild)
+        self._notify_on    = self._settings["notify_on"]
+        self._dnd_override = self._settings["dnd_override"]
+        for act, val in ((self._notify_act, self._notify_on),
+                         (self._dnd_act, self._dnd_override),
+                         (self._startup_act, is_startup_enabled())):
+            if act:
+                act.blockSignals(True); act.setChecked(val); act.blockSignals(False)
+        self._ai_panel.apply_settings(self._settings)
+        if self._settings.get("theme") != old_theme:
+            QMessageBox.information(
+                self, "Theme changed",
+                "The new theme will be applied the next time you open Daily Scheduler.")
 
     def _on_tray_activated(self, reason):
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
@@ -3228,11 +3920,14 @@ class MainWindow(QMainWindow):
             key = (b["id"], sm)
             if key in self._notified:
                 continue
-            if now_min - self.NOTIFY_WINDOW <= sm <= now_min:
+            lead = int(self._settings.get("notify_lead_min", 0) or 0)
+            fire_at = sm - lead          # alert this many minutes before the block starts
+            if now_min - self.NOTIFY_WINDOW <= fire_at <= now_min:
                 self._notified.add(key)
+                when = f"Starting in {lead} min · " if lead else "Starting now · "
                 self._alert(
                     f"▶ {b['title']}",
-                    f"Starting now · {fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
+                    f"{when}{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
 
     def closeEvent(self, ev):
         # Closing the window keeps the app alive in the tray so reminders still fire.
@@ -3256,6 +3951,9 @@ def main():
     if "--version" in sys.argv or "-V" in sys.argv:
         print(f"Daily Scheduler {APP_VERSION}")
         return
+
+    # Apply the saved theme before any widget (or the palette below) bakes colours.
+    apply_theme(load_settings().get("theme", DEFAULT_THEME))
 
     # Register an explicit AppUserModelID so Windows shows our tray toasts as banners
     # (without this, Qt balloon notifications are silently dropped into the action center).
@@ -3283,7 +3981,7 @@ def main():
     pal.setColor(QPalette.Button,          C_SURFACE)
     pal.setColor(QPalette.ButtonText,      C_TEXT)
     pal.setColor(QPalette.Highlight,       C_ACCENT)
-    pal.setColor(QPalette.HighlightedText, QColor("white"))
+    pal.setColor(QPalette.HighlightedText, C_ON_ACCENT)
     pal.setColor(QPalette.ToolTipBase,     C_SURF2)
     pal.setColor(QPalette.ToolTipText,     C_TEXT)
     app.setPalette(pal)

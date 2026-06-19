@@ -27,3 +27,6 @@ settings.json
 # ── Logs / scratch ──────────────────────────────────────
 *.log
 _*.txt
+
+# ── Local-only dev reference (not part of the published project) ──
+CONTEXT.md
