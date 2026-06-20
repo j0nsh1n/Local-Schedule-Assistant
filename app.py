@@ -34,7 +34,7 @@ from PySide6.QtGui import (
 )
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.2.0"
+__version__  = "2.3.0"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -297,6 +297,15 @@ def _free_slots(occupied_pairs, start=DAY_START, end=DAY_END):
     if cur < end:
         free.append((cur, end))
     return free
+
+def _earliest_fit(occupied, cursor, length):
+    """Earliest start >= cursor where a `length`-minute block fits without overlapping any
+    `occupied` (s, e) interval, before DAY_END. None if it won't fit. Used by plan_day to
+    flow chunked tasks past fixed anchors and meetings."""
+    for s, e in _free_slots(occupied, cursor, DAY_END):
+        if e - s >= length:
+            return s
+    return None
 
 def norm_title(s: str) -> str:
     """Normalize a title for fuzzy matching: lowercase, alphanumerics + spaces only
@@ -893,6 +902,38 @@ AI_TOOLS = [
             "start": {"type": "string", "description": "Range start (YYYY-MM-DD or words). Omit for the start of the viewed week."},
             "end":   {"type": "string", "description": "Range end (YYYY-MM-DD or words). Omit for the end of the viewed week."},
         }}}},
+    {"type": "function", "function": {
+        "name": "plan_day",
+        "description": "Build a whole day by laying out ORDERED tasks around FIXED anchors "
+                       "(meals, workout, wake-up) and calendar events — the reliable way to "
+                       "handle 'plan my day: X first then Y, lunch at 13:00, workout at 16:00, "
+                       "30-min chunks with breaks'. Give each task its TOTAL focus minutes "
+                       "(breaks are EXTRA and NOT counted) and optionally a chunk + break size; "
+                       "the app places everything in order from 'start', splits each task into "
+                       "chunks separated by breaks, and flows the rest PAST every fixed anchor "
+                       "and meeting. REPLACES the day's editable blocks, so include every fixed "
+                       "item you want kept. PREFER THIS over hand-building with replace_day "
+                       "whenever there's a set order + fixed times + chunking.",
+        "parameters": {"type": "object", "properties": {
+            "date":  {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
+            "start": {"type": "string", "description": "When tasks begin, 24h HH:MM (default the user's waking-hours start; on today, not before now)."},
+            "fixed": {"type": "array", "description": "Anchors placed at exact times that tasks flow around (lunch, workout, wake-up).",
+                "items": {"type": "object", "properties": {
+                    "title":   {"type": "string"},
+                    "start":   {"type": "string", "description": "24h HH:MM"},
+                    "minutes": {"type": "integer", "description": "Length in minutes (or give 'end')."},
+                    "end":     {"type": "string", "description": "24h HH:MM (alternative to minutes)."},
+                    "type":    {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES]},
+                }, "required": ["title", "start"]}},
+            "tasks": {"type": "array", "description": "Tasks in the ORDER to do them.",
+                "items": {"type": "object", "properties": {
+                    "title":   {"type": "string"},
+                    "minutes": {"type": "integer", "description": "TOTAL focus time for this task — do NOT include break time."},
+                    "type":    {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES]},
+                    "chunk":   {"type": "integer", "description": "Split into chunks this many minutes long (omit = one solid block)."},
+                    "break":   {"type": "integer", "description": "Break minutes between chunks (default 15 when chunk is set; 0 for none)."},
+                }, "required": ["title", "minutes"]}},
+        }, "required": ["tasks"]}}},
 ]
 
 AI_TOOL_NAMES = {t["function"]["name"] for t in AI_TOOLS}
@@ -2255,7 +2296,10 @@ class AIPanel(QWidget):
             "  shift_blocks   – move EVERY block on a day by an offset (\"push everything 2h later\")\n"
             "  copy_day       – duplicate all blocks from one day to another (\"copy today to 6/14\")\n"
             "  split_block    – split one block into focus chunks with breaks (pomodoro)\n"
-            "  schedule_tasks – PLAN: place a list of tasks into free time safely (never deletes)\n"
+            "  schedule_tasks – PLAN: fit UNORDERED tasks into free time safely (never deletes)\n"
+            "  plan_day       – BUILD a full day: ORDERED tasks + fixed anchors (meals/workout) "
+            "+ chunking, laid out around meetings (rebuilds the day). Best for 'X then Y, lunch "
+            "at 13:00, workout at 16:00, 30-min chunks with breaks'.\n"
             "  find_free_time – (read-only) list open gaps; use to answer \"when am I free?\"\n"
             "  reflow_from_now– push the rest of today later/earlier when running late\n"
             "  plan_for_deadline – spread work across the days before a due date\n"
@@ -2276,7 +2320,14 @@ class AIPanel(QWidget):
             "  - schedule_tasks places tasks around existing blocks and calendar events and NEVER "
             "deletes them — so meals, classes, and anything the user keeps are safe automatically. "
             "Prefer it over replace_day for planning. Only use replace_day for an explicit "
-            "from-scratch rebuild (and then include every block to keep). Verify with list_blocks.\n\n"
+            "from-scratch rebuild (and then include every block to keep). Verify with list_blocks.\n"
+            "  - USE plan_day (not replace_day, not hand-built lists) whenever the request has an "
+            "ORDER ('X first, then Y'), FIXED times (lunch at 13:00, workout at 16:00), and/or "
+            "chunking with breaks. Give each task its TOTAL focus minutes (NEVER subtract break "
+            "time — breaks are added on top), set chunk/break, and pass the fixed items in 'fixed'. "
+            "The app lays everything out in order, splits into chunks, and flows the rest past the "
+            "anchors and meetings — so you don't compute any times yourself. Don't shrink a task's "
+            "minutes to 'make room' for breaks; plan_day handles that.\n\n"
             "RULES\n"
             "  - ALWAYS call a tool when asked to add/move/remove/rename/copy/clear/shift/plan "
             "— never just describe the change.\n"
@@ -2318,7 +2369,15 @@ class AIPanel(QWidget):
             "  \"split my study block into 30-min chunks\" → split_block(title=\"study\", chunk=30, break=5)\n"
             "  \"plan my day: finish the essay (urgent), gym, read; keep dinner\" → "
             "schedule_tasks(tasks=[{title:\"Finish essay\",minutes:120,priority:\"high\"}, "
-            "{title:\"Gym\",minutes:60,prefer:\"evening\"}, {title:\"Read\",minutes:30,priority:\"low\"}])\n")
+            "{title:\"Gym\",minutes:60,prefer:\"evening\"}, {title:\"Read\",minutes:30,priority:\"low\"}])\n"
+            "  \"college essays, then history, then AP — 2h each in 30-min chunks with 15-min "
+            "breaks; lunch 13:00 for 1h; workout 16:00 for 1h; wake 10:00\" → plan_day("
+            "start=\"10:00\", fixed=[{title:\"Lunch\",start:\"13:00\",minutes:60,type:\"meals\"}, "
+            "{title:\"Workout\",start:\"16:00\",minutes:60,type:\"exercise\"}], tasks=["
+            "{title:\"College Essays\",minutes:120,type:\"project\",chunk:30,break:15}, "
+            "{title:\"History\",minutes:120,type:\"study\",chunk:30,break:15}, "
+            "{title:\"AP Psychology\",minutes:120,type:\"study\",chunk:30,break:15}])  "
+            "← each task keeps a full 2h of focus; breaks + lunch + workout are extra, placed around it.\n")
         add = {"plan": "\nThe user wants help planning. Gather what they need to get done, "
                        "reason out durations / urgency / preferred times, then place them with "
                        "ONE schedule_tasks call (it keeps existing blocks safe) and verify.",
@@ -2345,9 +2404,15 @@ class AIPanel(QWidget):
         self._thinking.show(); self._stop_btn.show()
         self._spawn_thread()
 
+    def _effective_temp(self):
+        # Analyze/suggest mode runs a touch warmer for more varied ideas; editing modes
+        # (chat/plan) stay precise for reliable tool-calling.
+        return (min(1.2, self.temperature + 0.3) if self.mode == "suggest"
+                else self.temperature)
+
     def _spawn_thread(self):
         self._thread = OllamaThread(self._loop_msgs, self.model, tools=AI_TOOLS,
-                                    num_ctx=self.num_ctx, temperature=self.temperature)
+                                    num_ctx=self.num_ctx, temperature=self._effective_temp())
         self._thread.token.connect(self._on_token)
         self._thread.done.connect(self._on_done)
         self._thread.tool_calls.connect(self._on_tool_calls)
@@ -3627,6 +3692,99 @@ class MainWindow(QMainWindow):
                 if shortened:
                     out += (f" | Shortened to fit the {fmt_time(ws)}–{fmt_time(we)} "
                             f"window: " + ", ".join(shortened))
+                return out
+
+            if name == "plan_day":
+                raw_tasks = args.get("tasks")
+                if isinstance(raw_tasks, str):
+                    try: raw_tasks = json.loads(raw_tasks)
+                    except Exception: return "Error: 'tasks' must be a list of {title, minutes, …}."
+                if not isinstance(raw_tasks, list) or not raw_tasks:
+                    return "Error: give a non-empty ordered 'tasks' list."
+                raw_fixed = args.get("fixed") or []
+                if isinstance(raw_fixed, str):
+                    try: raw_fixed = json.loads(raw_fixed)
+                    except Exception: raw_fixed = []
+
+                def _atype(tid, default):
+                    return next((t for t in ACTIVITY_TYPES if t["id"] == str(tid)),
+                                next(t for t in ACTIVITY_TYPES if t["id"] == default))
+
+                ws = (parse_hhmm(str(args["start"])) if args.get("start")
+                      else parse_hhmm(self._settings.get("plan_day_start", "08:00")))
+                if ds == date.today().isoformat() and not args.get("start"):
+                    ws = max(ws, datetime.now().hour * 60 + datetime.now().minute)
+
+                # Fixed anchors first; they (and calendar events) are obstacles tasks flow around.
+                new_blocks, occ = [], list(self._cal_intervals(ds))
+                for f in (raw_fixed if isinstance(raw_fixed, list) else []):
+                    if not isinstance(f, dict) or not f.get("start"):
+                        continue
+                    try:
+                        fs = parse_hhmm(str(f["start"]))
+                    except ValueError:
+                        continue
+                    try:
+                        fe = parse_hhmm(str(f["end"])) if f.get("end") else fs + max(5, int(f.get("minutes", 60)))
+                    except (TypeError, ValueError):
+                        fe = fs + 60
+                    fe = min(fe, DAY_END)
+                    if fe <= fs:
+                        continue
+                    at_f = _atype(f.get("type", "extra"), "extra")
+                    new_blocks.append({"id": new_id(), "date": ds, "startMin": fs, "endMin": fe,
+                                       "type": at_f["id"], "color": at_f["color"],
+                                       "title": str(f.get("title") or at_f["label"])})
+                    occ.append((fs, fe))
+
+                # Ordered tasks: each gets its full focus time, split into chunks with breaks,
+                # flowing past anchors/meetings. Breaks do NOT count toward a task's minutes.
+                brk_t = _atype("gaming", "gaming")
+                cursor, unplaced = ws, []
+                for t in raw_tasks[:12]:
+                    if not isinstance(t, dict):
+                        continue
+                    try: total = max(5, int(float(t.get("minutes") or 60)))
+                    except (TypeError, ValueError): total = 60
+                    at_t = _atype(t.get("type", "study"), "study")
+                    try: chunk = max(5, int(t["chunk"])) if t.get("chunk") else total
+                    except (TypeError, ValueError): chunk = total
+                    chunk = min(chunk, total)
+                    try: brk = max(0, int(t.get("break", 15 if chunk < total else 0)))
+                    except (TypeError, ValueError): brk = 15 if chunk < total else 0
+                    n_chunks = -(-total // chunk)
+                    left = total
+                    idx = 0
+                    while left > 0:
+                        clen = min(chunk, left)
+                        slot = _earliest_fit(occ, cursor, clen)
+                        if slot is None:
+                            unplaced.append(str(t.get("title") or at_t["label"])); break
+                        idx += 1
+                        ttl = (f"{t.get('title') or at_t['label']} ({idx})"
+                               if n_chunks > 1 else str(t.get("title") or at_t["label"]))
+                        new_blocks.append({"id": new_id(), "date": ds, "startMin": slot,
+                                           "endMin": slot + clen, "type": at_t["id"],
+                                           "color": at_t["color"], "title": ttl})
+                        occ.append((slot, slot + clen)); cursor = slot + clen; left -= clen
+                        if left > 0 and brk > 0:
+                            bslot = _earliest_fit(occ, cursor, brk)
+                            if bslot == cursor:   # only a contiguous break (skip if an anchor butts up)
+                                new_blocks.append({"id": new_id(), "date": ds, "startMin": bslot,
+                                                   "endMin": bslot + brk, "type": brk_t["id"],
+                                                   "color": brk_t["color"], "title": "Break"})
+                                occ.append((bslot, bslot + brk)); cursor = bslot + brk
+
+                if not new_blocks:
+                    return "Error: couldn't place anything — check the start time and task minutes."
+                self._all_acts = [a for a in self._all_acts if a.get("date") != ds] + new_blocks
+                save_all_activities(self._all_acts)
+                self._refresh_view()
+                lines = ", ".join(f"'{b['title']}' {fmt_time(b['startMin'])}–{fmt_time(b['endMin'])}"
+                                  for b in sorted(new_blocks, key=lambda x: x["startMin"]))
+                out = f"Planned {ds}: {lines}."
+                if unplaced:
+                    out += " | Couldn't fully fit: " + ", ".join(dict.fromkeys(unplaced))
                 return out
 
             if name == "list_blocks":
