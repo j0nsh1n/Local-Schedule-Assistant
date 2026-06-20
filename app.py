@@ -55,7 +55,8 @@ OLLAMA_URL  = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5:14b"     # better at tool-use/reasoning than llama3.1:8b
 # Curated picks that fit a 16 GB GPU and are strong at tool-calling (this app is
 # tool-heavy). Shown in the model picker alongside whatever `ollama list` reports.
-RECOMMENDED_MODELS = ["qwen3:14b", "gpt-oss:20b", "deepseek-r1:14b", "qwen2.5:14b"]
+RECOMMENDED_MODELS = ["qwen3:14b", "gpt-oss:20b", "deepseek-r1:14b", "qwen2.5:14b",
+                      "gemma4", "glm-4.7-flash", "mistral-small3.1:24b"]
 
 # ── Theme system ───────────────────────────────────────────────────────────
 # Two built-in themes, chosen in Settings and applied at startup. Every piece of
@@ -1121,6 +1122,59 @@ _GENERIC_GUIDANCE = (
     "5. Verify with list_blocks after multi-step edits, then confirm in one short sentence.\n"
 )
 
+_GEMMA_GUIDANCE = (
+    "\n\n══ MODEL-SPECIFIC INSTRUCTIONS — Gemma ══\n"
+    "You're a capable general model but less battle-tested at tool-calling than Qwen, so be "
+    "disciplined and literal:\n"
+    "1. ALWAYS emit a real TOOL CALL for any add / move / delete / rename / clear / shift / "
+    "copy / split / plan / replace request. Writing out the change, or showing a finished "
+    "schedule as text, does NOTHING — only tool calls edit the calendar.\n"
+    "2. USE THE NATIVE FUNCTION-CALL CHANNEL. Never print the call as prose, markdown, or inside "
+    "``` fences. If — and only if — you truly cannot call a function, output ONE single JSON "
+    "object {\"name\":\"<tool>\",\"arguments\":{…}} and nothing else.\n"
+    "3. EXACT ARGUMENT SHAPES (Gemma tends to drift here): times are 24-hour zero-padded "
+    "'HH:MM' strings ('09:00', '14:30'); dates are 'YYYY-MM-DD' or the user's own words "
+    "('6/14', 'tomorrow') — NEVER invent the year. plan_day.tasks / plan_day.fixed / "
+    "schedule_tasks.tasks / replace_day.blocks are JSON ARRAYS of objects with the required keys.\n"
+    "4. ONE TOOL PER BULK JOB: plan_day to build an ordered day, schedule_tasks to fit tasks, "
+    "replace_day to rebuild, shift_blocks to move the whole day, add_recurring to repeat — never "
+    "a chain of single add_block calls.\n"
+    "5. Keep replies short. After multi-step edits call list_blocks, fix anything in its "
+    "CONFLICTS section, then confirm in ONE sentence.\n"
+)
+
+_GLM_GUIDANCE = (
+    "\n\n══ MODEL-SPECIFIC INSTRUCTIONS — GLM ══\n"
+    "You're a fast agentic model — act decisively and keep internal reasoning brief.\n"
+    "1. A TOOL CALL IS REQUIRED for every add / move / delete / rename / clear / shift / copy / "
+    "split / plan / replace — never just describe the change in words.\n"
+    "2. NATIVE TOOL CALLS only — do not print the call as text, JSON, or inside ``` fences. Any "
+    "hidden reasoning is stripped before the user sees it, so it changes nothing on its own; "
+    "keep it short — this is simple scheduling, not a puzzle.\n"
+    "3. ONE TOOL FOR BULK JOBS: plan_day (ordered day with fixed anchors + chunking), "
+    "schedule_tasks (fit tasks into free time), replace_day (rebuild), shift_blocks (move the "
+    "whole day). Don't chain single add_block calls.\n"
+    "4. EXACT SHAPES: times = 24-hour zero-padded 'HH:MM' strings; dates = 'YYYY-MM-DD' or the "
+    "user's words (never invent the year). tasks / fixed / blocks are arrays of objects.\n"
+    "5. After multi-step edits, call list_blocks, fix anything in its CONFLICTS section, then "
+    "confirm in ONE short sentence.\n"
+)
+
+_MISTRAL_GUIDANCE = (
+    "\n\n══ MODEL-SPECIFIC INSTRUCTIONS — Mistral ══\n"
+    "Your function-calling is solid — use it precisely and literally:\n"
+    "1. ALWAYS call the matching tool for any schedule change; prose alone changes nothing.\n"
+    "2. Use the NATIVE function-calling channel — never emit the call as text, an array, or "
+    "inside ``` fences.\n"
+    "3. EXACT ARGUMENT SHAPES: times = 24-hour zero-padded 'HH:MM' strings; dates = 'YYYY-MM-DD' "
+    "or the user's words (never invent the year). plan_day.tasks / plan_day.fixed / "
+    "schedule_tasks.tasks / replace_day.blocks are JSON arrays of objects with the required keys.\n"
+    "4. ONE TOOL PER BULK JOB: plan_day / schedule_tasks / replace_day / shift_blocks / "
+    "add_recurring — don't loop single add_block calls for a bulk change.\n"
+    "5. After multi-step edits, call list_blocks, fix anything in its CONFLICTS section, then "
+    "confirm in ONE short sentence.\n"
+)
+
 def model_guidance(model: str) -> str:
     """Extensively detailed, model-specific addendum to the system prompt, chosen by
     matching the model tag. Targets each family's known weaknesses on this tool-heavy
@@ -1134,6 +1188,12 @@ def model_guidance(model: str) -> str:
         return _QWEN3_GUIDANCE
     if "qwen2" in m or "qwen-2" in m or "qwen2.5" in m:
         return _QWEN25_GUIDANCE
+    if "gemma" in m:
+        return _GEMMA_GUIDANCE
+    if "glm" in m:
+        return _GLM_GUIDANCE
+    if "mistral" in m or "mixtral" in m:
+        return _MISTRAL_GUIDANCE
     return _GENERIC_GUIDANCE
 
 # ══════════════════════════════════════════════════════════════════════════
