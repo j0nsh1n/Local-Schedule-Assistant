@@ -3222,6 +3222,7 @@ class MainWindow(QMainWindow):
                     return (f"Ambiguous — {len(hits)} blocks match: {listing}. "
                             f"Add 'at' with the exact start time to pick one.")
                 a = hits[0]
+                orig = (a["startMin"], a["endMin"], a.get("date"), a.get("title"))
                 old_dur = a["endMin"] - a["startMin"]
                 if args.get("start"):
                     a["startMin"] = parse_hhmm(str(args["start"]))
@@ -3238,17 +3239,28 @@ class MainWindow(QMainWindow):
                     a["title"] = str(args["new_title"]).strip()
                 if a["endMin"] <= a["startMin"]:
                     a["endMin"] = min(a["startMin"] + 60, DAY_END)
+                # Keep it conflict-free: if the requested slot overlaps another block or a
+                # meeting, relocate to the nearest free slot (like add_block) rather than
+                # leaving an overlap. Revert cleanly if the day has no room at all.
+                dur = a["endMin"] - a["startMin"]
+                day_blocks = [b for b in self._all_acts
+                              if b is not a and b.get("date") == a["date"]] + \
+                             self._cal_by_date.get(a["date"], [])
+                placed = find_free_placement(day_blocks, a["startMin"], dur)
+                if placed is None:
+                    a["startMin"], a["endMin"], a["date"], a["title"] = orig
+                    return (f"Error: no free {fmt_dur(dur)} slot on {a['date']} to move "
+                            f"'{a['title']}' into — that day is full. Free something up first, "
+                            f"or use replace_day to rebuild it.")
+                note = ""
+                if placed != a["startMin"]:
+                    note = (f" ({fmt_time(a['startMin'])} was taken — placed at the nearest "
+                            f"free slot instead.)")
+                a["startMin"], a["endMin"] = placed, placed + dur
                 save_all_activities(self._all_acts)
                 self._refresh_view()
-                others = [b for b in self._all_acts
-                          if b is not a and b.get("date") == a["date"]] + \
-                         self._cal_by_date.get(a["date"], [])
-                ov = [b["title"] for b in others
-                      if b["startMin"] < a["endMin"] and b["endMin"] > a["startMin"]]
-                warn = (f" Warning: now overlaps {', '.join(repr(t) for t in ov[:3])} — "
-                        f"consider different times.") if ov else ""
                 return (f"Moved '{a['title']}' to {a['date']}, "
-                        f"{fmt_time(a['startMin'])}–{fmt_time(a['endMin'])}.{warn}")
+                        f"{fmt_time(a['startMin'])}–{fmt_time(a['endMin'])}.{note}")
 
             if name == "clear_day":
                 n = sum(1 for a in self._all_acts if a.get("date") == ds)
