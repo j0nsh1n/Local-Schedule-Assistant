@@ -34,7 +34,7 @@ from PySide6.QtGui import (
 )
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.1.1"
+__version__  = "2.2.0"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -320,15 +320,26 @@ def find_free_placement(day_blocks: List[Dict], want_start: int, dur: int) -> Op
     return None if best is None else best[1]
 
 
-def sequentialize(blocks: List[Dict]) -> tuple:
+def sequentialize(blocks: List[Dict], blocked=None) -> tuple:
     """Sort by start time and push overlapping blocks later until the plan is
-    conflict-free. Gaps are preserved; blocks pushed past the end of day are
-    dropped. Returns (kept_blocks, n_adjusted, n_dropped)."""
+    conflict-free. If `blocked` intervals are given (e.g. read-only calendar events),
+    editable blocks are also pushed out of those windows so they never land on a
+    meeting. Gaps are preserved; blocks pushed past the end of day are dropped.
+    Returns (kept_blocks, n_adjusted, n_dropped)."""
+    blocked = sorted(blocked or [])
     out, adjusted, dropped = [], 0, 0
     cur = DAY_START
     for b in sorted(blocks, key=lambda x: (x["startMin"], x["endMin"])):
         dur = b["endMin"] - b["startMin"]
         ns  = max(b["startMin"], cur)
+        # Step past any calendar window this block would overlap; moving past one
+        # window can push it into the next, so repeat until it sits in the clear.
+        moved = True
+        while moved:
+            moved = False
+            for bs, be in blocked:
+                if ns < be and ns + dur > bs:
+                    ns = be; moved = True
         if ns + dur > DAY_END:
             dropped += 1
             continue
@@ -1020,7 +1031,10 @@ _GPTOSS_GUIDANCE = (
 
 _QWEN3_GUIDANCE = (
     "\n\n══ MODEL-SPECIFIC INSTRUCTIONS — Qwen3 ══\n"
-    "Your tool-calling is strong — use it decisively and avoid over-thinking.\n"
+    "/no_think\n"
+    "Respond directly, WITHOUT an extended reasoning pass (no <think> block) — this is a "
+    "simple scheduling task, so decide fast and call the tool. Your tool-calling is strong; "
+    "use it decisively.\n"
     "1. DECIDE QUICKLY. This is a straightforward scheduling assistant; don't enumerate many "
     "alternatives or second-guess. Keep any thinking brief, then call the tool.\n"
     "2. A TOOL CALL IS REQUIRED for every add / move / delete / rename / clear / shift / "
@@ -2220,7 +2234,8 @@ class AIPanel(QWidget):
             "  - When you split a study block into chunks with breaks, the focus chunks are "
             "\"study\" and the breaks are \"gaming\" (pass break_type to split_block).\n\n"
             "SCHEDULE (day on screen)\n"
-            "Google Calendar (READ-ONLY — you cannot change these):\n")
+            "Google Calendar (READ-ONLY — you cannot move or delete these; treat each as a "
+            "FIXED obstacle and schedule your blocks around it):\n")
         cal = ctx.get("cal_events", [])
         p += "".join(f"  - {e['title']}: {fmt_time(e['startMin'])}–{fmt_time(e['endMin'])}\n"
                      for e in cal) or "  (none)\n"
@@ -2275,13 +2290,16 @@ class AIPanel(QWidget):
             "delete by title alone if the user pointed at a specific time. To wipe the "
             "WHOLE day use clear_day.\n"
             "  - Google Calendar events are READ-ONLY; if asked to change one, say it must "
-            "be edited in Google Calendar.\n"
+            "be edited in Google Calendar. PLAN AROUND THEM: when you shift / rebuild / reflow "
+            "a day the app automatically pushes your blocks off any meeting, but you should "
+            "still arrange things sensibly around it (e.g. resume the displaced work right "
+            "after the meeting ends rather than leaving a hole).\n"
             "  - CHECK YOUR WORK: after any edit — especially several at once or a whole-day "
-            "rebuild — call list_blocks to confirm the day came out right: the correct "
-            "blocks exist, times/durations match what was asked, nothing overlaps, and "
-            "nothing was deleted by accident. If anything is wrong, fix it and check again. "
-            "Repeat until the schedule is correct. Only tell the user it's done once you have "
-            "verified it.\n"
+            "rebuild — call list_blocks. It ends with a CONFLICTS section that flags every "
+            "overlap (block-on-block AND block-on-meeting). If it lists conflicts, fix them "
+            "and call list_blocks again. Also confirm the right blocks exist, times/durations "
+            "match the request, and nothing was deleted by accident. Repeat until it reports "
+            "'No conflicts' — only then tell the user it's done.\n"
             "  - After it's verified, confirm in one short sentence — don't restate the whole "
             "schedule.\n"
             "  - Be friendly and concise.\n\n"
@@ -2963,6 +2981,11 @@ class MainWindow(QMainWindow):
         d = d or self._cur_date
         return self._cal_by_date.get(d.isoformat(), [])
 
+    def _cal_intervals(self, ds: str):
+        """(start, end) minute pairs of read-only calendar events on date `ds`, passed to
+        sequentialize() so editable blocks get pushed off meetings during shift/reflow/rebuild."""
+        return [(e["startMin"], e["endMin"]) for e in self._cal_by_date.get(ds, [])]
+
     def _day_acts(self, d: Optional[date] = None) -> List[Dict]:
         ds = (d or self._cur_date).isoformat()
         return [a for a in self._all_acts if a.get("date") == ds]
@@ -3255,7 +3278,7 @@ class MainWindow(QMainWindow):
                 } for a in source]
                 if merge:
                     kept = [a for a in self._all_acts if a.get("date") == dst]
-                    merged, n_adj, n_drop = sequentialize(kept + copies)
+                    merged, n_adj, n_drop = sequentialize(kept + copies, blocked=self._cal_intervals(dst))
                     self._all_acts = [a for a in self._all_acts if a.get("date") != dst] + merged
                     note = (f" ({n_adj} shifted to avoid overlaps.)" if n_adj else "")
                 else:
@@ -3283,8 +3306,9 @@ class MainWindow(QMainWindow):
                     dur = a["endMin"] - a["startMin"]
                     ns  = max(DAY_START, min(a["startMin"] + mins, DAY_END - dur))
                     a["startMin"], a["endMin"] = ns, ns + dur
-                # clamping at the day edges can pile blocks up — de-overlap the result
-                fixed, n_adj, n_drop = sequentialize(acts)
+                # clamping at the day edges can pile blocks up — de-overlap the result,
+                # and keep blocks off any calendar meetings
+                fixed, n_adj, n_drop = sequentialize(acts, blocked=self._cal_intervals(ds))
                 self._all_acts = [a for a in self._all_acts if a.get("date") != ds] + fixed
                 save_all_activities(self._all_acts)
                 self._refresh_view()
@@ -3323,7 +3347,7 @@ class MainWindow(QMainWindow):
                         skipped += 1
                 if not new_acts:
                     return "Error: none of the blocks were valid (need start, end as 24h HH:MM, title)."
-                new_acts, n_adj, n_drop = sequentialize(new_acts)
+                new_acts, n_adj, n_drop = sequentialize(new_acts, blocked=self._cal_intervals(ds))
                 if not new_acts:
                     return "Error: the blocks don't fit within the day (00:00–24:00)."
                 self._all_acts = [a for a in self._all_acts if a.get("date") != ds] + new_acts
@@ -3594,16 +3618,36 @@ class MainWindow(QMainWindow):
                 return out
 
             if name == "list_blocks":
-                lines = []
-                for ev in sorted(self._cal_by_date.get(ds, []), key=lambda x: x["startMin"]):
-                    lines.append(f"[calendar] {ev['title']}: "
-                                 f"{fmt_time(ev['startMin'])}–{fmt_time(ev['endMin'])}")
-                day_acts = [x for x in self._all_acts if x.get("date") == ds]
-                for a in sorted(day_acts, key=lambda x: x["startMin"]):
-                    lines.append(f"[{a['type']}] {a['title']}: "
-                                 f"{fmt_time(a['startMin'])}–{fmt_time(a['endMin'])}")
-                return (f"Schedule for {ds}:\n" + "\n".join(lines)) if lines \
-                       else f"Nothing scheduled on {ds}."
+                cal = sorted(self._cal_by_date.get(ds, []), key=lambda x: x["startMin"])
+                day_acts = sorted([x for x in self._all_acts if x.get("date") == ds],
+                                  key=lambda x: x["startMin"])
+                lines = [f"[calendar] {ev['title']}: {fmt_time(ev['startMin'])}–{fmt_time(ev['endMin'])}"
+                         for ev in cal]
+                lines += [f"[{a['type']}] {a['title']}: {fmt_time(a['startMin'])}–{fmt_time(a['endMin'])}"
+                          for a in day_acts]
+                if not lines:
+                    return f"Nothing scheduled on {ds}."
+                # Conflict scan, so verification doesn't depend on the model eyeballing overlaps.
+                conflicts = []
+                for i, a in enumerate(day_acts):
+                    for ev in cal:
+                        if a["startMin"] < ev["endMin"] and a["endMin"] > ev["startMin"]:
+                            conflicts.append(
+                                f"'{a['title']}' ({fmt_time(a['startMin'])}–{fmt_time(a['endMin'])}) "
+                                f"overlaps calendar event '{ev['title']}' "
+                                f"({fmt_time(ev['startMin'])}–{fmt_time(ev['endMin'])})")
+                    for b in day_acts[i + 1:]:
+                        if a["startMin"] < b["endMin"] and a["endMin"] > b["startMin"]:
+                            conflicts.append(
+                                f"'{a['title']}' and '{b['title']}' overlap "
+                                f"near {fmt_time(max(a['startMin'], b['startMin']))}")
+                out = f"Schedule for {ds}:\n" + "\n".join(lines)
+                if conflicts:
+                    out += ("\nCONFLICTS — fix these, then re-check:\n"
+                            + "\n".join(f"  - {c}" for c in conflicts))
+                else:
+                    out += "\nNo conflicts: nothing overlaps and no block sits on a meeting."
+                return out
 
             if name == "reflow_from_now":
                 try:
@@ -3631,7 +3675,7 @@ class MainWindow(QMainWindow):
                     ns  = max(DAY_START, min(a["startMin"] + delay, DAY_END - dur))
                     a["startMin"], a["endMin"] = ns, ns + dur
                 day = [a for a in self._all_acts if a.get("date") == ds]
-                fixed, n_adj, n_drop = sequentialize(day)
+                fixed, n_adj, n_drop = sequentialize(day, blocked=self._cal_intervals(ds))
                 self._all_acts = [a for a in self._all_acts if a.get("date") != ds] + fixed
                 save_all_activities(self._all_acts)
                 self._refresh_view()
