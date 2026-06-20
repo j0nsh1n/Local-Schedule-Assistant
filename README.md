@@ -67,10 +67,13 @@ A ready-to-run `DailyScheduler.exe` (no Python needed) is attached to the
 2. Pull one or more models. The picker recommends models that fit a 16 GB GPU and are strong
    at tool-calling (this app is tool-heavy):
    ```bat
-   ollama pull qwen3:14b        # recommended — best tool-calling stability
-   ollama pull gpt-oss:20b      # fast, strong reasoning
-   ollama pull deepseek-r1:14b  # reasoning model (chain-of-thought)
-   ollama pull qwen2.5:14b      # default / fallback
+   ollama pull qwen3:14b              # recommended — best tool-calling stability
+   ollama pull gpt-oss:20b            # fast, strong reasoning
+   ollama pull deepseek-r1:14b        # reasoning model (chain-of-thought)
+   ollama pull qwen2.5:14b            # default / fallback
+   ollama pull mistral-small3.1:24b   # solid native tool-calling (~14 GB)
+   ollama pull gemma4                 # newer Google model (needs Ollama 0.22+; pick a size that fits 16 GB)
+   ollama pull glm-4.7-flash          # fast 30B-A3B MoE (needs a recent Ollama)
    ```
    Choose a model from the **dropdown** in the AI panel header (or in **Settings → AI**). It
    lists everything `ollama list` reports plus the recommended set. The app tailors its prompt
