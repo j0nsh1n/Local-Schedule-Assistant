@@ -32,6 +32,7 @@ from PySide6.QtGui import (
     QPainter, QColor, QPen, QFont, QFontMetrics,
     QPalette, QPixmap, QIcon,
 )
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
 __version__  = "2.5.0"
@@ -4424,7 +4425,35 @@ def main():
     pal.setColor(QPalette.ToolTipText,     C_TEXT)
     app.setPalette(pal)
 
+    # ── Single instance ──────────────────────────────────────────────────────
+    # If a copy is already running, ask it to surface its window and exit — so
+    # launching the app again doesn't spawn a duplicate process / tray icon (which
+    # is also what was locking the .exe during rebuilds).
+    _server = None
+    try:
+        _lock_name = "DailyScheduler.singleton." + (os.environ.get("USERNAME") or "user")
+        _probe = QLocalSocket()
+        _probe.connectToServer(_lock_name)
+        if _probe.waitForConnected(250):
+            _probe.write(b"show"); _probe.flush(); _probe.waitForBytesWritten(300)
+            _probe.disconnectFromServer()
+            return   # another instance is live — we asked it to show, now exit
+        QLocalServer.removeServer(_lock_name)   # clear a stale endpoint from a past crash
+        _server = QLocalServer()
+        _server.listen(_lock_name)
+    except Exception:
+        _server = None
+
     win = MainWindow()
+
+    # A second launch connects to our server → bring the existing window to the front.
+    if _server is not None:
+        def _surface():
+            conn = _server.nextPendingConnection()
+            if conn is not None:
+                conn.close()
+            win._show_from_tray()
+        _server.newConnection.connect(_surface)
 
     # Centre on primary screen
     geo = app.primaryScreen().availableGeometry()
