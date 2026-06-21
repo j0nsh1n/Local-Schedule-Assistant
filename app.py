@@ -34,7 +34,7 @@ from PySide6.QtGui import (
 )
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.4.0"
+__version__  = "2.5.0"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -935,6 +935,27 @@ AI_TOOLS = [
                     "break":   {"type": "integer", "description": "Break minutes between chunks (default 15 when chunk is set; 0 for none)."},
                 }, "required": ["title", "minutes"]}},
         }, "required": ["tasks"]}}},
+    {"type": "function", "function": {
+        "name": "make_room",
+        "description": "Add a FIXED appointment at an exact time and shuffle the day's existing "
+                       "blocks AROUND it — WITHOUT deleting any. THIS is how to handle 'I have a "
+                       "meeting 12:00–13:30, adjust my schedule' or 'something came up at 3pm, "
+                       "move things around it'. The appointment (plus optional buffer time) and "
+                       "any 'pin'ned blocks stay fixed; every OTHER block keeps its order and "
+                       "duration and is shifted to flow around them (and around calendar events). "
+                       "Use this instead of add_block (which would just drop the appointment in a "
+                       "random free slot) or a chain of move_block calls.",
+        "parameters": {"type": "object", "properties": {
+            "date":  {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
+            "title": {"type": "string", "description": "Name of the appointment (e.g. 'College Applications Meeting')."},
+            "start": {"type": "string", "description": "Appointment start, 24h HH:MM."},
+            "end":   {"type": "string", "description": "Appointment end, 24h HH:MM."},
+            "type":  {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES], "description": "Category (default 'extra')."},
+            "buffer_before": {"type": "integer", "description": "Minutes of transition time to reserve right BEFORE the appointment (added as a Break). Default 0."},
+            "buffer_after":  {"type": "integer", "description": "Minutes of transition time to reserve right AFTER the appointment. Default 0."},
+            "pin": {"type": "array", "items": {"type": "string"},
+                     "description": "Titles of existing blocks to keep FIXED in place (e.g. ['Workout/Break']); everything else flows around them. Optional."},
+        }, "required": ["title", "start", "end"]}}},
 ]
 
 AI_TOOL_NAMES = {t["function"]["name"] for t in AI_TOOLS}
@@ -2360,6 +2381,9 @@ class AIPanel(QWidget):
             "  plan_day       – BUILD a full day: ORDERED tasks + fixed anchors (meals/workout) "
             "+ chunking, laid out around meetings (rebuilds the day). Best for 'X then Y, lunch "
             "at 13:00, workout at 16:00, 30-min chunks with breaks'.\n"
+            "  make_room      – add ONE fixed appointment at a set time to an ALREADY-PLANNED day "
+            "and shift the existing blocks around it WITHOUT deleting them (keep some 'pin'ned). "
+            "Best for 'I have a meeting 12:00–13:30, adjust my day around it'.\n"
             "  find_free_time – (read-only) list open gaps; use to answer \"when am I free?\"\n"
             "  reflow_from_now– push the rest of today later/earlier when running late\n"
             "  plan_for_deadline – spread work across the days before a due date\n"
@@ -2387,7 +2411,12 @@ class AIPanel(QWidget):
             "time — breaks are added on top), set chunk/break, and pass the fixed items in 'fixed'. "
             "The app lays everything out in order, splits into chunks, and flows the rest past the "
             "anchors and meetings — so you don't compute any times yourself. Don't shrink a task's "
-            "minutes to 'make room' for breaks; plan_day handles that.\n\n"
+            "minutes to 'make room' for breaks; plan_day handles that.\n"
+            "  - For a NEW fixed appointment in an ALREADY-PLANNED day ('I have a meeting at 3pm, "
+            "rearrange around it'), use make_room — ONE call that drops the appointment at the "
+            "exact time and shifts the existing blocks around it without deleting any (pass 'pin' "
+            "for blocks that must not move, e.g. a workout). Do NOT use add_block (it would just "
+            "drop the appointment in a random free slot), and do NOT chain move_block calls.\n\n"
             "RULES\n"
             "  - ALWAYS call a tool when asked to add/move/remove/rename/copy/clear/shift/plan "
             "— never just describe the change.\n"
@@ -2437,7 +2466,12 @@ class AIPanel(QWidget):
             "{title:\"College Essays\",minutes:120,type:\"project\",chunk:30,break:15}, "
             "{title:\"History\",minutes:120,type:\"study\",chunk:30,break:15}, "
             "{title:\"AP Psychology\",minutes:120,type:\"study\",chunk:30,break:15}])  "
-            "← each task keeps a full 2h of focus; breaks + lunch + workout are extra, placed around it.\n")
+            "← each task keeps a full 2h of focus; breaks + lunch + workout are extra, placed around it.\n"
+            "  \"I have a college-apps meeting 12:00–13:30 on 6/22 (25 min buffer each side); shift "
+            "my day around it but don't move my workout\" → make_room(date=\"6/22\", title=\"College "
+            "Applications Meeting\", start=\"12:00\", end=\"13:30\", buffer_before=25, buffer_after=25, "
+            "pin=[\"Workout/Break\"])  ← inserts the meeting + buffers and shifts everything else "
+            "around it, keeping the workout fixed; nothing is deleted.\n")
         add = {"plan": "\nThe user wants help planning. Gather what they need to get done, "
                        "reason out durations / urgency / preferred times, then place them with "
                        "ONE schedule_tasks call (it keeps existing blocks safe) and verify.",
@@ -3845,6 +3879,110 @@ class MainWindow(QMainWindow):
                 out = f"Planned {ds}: {lines}."
                 if unplaced:
                     out += " | Couldn't fully fit: " + ", ".join(dict.fromkeys(unplaced))
+                return out
+
+            if name == "make_room":
+                t = args.get("title")
+                if not (t and str(t).strip()):
+                    return "Error: give the appointment a 'title'."
+                try:
+                    es = parse_hhmm(str(args["start"])); ee = parse_hhmm(str(args["end"]))
+                except (KeyError, ValueError):
+                    return "Error: give the appointment 'start' and 'end' as 24h HH:MM."
+                if ee <= es:
+                    return "Error: the appointment's end must be after its start."
+                try: bb = max(0, int(args.get("buffer_before", 0) or 0))
+                except (TypeError, ValueError): bb = 0
+                try: ba = max(0, int(args.get("buffer_after", 0) or 0))
+                except (TypeError, ValueError): ba = 0
+                tid  = str(args.get("type", "extra"))
+                at_e = next((x for x in ACTIVITY_TYPES if x["id"] == tid),
+                            next(x for x in ACTIVITY_TYPES if x["id"] == "extra"))
+                brk_t = next((x for x in ACTIVITY_TYPES if x["id"] == "gaming"), ACTIVITY_TYPES[0])
+                # Resolve any pinned blocks (kept exactly where they are).
+                pin_args = args.get("pin") or []
+                if isinstance(pin_args, str):
+                    pin_args = [pin_args]
+                pinned, pinned_ids = [], set()
+                for p in (pin_args if isinstance(pin_args, list) else []):
+                    ptitle = p.get("title") if isinstance(p, dict) else p
+                    pat    = p.get("at") if isinstance(p, dict) else None
+                    pn = norm_title(ptitle) if ptitle else None
+                    try:
+                        atm = parse_hhmm(str(pat)) if pat else None
+                    except ValueError:
+                        atm = None
+                    for a in self._all_acts:
+                        if a.get("date") != ds or a["id"] in pinned_ids:
+                            continue
+                        # EXACT title match for pinning, so e.g. pinning 'Workout/Break'
+                        # doesn't also catch the plain 'Break' blocks (fuzzy would).
+                        if pn is not None and norm_title(a.get("title", "")) != pn:
+                            continue
+                        if atm is not None and a["startMin"] != atm:
+                            continue
+                        pinned.append(a); pinned_ids.add(a["id"])
+                # Fixed set = appointment (+ buffer Breaks) + pinned + calendar; everything else
+                # keeps its order/duration and is shifted to flow around it.
+                appt = {"id": new_id(), "date": ds, "startMin": es, "endMin": ee,
+                        "type": at_e["id"], "color": at_e["color"], "title": str(t).strip()}
+                new_fixed, win_s, win_e = [appt], es, ee
+                if bb > 0:
+                    win_s = max(DAY_START, es - bb)
+                    new_fixed.append({"id": new_id(), "date": ds, "startMin": win_s, "endMin": es,
+                                      "type": brk_t["id"], "color": brk_t["color"], "title": "Break"})
+                if ba > 0:
+                    win_e = min(DAY_END, ee + ba)
+                    new_fixed.append({"id": new_id(), "date": ds, "startMin": ee, "endMin": win_e,
+                                      "type": brk_t["id"], "color": brk_t["color"], "title": "Break"})
+                # Reflow: blocks entirely before the appointment stay put; one straddling its
+                # start is shrunk to end there; everything from the appointment onward ripples
+                # after it, flowing past pinned blocks + meetings. Overflow shrinks the tail
+                # rather than dropping it, so nothing is lost.
+                all_obs = [(win_s, win_e)] + self._cal_intervals(ds) + \
+                          [(p["startMin"], p["endMin"]) for p in pinned]
+                movers = sorted([a for a in self._all_acts
+                                 if a.get("date") == ds and a["id"] not in pinned_ids],
+                                key=lambda x: x["startMin"])
+                kept_movers, after, n_shrunk, n_drop = [], [], 0, 0
+                for b in movers:
+                    if b["endMin"] <= win_s:
+                        kept_movers.append(b)                                  # before — unchanged
+                    elif b["startMin"] < win_s and win_s - b["startMin"] >= 5:
+                        kept_movers.append({**b, "endMin": win_s}); n_shrunk += 1  # straddler — trim
+                    else:
+                        after.append(b)                                        # ripple after the appt
+                cursor = win_e
+                for b in after:
+                    dur = b["endMin"] - b["startMin"]
+                    slot = _earliest_fit(all_obs, cursor, dur)
+                    if slot is not None:
+                        kept_movers.append({**b, "startMin": slot, "endMin": slot + dur})
+                        cursor = slot + dur
+                        continue
+                    gap = next(((gs, ge) for gs, ge in _free_slots(all_obs, cursor, DAY_END)
+                                if ge - gs >= 5), None)
+                    if gap:
+                        gs, ge = gap
+                        clen = min(dur, ge - gs)
+                        kept_movers.append({**b, "startMin": gs, "endMin": gs + clen}); n_shrunk += 1
+                        cursor = gs + clen
+                    else:
+                        n_drop += 1
+                kept = new_fixed + pinned + kept_movers
+                self._all_acts = [a for a in self._all_acts if a.get("date") != ds] + kept
+                save_all_activities(self._all_acts)
+                self._refresh_view()
+                lines = ", ".join(f"'{b['title']}' {fmt_time(b['startMin'])}–{fmt_time(b['endMin'])}"
+                                  for b in sorted(kept, key=lambda x: x["startMin"]))
+                out = (f"Added '{appt['title']}' {fmt_time(es)}–{fmt_time(ee)} on {ds} and shifted "
+                       f"the rest around it: {lines}.")
+                if pinned:
+                    out += " Kept fixed: " + ", ".join(dict.fromkeys(p["title"] for p in pinned)) + "."
+                if n_shrunk:
+                    out += f" ({n_shrunk} block(s) shrunk to fit.)"
+                if n_drop:
+                    out += f" ({n_drop} couldn't fit even shrunk — remove or shorten something.)"
                 return out
 
             if name == "list_blocks":
