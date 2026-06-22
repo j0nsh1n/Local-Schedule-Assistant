@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox, QFormLayout,
 )
 from PySide6.QtCore import (
-    Qt, QTimer, QThread, Signal, QRect, QTime,
+    Qt, QTimer, QThread, Signal, QRect, QTime, QSharedMemory,
 )
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QFont, QFontMetrics,
@@ -35,7 +35,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.5.0"
+__version__  = "2.5.1"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -4426,23 +4426,32 @@ def main():
     app.setPalette(pal)
 
     # ── Single instance ──────────────────────────────────────────────────────
-    # If a copy is already running, ask it to surface its window and exit — so
-    # launching the app again doesn't spawn a duplicate process / tray icon (which
-    # is also what was locking the .exe during rebuilds).
-    _server = None
+    # Detect a running copy with an ATOMIC shared-memory create — race-safe at boot,
+    # where Windows can launch several copies at once (an earlier listen()-based guard
+    # let racing copies survive as zombies). Exactly one create() succeeds; every other
+    # launch exits after pinging the winner to surface its window. A QLocalServer carries
+    # that "show" ping. Wrapped so it can never block launch. On Windows the OS frees the
+    # segment when the process ends, so a crash leaves no stale lock.
+    _key = "DailyScheduler.instance." + (os.environ.get("USERNAME") or "user")
+    _guard, _server = None, None
     try:
-        _lock_name = "DailyScheduler.singleton." + (os.environ.get("USERNAME") or "user")
-        _probe = QLocalSocket()
-        _probe.connectToServer(_lock_name)
-        if _probe.waitForConnected(250):
-            _probe.write(b"show"); _probe.flush(); _probe.waitForBytesWritten(300)
-            _probe.disconnectFromServer()
-            return   # another instance is live — we asked it to show, now exit
-        QLocalServer.removeServer(_lock_name)   # clear a stale endpoint from a past crash
-        _server = QLocalServer()
-        _server.listen(_lock_name)
+        _guard = QSharedMemory(_key)
+        if _guard.create(1):
+            QLocalServer.removeServer(_key)
+            _server = QLocalServer()
+            _server.listen(_key)
+        else:
+            # Another copy already holds the lock (or just won the race) — surface it, exit.
+            _ping = QLocalSocket()
+            _ping.connectToServer(_key)
+            if _ping.waitForConnected(400):
+                _ping.write(b"show"); _ping.flush(); _ping.waitForBytesWritten(400)
+                _ping.disconnectFromServer()
+            try: _guard.detach()      # release the failed-create handle right away
+            except Exception: pass
+            return
     except Exception:
-        _server = None
+        _guard, _server = None, None   # never let the guard stop the app from launching
 
     win = MainWindow()
 
