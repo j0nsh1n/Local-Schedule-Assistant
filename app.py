@@ -35,7 +35,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.5.1"
+__version__  = "2.5.2"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -192,6 +192,42 @@ def save_all_activities(acts: List[Dict]) -> None:
     try:
         DATA_FILE.write_text(json.dumps(acts, indent=2))
     except Exception:
+        pass
+
+# ── Notification de-dup (cross-process) ──────────────────────────────────────
+# A block alert must fire EXACTLY ONCE per day — even if more than one copy of the
+# app is running, each with its own 20 s notify timer (e.g. a second instance that
+# slipped past the single-instance guard at boot, where Windows launches several
+# copies at once). The in-memory `_notified` set only dedups within one process;
+# these atomic marker files dedup ACROSS processes: os.open(O_CREAT|O_EXCL) lets
+# exactly one claimer win the race, so two instances can no longer double-alert.
+NOTIFY_MARK_DIR = DATA_DIR / ".notified"
+
+def claim_block_alert(day: str, block_id: str, start_min: int) -> bool:
+    """Atomically claim the right to alert for (day, block, start). Returns True for
+    the first claimer across ALL processes, False if it was already claimed. Fails
+    OPEN (True) on any filesystem error so a broken FS can't silence reminders."""
+    try:
+        NOTIFY_MARK_DIR.mkdir(parents=True, exist_ok=True)
+        path = NOTIFY_MARK_DIR / f"{day}__{block_id}__{start_min}"
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except OSError:
+        return True
+
+def purge_old_alert_marks(keep_day: str) -> None:
+    """Drop alert markers from days other than `keep_day` so the dir can't grow."""
+    try:
+        for p in NOTIFY_MARK_DIR.glob("*"):
+            if not p.name.startswith(keep_day + "__"):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    except OSError:
         pass
 
 # ── Settings (persisted to ~/.daily-scheduler/settings.json) ────────────────
@@ -4352,6 +4388,7 @@ class MainWindow(QMainWindow):
         if today != self._notified_day:       # new day → forget yesterday's notifications
             self._notified.clear()
             self._notified_day = today
+            purge_old_alert_marks(today)
         for b in self._all_acts:
             if b.get("date") != today:
                 continue
@@ -4362,11 +4399,14 @@ class MainWindow(QMainWindow):
             lead = int(self._settings.get("notify_lead_min", 0) or 0)
             fire_at = sm - lead          # alert this many minutes before the block starts
             if now_min - self.NOTIFY_WINDOW <= fire_at <= now_min:
-                self._notified.add(key)
-                when = f"Starting in {lead} min · " if lead else "Starting now · "
-                self._alert(
-                    f"▶ {b['title']}",
-                    f"{when}{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
+                self._notified.add(key)   # this process won't re-check this block
+                # Fire exactly once even if another instance is also running: only
+                # the process that wins the atomic claim shows the alert.
+                if claim_block_alert(today, b["id"], sm):
+                    when = f"Starting in {lead} min · " if lead else "Starting now · "
+                    self._alert(
+                        f"▶ {b['title']}",
+                        f"{when}{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
 
     def closeEvent(self, ev):
         # Closing the window keeps the app alive in the tray so reminders still fire.
@@ -4452,6 +4492,16 @@ def main():
             return
     except Exception:
         _guard, _server = None, None   # never let the guard stop the app from launching
+
+    # Startup diagnostic: one line per SURVIVING launch (duplicates return above and
+    # never reach here). If a post-boot read of this log shows two lines with the same
+    # boot timestamp, a second instance slipped past the guard. No schedule data logged.
+    try:
+        with open(DATA_DIR / "startup.log", "a", encoding="utf-8") as _lf:
+            _lf.write(f"{datetime.now().isoformat()} pid={os.getpid()} "
+                      f"argv={sys.argv[1:]} guard={'won' if _server is not None else 'fell-through'}\n")
+    except Exception:
+        pass
 
     win = MainWindow()
 
