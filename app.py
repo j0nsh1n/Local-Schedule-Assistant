@@ -35,7 +35,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.5.2"
+__version__  = "2.5.3"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -2941,6 +2941,7 @@ class MainWindow(QMainWindow):
         self._ai_visible   = False
         # notifications (persisted in settings.json)
         self._tray         = None
+        self._tray_retry_pending = False   # a tray-availability retry chain is running
         self._notify_act = self._dnd_act = self._startup_act = None   # set in _setup_tray
         self._notify_on    = self._settings["notify_on"]
         self._dnd_override = self._settings["dnd_override"]   # break through DND via app-drawn popup
@@ -4228,9 +4229,27 @@ class MainWindow(QMainWindow):
         p.end()
         return QIcon(pm)
 
-    def _setup_tray(self):
-        if not QSystemTrayIcon.isSystemTrayAvailable():
+    def _setup_tray(self, _attempt=0):
+        # Robust against the Windows login race: right after sign-in the shell often
+        # (a) reports the tray UNAVAILABLE for a while, or (b) reports it AVAILABLE but
+        # silently drops the icon's first add. We retry (a) for ~60 s and re-assert (b)
+        # via _reassert_tray a few seconds later. Idempotent: builds the icon at most
+        # once, so retry/self-heal/explorer-restart callers never stack duplicate icons.
+        if self._really_quit:
             return
+        if self._tray is not None:
+            if not self._tray.isVisible():
+                self._tray.show()
+            return
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            if not (_attempt == 0 and self._tray_retry_pending):   # don't start a 2nd chain
+                if _attempt < 12:
+                    self._tray_retry_pending = True
+                    QTimer.singleShot(5000, lambda: self._setup_tray(_attempt + 1))
+                else:
+                    self._tray_retry_pending = False               # chain exhausted
+            return
+        self._tray_retry_pending = False
         self._tray = QSystemTrayIcon(self._make_app_icon(), self)
         self._tray.setToolTip(f"Daily Scheduler v{APP_VERSION}")
         menu = QMenu()
@@ -4267,6 +4286,19 @@ class MainWindow(QMainWindow):
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
+        # At login the shell may accept isSystemTrayAvailable() but drop this first
+        # add. Re-assert once it has settled (only when auto-launched, to avoid a
+        # cosmetic flicker on a normal foreground launch where the icon is fine).
+        if "--startup" in sys.argv:
+            QTimer.singleShot(4000, self._reassert_tray)
+            QTimer.singleShot(12000, self._reassert_tray)
+
+    def _reassert_tray(self):
+        # Force Windows to re-add the icon. hide() issues NIM_DELETE before show()'s
+        # NIM_ADD, so this re-registers a dropped icon WITHOUT leaving a duplicate.
+        if self._tray is not None and not self._really_quit:
+            self._tray.hide()
+            self._tray.show()
 
     def _update_setting(self, key, value):
         self._settings[key] = value
@@ -4309,6 +4341,9 @@ class MainWindow(QMainWindow):
             self._show_from_tray()
 
     def _show_from_tray(self):
+        # Self-heal the tray icon (e.g. if explorer restarted and evicted it) so a
+        # surface ping from a second launch always restores both window and icon.
+        self._setup_tray()
         self.showNormal(); self.raise_(); self.activateWindow()
 
     def _test_notification(self):
@@ -4518,18 +4553,14 @@ def main():
     geo = app.primaryScreen().availableGeometry()
     win.move((geo.width() - win.width()) // 2, (geo.height() - win.height()) // 2)
 
-    # Launched at login (--startup): stay hidden in the tray instead of popping the
-    # window. Fall back to showing it if there's no tray to live in.
-    start_hidden = "--startup" in sys.argv
-    if start_hidden and win._tray is not None:
-        if not win._tray_hinted:
-            win._tray_hinted = True
-            win._tray.showMessage(
-                "Daily Scheduler is running",
-                "Open it from the tray icon. It'll remind you when blocks start.",
-                win._make_app_icon(), 5000)
-    else:
-        win.show()
+    # Always show the window on launch — including at Windows startup (--startup).
+    # A hidden-to-tray start was fragile: at sign-in the shell can report the tray
+    # ready (isSystemTrayAvailable() == True) BEFORE it will actually render an icon,
+    # so the app ended up running with no window AND no tray icon — unreachable except
+    # by killing it in Task Manager. Showing the window guarantees the app is always
+    # accessible at boot; it still lives in the tray after you close the window (see
+    # closeEvent), and _setup_tray() now retries/re-asserts so that icon is reliable.
+    win.show()
 
     sys.exit(app.exec())
 
