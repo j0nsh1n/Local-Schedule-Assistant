@@ -35,7 +35,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.5.3"
+__version__  = "2.5.4"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -245,6 +245,11 @@ DEFAULT_SETTINGS = {
     "ollama_autostart": False,    # keep Ollama off at launch unless the user opts in
     "temperature":      0.3,
     "num_ctx":          16384,
+    # At Windows sign-in, wait this many seconds before building the window so a
+    # boot-time GPU driver crash/reset can't strand it (process up, window can't paint).
+    # Only applies to the auto-launch (--startup); a normal launch shows immediately.
+    # 0 disables the delay.
+    "startup_delay_sec": 60,
 }
 
 def load_settings() -> Dict:
@@ -4538,29 +4543,48 @@ def main():
     except Exception:
         pass
 
-    win = MainWindow()
+    # The window is built via _build_window() — immediately for a normal launch, but
+    # DEFERRED at Windows sign-in (see the startup-delay block below).
+    holder = {"win": None}
 
-    # A second launch connects to our server → bring the existing window to the front.
+    def _build_window():
+        if holder["win"] is not None:
+            return
+        win = MainWindow()
+        holder["win"] = win
+        # Centre on the primary screen, then show. We always show the window (a
+        # hidden-to-tray start was unreachable when the tray icon failed to render at
+        # boot); it still lives in the tray after you close it (see closeEvent), and
+        # _setup_tray() retries/re-asserts so that icon is reliable.
+        geo = app.primaryScreen().availableGeometry()
+        win.move((geo.width() - win.width()) // 2, (geo.height() - win.height()) // 2)
+        win.show(); win.raise_(); win.activateWindow()
+
+    # A second launch pings our server → surface the window (building it first if we're
+    # still inside the startup delay and it doesn't exist yet).
     if _server is not None:
         def _surface():
             conn = _server.nextPendingConnection()
             if conn is not None:
                 conn.close()
-            win._show_from_tray()
+            _build_window()
+            holder["win"]._show_from_tray()
         _server.newConnection.connect(_surface)
 
-    # Centre on primary screen
-    geo = app.primaryScreen().availableGeometry()
-    win.move((geo.width() - win.width()) // 2, (geo.height() - win.height()) // 2)
-
-    # Always show the window on launch — including at Windows startup (--startup).
-    # A hidden-to-tray start was fragile: at sign-in the shell can report the tray
-    # ready (isSystemTrayAvailable() == True) BEFORE it will actually render an icon,
-    # so the app ended up running with no window AND no tray icon — unreachable except
-    # by killing it in Task Manager. Showing the window guarantees the app is always
-    # accessible at boot; it still lives in the tray after you close the window (see
-    # closeEvent), and _setup_tray() now retries/re-asserts so that icon is reliable.
-    win.show()
+    # At Windows sign-in (--startup) the GPU driver can crash/reset for the first ~minute
+    # (observed on this machine: AMD atiadlxx.dll fault + a GPU watchdog TDR right at boot).
+    # A window built during that window can't paint, leaving the app in Task Manager with
+    # no visible window. So DELAY building the window until the GPU has settled. The real
+    # fix is disabling Windows Fast Startup / a GPU driver reinstall — this is a safety net.
+    # startup_delay_sec (settings.json, default 60) is configurable; 0 disables the delay.
+    if "--startup" in sys.argv:
+        delay = max(0, int(load_settings().get("startup_delay_sec", 60) or 0))
+        if delay:
+            QTimer.singleShot(delay * 1000, _build_window)
+        else:
+            _build_window()
+    else:
+        _build_window()
 
     sys.exit(app.exec())
 
