@@ -35,7 +35,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.5.4"
+__version__  = "2.5.5"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -245,11 +245,12 @@ DEFAULT_SETTINGS = {
     "ollama_autostart": False,    # keep Ollama off at launch unless the user opts in
     "temperature":      0.3,
     "num_ctx":          16384,
-    # At Windows sign-in, wait this many seconds before building the window so a
-    # boot-time GPU driver crash/reset can't strand it (process up, window can't paint).
-    # Only applies to the auto-launch (--startup); a normal launch shows immediately.
-    # 0 disables the delay.
-    "startup_delay_sec": 60,
+    # Optional buffer: at Windows sign-in, wait this many seconds before building the
+    # window. The real boot failures are fixed at the source (the `ollama list` hang in
+    # list_ollama_models, and the AMD GPU-crash-at-boot via disabling Fast Startup), so
+    # this is now just a small settle buffer; raise it if a boot-time GPU reset ever
+    # recurs, or set 0 to open the window immediately. Only applies to --startup.
+    "startup_delay_sec": 5,
 }
 
 def load_settings() -> Dict:
@@ -628,18 +629,21 @@ def set_startup(enabled: bool) -> bool:
 
 
 def list_ollama_models() -> List[str]:
-    """Installed model tags via `ollama list` (best-effort; [] on any failure).
-    Used to populate the model picker alongside the curated RECOMMENDED_MODELS."""
+    """Installed model tags via the Ollama HTTP API (best-effort; [] on any failure).
+    Used to populate the model picker alongside the curated RECOMMENDED_MODELS.
+
+    Uses GET /api/tags, NOT the `ollama list` CLI. At Windows sign-in the CLI spawns a
+    child (the server/runner) that inherits this process's stdout pipe, so subprocess
+    cleanup blocks in the pipe reader thread until that inherited handle closes — which
+    it never does — hanging indefinitely and defeating the timeout. That hang ran inside
+    AIPanel construction, so MainWindow.__init__ never finished and the app launched with
+    NO WINDOW (process alive in Task Manager). The HTTP call spawns no subprocess, fails
+    fast (connection refused) when the server is down, and is hard-bounded by `timeout`."""
     try:
-        flags = 0x08000000 if platform.system() == "Windows" else 0   # CREATE_NO_WINDOW
-        out = subprocess.run(["ollama", "list"], capture_output=True, text=True,
-                             timeout=5, creationflags=flags)
-        names = []
-        for ln in out.stdout.splitlines()[1:]:   # skip the header row
-            parts = ln.split()
-            if parts and ":" in parts[0]:
-                names.append(parts[0])
-        return names
+        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=2)
+        if not r.ok:
+            return []
+        return [m["name"] for m in r.json().get("models", []) if m.get("name")]
     except Exception:
         return []
 
