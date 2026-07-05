@@ -1,50 +1,82 @@
-# Local Schedule Assistant
+# Daily Scheduler
 
-A native desktop daily planner with a **local, private AI assistant** that can read and
-edit your calendar by voice/text — all running on your own machine. No browser engine,
-no cloud: the UI is native Qt, and the AI runs locally through [Ollama](https://ollama.com).
+A native Windows desktop **daily planner** with a **local, private AI assistant** that can
+read and edit your schedule — all running on your own machine. No cloud, no accounts, no
+telemetry: the UI is native Qt, and the AI runs locally through [Ollama](https://ollama.com).
 
-Built with Python + PySide6 (Qt6).
+Built with Python + PySide6 (Qt6). MIT licensed.
+*(This repository is named `Local-Schedule-Assistant`; the app itself is **Daily Scheduler**.)*
+
+> **Private by design** — your schedule never leaves your computer. The AI assistant and
+> all of your data are fully local. Google Calendar integration is optional and read-only.
 
 ---
 
 ## Features
 
-- **Day / Month / Year views** — a Google-Calendar-style timeline. Navigate with ‹ Today ›.
-- **Direct editing** — drag on the timeline to create a block, drag a block to move it,
+- **Day / Month / Year views** — a clean timeline of your full 24-hour day. Navigate with
+  the `‹` / `›` arrows and the **Today** button.
+- **Direct editing** — drag on empty timeline to create a block, drag a block to move it,
   drag its edges to resize, click (or right-click → Edit) to change its title/type/time,
-  right-click → Delete to remove it.
-- **Local AI assistant** — chat with a local LLM that edits your schedule directly:
+  right-click → Delete to remove it. Eight activity types (Assignments, Projects, Study,
+  Extracurriculars, Anime/Gaming, Exercise, Meals, Sleep), each with its own color.
+- **Local AI assistant** — three modes (*Chat*, *Plan*, *Analyze*) backed by a local LLM
+  that edits your schedule with real tools:
   - *"Add a study block from 2 to 4pm"*
-  - *"Shift everything 2 hours later"* · *"Copy my schedule to 6/14"*
-  - *"Split my afternoon into 30-minute study blocks with breaks"*
+  - *"Plan my day: 3 hours of homework in 30-minute chunks, lunch at 1, workout at 4"*
+  - *"My dentist appointment moved to 2pm — make room for it without deleting anything"*
   - *"I'm running 30 minutes late — push the rest of my day"*
-  - *"Plan 4 hours of exam study across the days before Friday"*
+  - *"Spread 4 hours of exam prep across the days before Friday"*
   - *"How much sleep and study did I get this week?"*
-  - It calls real tools (`add_block`, `add_recurring`, `move_block`, `delete_block`,
-    `clear_range`, `clear_day`, `shift_blocks`, `copy_day`, `split_block`, `schedule_tasks`,
-    `find_free_time`, `reflow_from_now`, `plan_for_deadline`, `week_summary`, `replace_day`,
-    `list_blocks`), knows the current date/time, verifies its own work, and the app enforces a
-    conflict-free schedule.
-- **Two themes** — *Nocturne* (dark) and *Slate* (light): a clean, sharp-cornered, editorial
-  look. Switch in Settings.
-- **Settings** — a central dialog (header ⚙ or tray → *Settings…*) for theme, model,
-  notifications + lead time, Do-Not-Disturb override, default planning hours, and whether to
-  auto-start the AI server. All settings persist between launches.
-- **Desktop notifications** — an alert when a block starts, with an optional lead time and a
-  Do-Not-Disturb override that breaks through Focus Assist.
-- **Start with Windows** — optional; opens quietly into the tray (the AI server is *not*
-  started automatically — only when you press ▶, or enable auto-start in Settings).
-- **Optional Google Calendar** — overlays your real (read-only) events.
-- **Private by design** — your schedule never leaves the machine; the AI runs on-device.
+
+  Tools include `add_block`, `move_block`, `delete_block`, `split_block`, `add_recurring`,
+  `shift_blocks`, `copy_day`, `clear_day`, `schedule_tasks`, `plan_day`, `make_room`,
+  `reflow_from_now`, `plan_for_deadline`, `find_free_time`, `week_summary`, and more. The
+  assistant knows the current date/time, plans around your (read-only) calendar events,
+  verifies its own work, and the app enforces a conflict-free schedule.
+- **Desktop notifications** — an alert when a block starts, with an optional lead time
+  ("5 minutes before") and a **Do-Not-Disturb override** that draws its own always-on-top
+  popup so reminders break through Windows Focus Assist.
+- **Lives in the tray** — closing the window keeps reminders running; the tray menu has
+  Open / notification toggles / Test / Settings / Quit.
+- **Start with Windows** — optional. At sign-in the app opens its window after a short
+  settle delay (configurable).
+- **Two themes** — *Nocturne* (dark) and *Slate* (light), switchable in Settings.
+- **Optional Google Calendar** — overlays your real events (read-only); the AI plans
+  around them and never touches them.
 
 ---
 
-## Quick start (run from source)
+## Requirements
+
+| Component | Requirement |
+|---|---|
+| **Operating system** | Windows 10 or 11 (Windows-first; running from source on macOS/Linux may work but is untested) |
+| **The planner itself** | Any modern PC — the app is lightweight |
+| **AI assistant** *(optional)* | [Ollama](https://ollama.com) + ideally a GPU with **8–16 GB VRAM** (see the model guide below). CPU-only works but replies are slow. |
+| **Google Calendar** *(optional)* | A free Google Cloud project (steps below) |
+
+The planner works fully offline with **neither** Ollama **nor** Google Calendar set up.
+
+---
+
+## Install
+
+### Option A — prebuilt executable (easiest, no Python)
+
+1. Download `DailyScheduler.exe` from the [latest release](../../releases/latest).
+2. Run it. If Windows SmartScreen shows *"Windows protected your PC"*, click
+   **More info → Run anyway** (the exe is unsigned, not malicious — you can audit
+   [`app.py`](app.py); the whole app is one file).
+3. That's it. Your data lives in `~/.daily-scheduler/` (i.e. `C:\Users\<you>\.daily-scheduler\`).
+
+### Option B — run from source
 
 Requires **Python 3.10+** on Windows.
 
 ```bat
+git clone https://github.com/j0nsh1n/Local-Schedule-Assistant.git
+cd Local-Schedule-Assistant
 run.bat
 ```
 
@@ -55,87 +87,154 @@ pip install -r requirements.txt
 python app.py
 ```
 
-### Prebuilt executable
-A ready-to-run `DailyScheduler.exe` (no Python needed) is attached to the
-[latest release](../../releases/latest).
-
 ---
 
-## Enabling the AI assistant
+## Setting up the AI assistant (Ollama)
 
-1. Install [Ollama](https://ollama.com/download).
-2. Pull one or more models. The picker recommends models that fit a 16 GB GPU and are strong
-   at tool-calling (this app is tool-heavy):
-   ```bat
-   ollama pull qwen3:14b              # recommended — best tool-calling stability
-   ollama pull gpt-oss:20b            # fast, strong reasoning
-   ollama pull deepseek-r1:14b        # reasoning model (chain-of-thought)
-   ollama pull qwen2.5:14b            # default / fallback
-   ollama pull mistral-small3.1:24b   # solid native tool-calling (~14 GB)
-   ollama pull gemma4                 # newer Google model (needs Ollama 0.22+; pick a size that fits 16 GB)
-   ollama pull glm-4.7-flash          # fast 30B-A3B MoE (needs a recent Ollama)
-   ```
-   Choose a model from the **dropdown** in the AI panel header (or in **Settings → AI**). It
-   lists everything `ollama list` reports plus the recommended set. The app tailors its prompt
-   to each model's strengths and automatically hides reasoning models' `<think>` output.
-3. In the app, open the AI panel and press **▶** to start the local server. Use **⏏** to
-   unload the model from memory, or **⏻** to stop the server entirely (both fully release
-   GPU/VRAM).
+The AI is optional — skip this section and you still have a full-featured planner.
 
----
+[Ollama](https://ollama.com) is a free, open-source runtime that runs large language
+models entirely on your own machine. Nothing you type ever leaves your PC.
 
-## Settings & themes
+**1. Install Ollama** — download the Windows installer from
+[ollama.com/download](https://ollama.com/download) and run it. Verify it works by opening
+a terminal (press <kbd>Win</kbd>, type *cmd*, Enter) and running:
 
-Open **Settings** from the header ⚙ button or the tray menu (*Settings…*). Everything is saved
-to `~/.daily-scheduler/settings.json` and restored on the next launch:
+```bat
+ollama --version
+```
 
-- **General** — theme (*Nocturne* dark / *Slate* light), Start with Windows, and whether to
-  auto-start the Ollama server on launch.
-- **Notifications** — turn block-start alerts on/off, set a lead time (alert *N* minutes
-  early), and toggle the Do-Not-Disturb override.
-- **AI** — model, temperature, context window, and the default planning hours the assistant
-  schedules within.
-- **Data** — open the data folder or export your schedule.
+**2. Pull a model** — pick one that fits your GPU's VRAM (check it in Task Manager →
+Performance → GPU → *Dedicated GPU memory*), then run the command in a terminal:
 
-> Changing the theme takes effect the next time you open the app.
+| Your GPU VRAM | Suggested model | Download |
+|---|---|---|
+| 12–16 GB | `ollama pull qwen3:14b` ← **recommended**; or `qwen2.5:14b` / `deepseek-r1:14b` / `gpt-oss:20b` | ~9–13 GB |
+| 16 GB (tight fit) | `ollama pull mistral-small3.1:24b` — excellent tool-calling | ~14 GB |
+| ~8 GB | `ollama pull qwen3:8b` — smaller; tool-calling is less reliable | ~5 GB |
+| No dedicated GPU | a small model on CPU (e.g. `qwen3:8b`) — expect slow replies | ~5 GB |
+
+This app is *tool-heavy* (the model edits your schedule by calling functions), so models
+with strong **tool-calling** matter more than raw size. The in-app picker recommends a
+curated, verified set — `qwen3:14b`, `gpt-oss:20b`, `deepseek-r1:14b`, `qwen2.5:14b`,
+`gemma4`, `glm-4.7-flash`, `mistral-small3.1:24b` — and also lists every model you've
+already pulled. The app tailors its prompting to each recommended model and automatically
+hides reasoning models' `<think>` output.
+
+**3. Start it from inside the app** — open the AI panel (the **AI** button in the header)
+and:
+
+- Press **▶** *(start)* to launch the Ollama server. The status dot turns green when
+  connected.
+- Pick your model from the **dropdown** in the panel header.
+- Chat. The first reply after starting is slower while the model loads into GPU memory.
+
+When you're done, **⏏** *(unload)* frees the model from memory and **⏻** *(stop)* shuts the
+server down — both fully release GPU/VRAM, so Ollama uses zero resources until you press ▶
+again. (Prefer it automatic? Settings → **General** can start the server with the app.)
+
+> **Tip:** the Ollama installer also adds its own small tray app that starts with Windows.
+> Daily Scheduler doesn't need it running — the ▶ button starts the server on demand — so
+> you can quit it / remove it from Startup apps if you want zero idle usage.
 
 ---
 
 ## Optional: Google Calendar
 
-1. In the [Google Cloud Console](https://console.cloud.google.com): create a project,
-   enable the **Google Calendar API**.
-2. **APIs & Services → Credentials → Create Credentials → OAuth client ID →
-   Desktop application**, then download the JSON.
-3. Launch the app and load that `credentials.json` from the setup screen. A browser opens
-   once to authorize; the token is cached in `~/.daily-scheduler/`.
+Adds a read-only overlay of your real calendar events; the AI plans around them. Because
+this uses *your own* free Google Cloud project, your calendar data flows only between your
+PC and Google — there's no third-party server.
 
-The app works fully offline without this — Google Calendar just adds read-only event
-overlays.
+1. Go to the [Google Cloud Console](https://console.cloud.google.com) and create a project
+   (any name).
+2. **APIs & Services → Library** → search **Google Calendar API** → **Enable**.
+3. **APIs & Services → OAuth consent screen** (newer Console: **Google Auth Platform →
+   Branding/Audience**) → choose **External** → fill in the app name and your email → save.
+   Then under **Audience → Test users**, **add your own Google account** — without this,
+   sign-in is refused while the app is in "Testing" mode.
+4. **APIs & Services → Credentials → + Create Credentials → OAuth client ID** → application
+   type **Desktop app** → **Download JSON**.
+5. Launch Daily Scheduler and load that JSON from the setup screen
+   (**Load credentials.json…**). A browser opens once to authorize.
+6. You'll see **"Google hasn't verified this app"** — that's expected (you are the
+   developer of this OAuth client). Click **Advanced → Go to … (unsafe) → Continue**.
+
+The token is cached in `~/.daily-scheduler/token.json` (read-only calendar scope). The app
+works fully offline without any of this.
 
 ---
 
-## Building the executable
+## Everyday use
+
+- **Close ≠ quit.** Closing the window hides the app to the system tray so reminders keep
+  firing. Really quit via the tray icon → **Quit**.
+- **Launching it again** just brings the running window to the front (single instance).
+- **Start with Windows** (tray menu or Settings) adds a Startup shortcut. At sign-in the
+  app waits a few seconds for the system to settle, then opens its window
+  (`startup_delay_sec` in settings, default 5; set `0` for instant).
+- **Notifications** fire once per block start — set a lead time in Settings to be warned
+  *N* minutes early. With **Override Do Not Disturb** on (default), alerts use the app's
+  own popup + sound so Focus Assist can't swallow them.
+
+---
+
+## Settings
+
+Open **Settings** from the header ⚙ or the tray menu. Everything persists in
+`~/.daily-scheduler/settings.json`:
+
+- **General** — theme (dark *Nocturne* / light *Slate*; applied on next launch), Start
+  with Windows, and whether to auto-start the Ollama server when the app launches.
+- **Notifications** — block-start alerts on/off, lead time, Do-Not-Disturb override.
+- **AI Assistant** — model, temperature, context window, and default planning hours.
+- **Data** — open the data folder or export a backup of your schedule.
+
+---
+
+## Data & storage
+
+Everything lives in `~/.daily-scheduler/` — plain JSON you can back up or inspect:
+
+| File | Purpose |
+|------|---------|
+| `activities.json` | your scheduled blocks |
+| `settings.json` | app settings |
+| `credentials.json` / `token.json` | Google OAuth (only if you connect Calendar) |
+| `startup.log` | launch diagnostics (timestamp, pid, launch flags — never schedule data) |
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| SmartScreen blocks the exe | **More info → Run anyway** (unsigned binary) |
+| Nothing appears for a few seconds at Windows sign-in | Normal — the app waits `startup_delay_sec` (default 5 s) before opening. Set it to `0` in `settings.json` for instant. |
+| "X" closed the window and it's "gone" | It's in the system tray — click the tray icon, or just launch the app again to surface it. |
+| AI panel says **Not running** | Press **▶** (requires Ollama installed). |
+| First AI reply is very slow | The model is loading into GPU memory — later replies are fast. |
+| AI replies are slow *every* time | The model doesn't fit your VRAM — pull a smaller one (see the table above). |
+| "Google hasn't verified this app" during Calendar sign-in | Expected — **Advanced → Continue**. Make sure your account is added as a **Test user** (Calendar step 3). |
+| A meeting isn't visible to the AI yet | Calendar sync is per-month and can lag a moment — press **↺** (Refresh). |
+
+---
+
+## Building the executable yourself
 
 ```bat
 pip install pyinstaller
 py -m PyInstaller --noconfirm --onefile --windowed --name DailyScheduler --collect-all PySide6 app.py
 ```
 
-The result lands in `dist/DailyScheduler.exe` (this project builds to `dist_exe/`).
+The result lands in `dist\DailyScheduler.exe` (~270 MB — it bundles Python and Qt).
 
 ---
 
-## Data & storage
-
-All local, under `~/.daily-scheduler/`:
-
-| File | Purpose |
-|------|---------|
-| `activities.json` | your scheduled blocks |
-| `settings.json` | app settings (theme, model, notifications, planning hours, …) |
-| `credentials.json` / `token.json` | Google OAuth (only if you connect Calendar) |
-
 ## Tech
 
-Python · PySide6 (Qt6) · Ollama (local LLM, tool-calling) · Google Calendar API
+Python · PySide6 (Qt6) · [Ollama](https://ollama.com) (local LLM, tool-calling) ·
+Google Calendar API (optional, read-only) · single-file app (`app.py`)
+
+## License
+
+[MIT](LICENSE) © Jonathan Shin
