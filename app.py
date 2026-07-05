@@ -35,7 +35,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.5.5"
+__version__  = "2.6.0"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -191,8 +191,36 @@ def load_all_activities() -> List[Dict]:
 def save_all_activities(acts: List[Dict]) -> None:
     try:
         DATA_FILE.write_text(json.dumps(acts, indent=2))
+        _write_daily_backup(acts)
     except Exception:
         pass
+
+# ── Rolling daily backups ────────────────────────────────────────────────────
+# Safety net against a bad edit / corrupt write: keep one dated snapshot of the
+# schedule per day under ~/.daily-scheduler/backups/, pruned to the most recent few.
+BACKUP_DIR  = DATA_DIR / "backups"
+BACKUP_KEEP = 14
+
+def _write_daily_backup(acts: List[Dict]) -> None:
+    """Best-effort: one snapshot per day (latest state of that day); prune to the
+    newest BACKUP_KEEP. Never let a backup failure disrupt the real save."""
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        (BACKUP_DIR / f"activities-{date.today().isoformat()}.json").write_text(
+            json.dumps(acts, indent=2))
+        for old in sorted(BACKUP_DIR.glob("activities-*.json"))[:-BACKUP_KEEP]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+# ── AI undo ──────────────────────────────────────────────────────────────────
+# The assistant can rewrite or clear whole days, so snapshot the schedule before
+# the first schedule-changing tool of each AI turn; "Undo" restores the snapshot.
+AI_UNDO_KEEP      = 12
+AI_READONLY_TOOLS = frozenset({"list_blocks", "find_free_time", "week_summary"})
 
 # ── Notification de-dup (cross-process) ──────────────────────────────────────
 # A block alert must fire EXACTLY ONCE per day — even if more than one copy of the
@@ -2096,6 +2124,9 @@ class AIPanel(QWidget):
         self._cur_text  = ""
         self._ollama_up = False
         self.execute_tool = None          # set by MainWindow: fn(name, args) -> str
+        self.on_turn_start = None         # set by MainWindow: snapshot schedule for undo
+        self.on_turn_end = None           # set by MainWindow: unlock Undo, drop no-op snapshots
+        self.on_undo = None               # set by MainWindow: restore the last snapshot
         self._loop_msgs: List[Dict] = []  # running conversation for the tool loop
         self._depth = 0                   # tool-round counter (loop guard)
 
@@ -2164,6 +2195,19 @@ class AIPanel(QWidget):
             b.setStyleSheet(self._tab_style(mode == "chat"))
             b.clicked.connect(lambda _, m=mode: self._set_mode(m))
             self._tabs[mode] = b; tl.addWidget(b)
+        tl.addStretch()
+        # Undo the assistant's last schedule change (enabled once it makes one).
+        self._undo_btn = QPushButton("↶ Undo")
+        self._undo_btn.setEnabled(False)
+        self._undo_btn.setCursor(Qt.PointingHandCursor)
+        self._undo_btn.setToolTip("Undo the assistant's last change to your schedule")
+        self._undo_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {C_MUTED.name()}; border: none;"
+            f" padding: 4px 12px; font-size: 11px; }}"
+            f"QPushButton:hover:enabled {{ color: {C_TEXT.name()}; }}"
+            f"QPushButton:disabled {{ color: {C_BORDER2.name()}; }}")
+        self._undo_btn.clicked.connect(self._do_undo)
+        tl.addWidget(self._undo_btn)
         lay.addWidget(tabs)
 
         # Messages
@@ -2531,8 +2575,24 @@ class AIPanel(QWidget):
         self.history[self.mode].append({"role": "user", "content": txt})
         self._render(); self._generate(txt)
 
+    def _do_undo(self):
+        if callable(self.on_undo):
+            self.on_undo()
+
+    def set_undo_enabled(self, on: bool):
+        self._undo_btn.setEnabled(bool(on))
+
+    def _turn_ended(self):
+        """Every way a turn finishes (final text, error, round limit, Stop) funnels
+        here so MainWindow can unlock Undo exactly once per turn."""
+        self._thinking.hide(); self._stop_btn.hide()
+        if callable(self.on_turn_end):
+            self.on_turn_end()
+
     def _generate(self, user_msg):
         if self._thread and self._thread.isRunning(): return
+        if callable(self.on_turn_start):   # let MainWindow snapshot the schedule for undo
+            self.on_turn_start()
         hist = [m for m in self.history[self.mode] if m["role"] in ("user","assistant")]
         msgs = [{"role":"system","content":self._sys_prompt()}] + \
                [{"role":m["role"],"content":m["content"]} for m in hist if m["content"]]
@@ -2581,7 +2641,7 @@ class AIPanel(QWidget):
         self._render()
         self._depth += 1
         if self._depth >= MAX_TOOL_ROUNDS:   # guard against tool-call loops
-            self._thinking.hide(); self._stop_btn.hide()
+            self._turn_ended()
             return
         h.append({"role": "assistant", "content": ""})
         self._cur_text = ""
@@ -2620,12 +2680,12 @@ class AIPanel(QWidget):
                 h[-1]["content"] = ("I tried to update your schedule but couldn't read "
                                     "the result — could you rephrase that?")
             self._render()
-        self._thinking.hide(); self._stop_btn.hide()
+        self._turn_ended()
 
     def _on_error(self, msg):
         self.history[self.mode].pop()
         self.history[self.mode].append({"role":"error","content":msg})
-        self._render(); self._thinking.hide(); self._stop_btn.hide()
+        self._render(); self._turn_ended()
 
     def _stop(self):
         if self._thread: self._thread.stop()
@@ -2945,6 +3005,9 @@ class MainWindow(QMainWindow):
         self._fetched_keys: set = set()
         self._cal_threads: List[QThread] = []
         self._all_acts:    List[Dict] = load_all_activities()
+        self._ai_undo:     List[List[Dict]] = []   # schedule snapshots for AI undo
+        self._ai_turn_snapshotted = False
+        self._ai_turn_active = False   # a turn is streaming — Undo is locked meanwhile
         self._cur_date:    date = date.today()
         self._view         = "day"
         self._ai_visible   = False
@@ -3030,6 +3093,9 @@ class MainWindow(QMainWindow):
         if self._settings.get("ollama_autostart"):
             QTimer.singleShot(800, self._ai_panel._start_ollama)
         self._ai_panel.execute_tool = self._ai_execute
+        self._ai_panel.on_turn_start = self._ai_turn_start
+        self._ai_panel.on_turn_end = self._ai_turn_end
+        self._ai_panel.on_undo = self._ai_undo_last
         self._ai_panel.hide()
         body_l.addWidget(self._ai_panel)
 
@@ -3295,6 +3361,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted and dlg.result_activity:
             self._all_acts.append(dlg.result_activity)
             save_all_activities(self._all_acts)
+            self._ai_undo_invalidate()
             self._refresh_view()
 
     def _edit_activity(self, aid):
@@ -3311,6 +3378,7 @@ class MainWindow(QMainWindow):
             self._all_acts = [dlg.result_activity if a["id"] == aid else a
                               for a in self._all_acts]
         save_all_activities(self._all_acts)
+        self._ai_undo_invalidate()
         self._refresh_view()
 
     def _commit_activity_change(self, aid, start, end):
@@ -3321,11 +3389,13 @@ class MainWindow(QMainWindow):
                 a["endMin"]   = min(DAY_END, max(int(end), a["startMin"] + self._timeline.SNAP))
                 break
         save_all_activities(self._all_acts)
+        self._ai_undo_invalidate()
         self._refresh_view()
 
     def _delete_activity(self, aid):
         self._all_acts = [a for a in self._all_acts if a["id"] != aid]
         save_all_activities(self._all_acts)
+        self._ai_undo_invalidate()
         self._refresh_view()
 
     # ── AI panel ───────────────────────────────────────────────────────────
@@ -3344,10 +3414,65 @@ class MainWindow(QMainWindow):
                 "now_min":    now.hour * 60 + now.minute,
                 "viewing_today": self._cur_date == date.today()}
 
+    # ── AI undo ──────────────────────────────────────────────────────────────
+    def _ai_turn_start(self):
+        """A new AI turn begins — allow one fresh undo snapshot, and lock Undo
+        until the turn finishes (undoing mid-turn would let the turn's later
+        tool rounds mutate the restored schedule with no snapshot)."""
+        self._ai_turn_snapshotted = False
+        self._ai_turn_active = True
+        self._update_undo_state()
+
+    def _ai_turn_end(self):
+        """The turn finished (final text, error, round limit, or Stop). If its
+        tools all failed or changed nothing, drop the do-nothing snapshot so
+        the Undo button always maps to a real change."""
+        self._ai_turn_active = False
+        if (self._ai_turn_snapshotted and self._ai_undo
+                and self._all_acts == self._ai_undo[-1]):
+            self._ai_undo.pop()
+            self._ai_turn_snapshotted = False
+        self._update_undo_state()
+
+    def _ai_snapshot_before(self, name: str):
+        """Before the first schedule-changing tool of the turn, snapshot the
+        current schedule so the whole turn can be undone as a single step."""
+        if name in AI_READONLY_TOOLS or self._ai_turn_snapshotted:
+            return
+        self._ai_undo.append([dict(a) for a in self._all_acts])
+        del self._ai_undo[:-AI_UNDO_KEEP]
+        self._ai_turn_snapshotted = True
+        self._update_undo_state()
+
+    def _ai_undo_last(self):
+        """Restore the schedule to before the assistant's most recent change."""
+        if self._ai_turn_active or not self._ai_undo:
+            return
+        self._all_acts = self._ai_undo.pop()
+        self._ai_turn_snapshotted = False   # a post-undo tool round must re-snapshot
+        save_all_activities(self._all_acts)
+        self._refresh_view()
+        self._update_undo_state()
+        self._set_status("Undid the assistant's last change.")
+
+    def _ai_undo_invalidate(self):
+        """A manual edit changed the schedule — the snapshots no longer represent
+        'current state minus the AI change', and restoring one would silently
+        wipe the user's own work. Drop the stack."""
+        if self._ai_undo:
+            self._ai_undo.clear()
+            self._update_undo_state()
+
+    def _update_undo_state(self):
+        if getattr(self, "_ai_panel", None):
+            self._ai_panel.set_undo_enabled(bool(self._ai_undo)
+                                            and not self._ai_turn_active)
+
     def _ai_execute(self, name: str, args: Dict) -> str:
         """Run one AI tool call against the schedule. Returns a result string
         that is shown in chat AND fed back to the model."""
         try:
+            self._ai_snapshot_before(name)   # capture undo point before a change
             ds = resolve_date(args.get("date"), self._cur_date)
             if ds is None:
                 return (f"Error: couldn't understand the date "
