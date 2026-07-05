@@ -35,7 +35,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.6.0"
+__version__  = "2.6.1"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -190,14 +190,27 @@ def load_all_activities() -> List[Dict]:
 
 def save_all_activities(acts: List[Dict]) -> None:
     try:
+        # Rotate the outgoing state to .bak first. The dated daily backup below is
+        # overwritten by every save, and the in-memory AI-undo stack dies with the
+        # process — so without this, one bad save after a restart was unrecoverable.
+        # .bak always lags the live file by exactly one save.
+        if DATA_FILE.exists():
+            shutil.copyfile(DATA_FILE, DATA_FILE.with_name("activities.json.bak"))
+    except Exception:
+        pass
+    try:
         DATA_FILE.write_text(json.dumps(acts, indent=2))
         _write_daily_backup(acts)
     except Exception:
         pass
 
 # ── Rolling daily backups ────────────────────────────────────────────────────
-# Safety net against a bad edit / corrupt write: keep one dated snapshot of the
-# schedule per day under ~/.daily-scheduler/backups/, pruned to the most recent few.
+# Safety net against a bad edit / corrupt write, two layers:
+#   activities.json.bak                — the state before the MOST RECENT save
+#                                        (recovers a single bad save, even after
+#                                        a restart wiped the in-memory AI undo)
+#   backups/activities-YYYY-MM-DD.json — latest state per day, newest BACKUP_KEEP
+#                                        kept (recovers across days)
 BACKUP_DIR  = DATA_DIR / "backups"
 BACKUP_KEEP = 14
 
