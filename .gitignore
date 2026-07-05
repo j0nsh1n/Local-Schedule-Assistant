@@ -22,6 +22,7 @@ set-ollama-env.bat
 credentials.json
 token.json
 activities.json
+activities.json.bak
 settings.json
 
 # ── Logs / scratch ──────────────────────────────────────
