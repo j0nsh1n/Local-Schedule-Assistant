@@ -36,7 +36,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.0.0"
+__version__  = "3.1.0"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -444,6 +444,26 @@ def sequentialize(blocks: List[Dict], blocked=None) -> tuple:
         cur = ns + dur
     return out, adjusted, dropped
 
+def assign_overlap_cols(blocks: List[Dict]) -> List[Dict]:
+    """Greedy column assignment for time-overlapping blocks (side-by-side layout).
+    Returns copies with `_col` (column index) and `_tcols` (total columns among the
+    blocks it overlaps). Input must be sorted by startMin. Shared by the Day
+    timeline and the Week view so overlapping blocks render identically."""
+    col_ends, result = [], []
+    for blk in blocks:
+        col = next((i for i, e in enumerate(col_ends) if e <= blk["startMin"]), len(col_ends))
+        if col == len(col_ends):
+            col_ends.append(0)
+        col_ends[col] = blk["endMin"]
+        result.append({**blk, "_col": col})
+    for i, blk in enumerate(result):
+        cols = [blk["_col"]] + [
+            b["_col"] for j, b in enumerate(result)
+            if j != i and b["startMin"] < blk["endMin"] and b["endMin"] > blk["startMin"]
+        ]
+        result[i]["_tcols"] = max(cols) + 1
+    return result
+
 # ── Google Calendar threads ────────────────────────────────────────────────
 class GoogleAuthThread(QThread):
     done  = Signal(object)  # credentials
@@ -821,9 +841,14 @@ class OllamaThread(QThread):
                                    "temperature": self.temperature, "top_p": 0.9}}
             if self.tools:
                 payload["tools"] = self.tools
+            # (connect, read) timeouts: fail fast when the server is down, but the
+            # read timeout is the max SILENCE before the first streamed byte — and
+            # Ollama sends nothing while it loads a model into VRAM, so a cold load
+            # of a 24B model can far exceed 120 s. 600 s covers a big cold load;
+            # the Stop button still works between chunks once streaming starts.
             resp = requests.post(
                 f"{OLLAMA_URL}/api/chat", json=payload,
-                stream=True, timeout=120,
+                stream=True, timeout=(5, 600),
             )
             # 404 here almost always means "model not installed" — translate it.
             if resp.status_code == 404:
@@ -866,6 +891,11 @@ class OllamaThread(QThread):
         except requests.exceptions.ConnectionError:
             self.error.emit("Can't reach Ollama. Click the ▶ button to start it,\n"
                             "or run 'ollama serve' in a terminal.")
+        except requests.exceptions.Timeout:
+            self.error.emit(
+                f"Ollama didn't respond in time. If '{self.model}' was cold-loading "
+                f"into VRAM it may be ready now — try sending your message again. "
+                f"A smaller model also loads (and answers) faster.")
         except Exception as ex:
             self.error.emit(str(ex))
 
@@ -1427,22 +1457,6 @@ class TimelineWidget(QWidget):
         occ = [(b["startMin"], b["endMin"]) for b in self._all_blocks()]
         return _free_slots(occ)
 
-    def _assign_cols(self, blocks):
-        col_ends, result = [], []
-        for blk in blocks:
-            col = next((i for i, e in enumerate(col_ends) if e <= blk["startMin"]), len(col_ends))
-            if col == len(col_ends):
-                col_ends.append(0)
-            col_ends[col] = blk["endMin"]
-            result.append({**blk, "_col": col})
-        for i, blk in enumerate(result):
-            cols = [blk["_col"]] + [
-                b["_col"] for j, b in enumerate(result)
-                if j != i and b["startMin"] < blk["endMin"] and b["endMin"] > blk["startMin"]
-            ]
-            result[i]["_tcols"] = max(cols) + 1
-        return result
-
     # ── painting ───────────────────────────────────────────────────────────
     def paintEvent(self, _event):
         p = QPainter(self)
@@ -1523,7 +1537,7 @@ class TimelineWidget(QWidget):
         Shared by painting and mouse hit-testing so they always agree."""
         area_w = self.width() - GUTTER_W - 8
         out = []
-        for blk in self._assign_cols(self._all_blocks()):
+        for blk in assign_overlap_cols(self._all_blocks()):
             y  = min_to_y(blk["startMin"])
             # Floor must stay <= the height of the shortest real block (a 5-min break is
             # 8px) so short blocks never overrun the next one. 20px caused breaks to
@@ -2011,6 +2025,177 @@ class SidebarWidget(QWidget):
             """)
             rl.addWidget(bar)
             self._sum_area.addWidget(row)
+
+# ══════════════════════════════════════════════════════════════════════════
+#  WEEK VIEW  (7 columns Mon–Sun, whole day scaled per column; read-mostly v1:
+#  click a block → edit dialog, click a day header → that day's Day view)
+# ══════════════════════════════════════════════════════════════════════════
+class WeekViewWidget(QWidget):
+    day_clicked   = Signal(object)   # datetime.date — header click → Day view
+    block_clicked = Signal(str)      # user activity id — open the edit dialog
+
+    HDR_H = 34    # day-header strip height
+    GUT_W = 46    # time-gutter width (narrower than the Day view's GUTTER_W)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._monday = date.today() - timedelta(days=date.today().weekday())
+        self._acts: Dict[str, List[Dict]] = {}   # iso date → user blocks
+        self._cal:  Dict[str, List[Dict]] = {}   # iso date → read-only cal events
+        self._block_hits: List[tuple] = []       # (QRect, activity id) — user blocks
+        self._hdr_hits:   List[tuple] = []       # (QRect, datetime.date)
+        self.setMinimumSize(720, 480)
+        self.setMouseTracking(True)
+
+    def set_week(self, monday: date, acts_by_date: Dict, cal_by_date: Dict):
+        self._monday = monday
+        self._acts   = acts_by_date
+        self._cal    = cal_by_date
+        self.update()
+
+    def days(self) -> List[date]:
+        return [self._monday + timedelta(days=i) for i in range(7)]
+
+    def _y(self, minutes: int) -> int:
+        """Per-column minute→y: the full 24h day scaled to fit under the header
+        (an overview — no scrolling, unlike the Day timeline)."""
+        span = self.height() - self.HDR_H
+        return int(self.HDR_H + (minutes - DAY_START) / (DAY_END - DAY_START) * span)
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        p.fillRect(self.rect(), C_BG)
+        self._block_hits = []
+        self._hdr_hits   = []
+
+        days  = self.days()
+        cw    = (self.width() - self.GUT_W) / 7.0
+        today = date.today()
+
+        # hour grid + gutter labels (every 2 h — one hour is ~30 px here)
+        p.setFont(QFont("Segoe UI", 7))
+        for h in range(DAY_START_H, DAY_END_H + 1):
+            y = self._y(h * 60)
+            p.setPen(QPen(C_GRID if h % 2 else C_BORDER, 1))
+            p.drawLine(self.GUT_W, y, self.width(), y)
+            if h % 2 == 0 and h < DAY_END_H:
+                p.setPen(C_MUTED)
+                p.drawText(QRect(0, y - 8, self.GUT_W - 6, 16),
+                           Qt.AlignRight | Qt.AlignVCenter, f"{h:02d}:00")
+
+        fn_hdr_d = QFont("Segoe UI", 8, QFont.Bold)
+        fn_chip  = QFont("Segoe UI", 8)
+        fn_tiny  = QFont("Segoe UI", 7)
+        fm_chip  = QFontMetrics(fn_chip)
+
+        for i, d in enumerate(days):
+            x0 = int(self.GUT_W + i * cw)
+            x1 = int(self.GUT_W + (i + 1) * cw)
+
+            # column separator
+            p.setPen(QPen(C_BORDER, 1))
+            p.drawLine(x0, self.HDR_H, x0, self.height())
+
+            # blocks: read-only calendar events + user activities, side-by-side
+            # on overlap exactly like the Day timeline (shared assign_overlap_cols)
+            ds  = d.isoformat()
+            blk = sorted(
+                [{"_btype": "calendar", **e} for e in self._cal.get(ds, [])] +
+                [{"_btype": "user",     **e} for e in self._acts.get(ds, [])],
+                key=lambda b: (b["startMin"], b["endMin"]))
+            area_w = cw - 5
+            for b in assign_overlap_cols(blk):
+                by = self._y(b["startMin"])
+                bh = max(self._y(b["endMin"]) - by, 3)
+                bw = area_w / b["_tcols"]
+                bx = int(x0 + 3 + b["_col"] * bw)
+                rect = QRect(bx, by, int(bw - 2), bh)
+                c  = QColor(b.get("color") or C_ACCENT.name())
+                bg = QColor(c.red(), c.green(), c.blue(), 45)
+                p.setPen(Qt.NoPen)
+                p.fillRect(rect, bg)
+                p.fillRect(QRect(rect.x(), by, 2, bh), c)
+                if b["_btype"] == "user":
+                    self._block_hits.append((rect, b["id"]))
+                if bh >= 26:
+                    p.setPen(c); p.setFont(fn_chip)
+                    tr = rect.adjusted(5, 2, -3, -2)
+                    p.drawText(tr, Qt.AlignTop | Qt.AlignLeft,
+                               fm_chip.elidedText(b.get("title", ""), Qt.ElideRight, tr.width()))
+                    if bh >= 30:   # start time tucked right under the title
+                        p.setFont(fn_tiny)
+                        p.setPen(QColor(c.red(), c.green(), c.blue(), 170))
+                        p.drawText(QRect(tr.left(), tr.top() + fm_chip.height() + 1,
+                                         tr.width(), 12),
+                                   Qt.AlignTop | Qt.AlignLeft, fmt_time(b["startMin"]))
+                elif bh >= 11:
+                    p.setPen(c); p.setFont(fn_tiny)
+                    tr = rect.adjusted(4, 0, -2, 0)
+                    p.drawText(tr, Qt.AlignVCenter | Qt.AlignLeft,
+                               fm_chip.elidedText(b.get("title", ""), Qt.ElideRight, tr.width()))
+
+            # now line across today's column only
+            if d == today:
+                nm = datetime.now().hour * 60 + datetime.now().minute
+                if DAY_START <= nm <= DAY_END:
+                    ny = self._y(nm)
+                    p.setPen(QPen(C_NOW, 2))
+                    p.drawLine(x0 + 1, ny, x1, ny)
+                    p.setPen(Qt.NoPen); p.setBrush(C_NOW)
+                    p.drawEllipse(x0 - 3, ny - 3, 7, 7)
+
+            # header last, on top — click target for "open this day"
+            hdr = QRect(x0, 0, int(cw), self.HDR_H)
+            self._hdr_hits.append((hdr, d))
+            p.setBrush(C_SURFACE); p.setPen(Qt.NoPen)
+            p.drawRect(hdr)
+            p.setPen(QPen(C_BORDER, 1))
+            p.drawLine(x0, self.HDR_H, x1, self.HDR_H)
+            if i:
+                p.drawLine(x0, 0, x0, self.HDR_H)
+            lbl = d.strftime("%a %d")
+            if d == today:
+                p.setPen(Qt.NoPen); p.setBrush(C_ACCENT)
+                w = QFontMetrics(fn_hdr_d).horizontalAdvance(lbl) + 16
+                p.drawRoundedRect(QRect(hdr.center().x() - w // 2, 7, w, 20), RAD, RAD)
+                p.setPen(C_ON_ACCENT)
+            else:
+                p.setPen(C_TEXT)
+            p.setFont(fn_hdr_d)
+            p.drawText(hdr, Qt.AlignCenter, lbl)
+
+        # gutter/header corner + outer frame line under the header row
+        p.setPen(QPen(C_BORDER, 1))
+        p.drawLine(self.GUT_W, 0, self.GUT_W, self.height())
+
+    # ── mouse: hover cursor + click targets ─────────────────────────────────
+    def _hit(self, pos):
+        for rect, aid in reversed(self._block_hits):   # later-drawn (higher col) wins
+            if rect.contains(pos):
+                return ("block", aid)
+        for rect, d in self._hdr_hits:
+            if rect.contains(pos):
+                return ("day", d)
+        return None
+
+    def mouseMoveEvent(self, ev):
+        pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
+        self.setCursor(Qt.PointingHandCursor if self._hit(pos) else Qt.ArrowCursor)
+
+    def mousePressEvent(self, ev):
+        if ev.button() != Qt.LeftButton:
+            return
+        pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
+        hit = self._hit(pos)
+        if not hit:
+            return
+        kind, val = hit
+        if kind == "block":
+            self.block_clicked.emit(val)
+        else:
+            self.day_clicked.emit(val)
 
 # ══════════════════════════════════════════════════════════════════════════
 #  MONTH VIEW  (Google-Calendar-style month grid)
@@ -3154,7 +3339,10 @@ class MainWindow(QMainWindow):
         self._timeline.activity_changed.connect(self._commit_activity_change)
         self._scroll.setWidget(self._timeline)
 
-        # Month / year views
+        # Week / month / year views
+        self._week_view = WeekViewWidget()
+        self._week_view.day_clicked.connect(self._goto_date)
+        self._week_view.block_clicked.connect(self._edit_activity)
         self._month_view = MonthViewWidget()
         self._month_view.day_clicked.connect(self._goto_date)
         self._year_view = YearViewWidget()
@@ -3166,8 +3354,9 @@ class MainWindow(QMainWindow):
 
         self._view_stack = QStackedWidget()
         self._view_stack.addWidget(self._scroll)       # 0 — day
-        self._view_stack.addWidget(self._month_view)   # 1 — month
-        self._view_stack.addWidget(self._year_scroll)  # 2 — year
+        self._view_stack.addWidget(self._week_view)    # 1 — week
+        self._view_stack.addWidget(self._month_view)   # 2 — month
+        self._view_stack.addWidget(self._year_scroll)  # 3 — year
         body_l.addWidget(self._view_stack, 1)
 
         # Sidebar
@@ -3246,7 +3435,8 @@ class MainWindow(QMainWindow):
         hl.addWidget(self._date_lbl); hl.addStretch()
 
         self._view_btns = {}
-        for vid, vlbl in [("day", "Day"), ("month", "Month"), ("year", "Year")]:
+        for vid, vlbl in [("day", "Day"), ("week", "Week"),
+                          ("month", "Month"), ("year", "Year")]:
             b = hbtn(vlbl, checked=True)
             b.setChecked(vid == "day")
             b.clicked.connect(lambda _, v=vid: self._set_view(v))
@@ -3313,22 +3503,28 @@ class MainWindow(QMainWindow):
             return
         d = self._cur_date
         if self._view == "year":
-            key, start, end = f"y{d.year}", date(d.year, 1, 1), date(d.year + 1, 1, 1)
+            ranges = [(f"y{d.year}", date(d.year, 1, 1), date(d.year + 1, 1, 1))]
         else:
-            key   = f"m{d.year}-{d.month}"
-            start = date(d.year, d.month, 1)
-            end   = date(d.year + (d.month == 12), d.month % 12 + 1, 1)
-        if key in self._fetched_keys:
-            return
-        self._fetched_keys.add(key)
-        self._set_status("Fetching calendar…")
-        t = CalFetchThread(self._creds, start, end)
-        t.done.connect(self._on_cal)
-        t.error.connect(lambda e, k=key: (self._fetched_keys.discard(k),
-                                          self._set_status(e, True)))
-        t.finished.connect(lambda t=t: t in self._cal_threads and self._cal_threads.remove(t))
-        self._cal_threads.append(t)
-        t.start()
+            # month key(s) covering the visible range — a week can straddle two months
+            if self._view == "week":
+                monday = d - timedelta(days=d.weekday())
+                months = {(dd.year, dd.month) for dd in (monday, monday + timedelta(days=6))}
+            else:
+                months = {(d.year, d.month)}
+            ranges = [(f"m{y}-{m}", date(y, m, 1),
+                       date(y + (m == 12), m % 12 + 1, 1)) for y, m in sorted(months)]
+        for key, start, end in ranges:
+            if key in self._fetched_keys:
+                continue
+            self._fetched_keys.add(key)
+            self._set_status("Fetching calendar…")
+            t = CalFetchThread(self._creds, start, end)
+            t.done.connect(self._on_cal)
+            t.error.connect(lambda e, k=key: (self._fetched_keys.discard(k),
+                                              self._set_status(e, True)))
+            t.finished.connect(lambda t=t: t in self._cal_threads and self._cal_threads.remove(t))
+            self._cal_threads.append(t)
+            t.start()
 
     def _on_cal(self, by_date: dict):
         self._cal_by_date.update(by_date)
@@ -3380,7 +3576,7 @@ class MainWindow(QMainWindow):
         self._view = v
         for k, b in self._view_btns.items():
             b.setChecked(k == v)
-        self._view_stack.setCurrentIndex({"day": 0, "month": 1, "year": 2}[v])
+        self._view_stack.setCurrentIndex({"day": 0, "week": 1, "month": 2, "year": 3}[v])
         self._ensure_cal_for_view()
         self._refresh_view()
 
@@ -3396,6 +3592,8 @@ class MainWindow(QMainWindow):
         d = self._cur_date
         if self._view == "day":
             self._cur_date = d + timedelta(days=step)
+        elif self._view == "week":
+            self._cur_date = d + timedelta(days=7 * step)
         elif self._view == "month":
             m = d.month + step
             y = d.year + (m - 1) // 12
@@ -3427,6 +3625,22 @@ class MainWindow(QMainWindow):
                 else:
                     y = 0
                 QTimer.singleShot(50, lambda: self._scroll.verticalScrollBar().setValue(y))
+        elif self._view == "week":
+            monday = d - timedelta(days=d.weekday())
+            sunday = monday + timedelta(days=6)
+            if monday.month == sunday.month:
+                lbl = f"{monday.strftime('%B')} {monday.day} – {sunday.day}, {sunday.year}"
+            elif monday.year != sunday.year:   # New-Year week: spell out both years
+                lbl = (f"{monday.strftime('%b')} {monday.day}, {monday.year} – "
+                       f"{sunday.strftime('%b')} {sunday.day}, {sunday.year}")
+            else:
+                lbl = (f"{monday.strftime('%b')} {monday.day} – "
+                       f"{sunday.strftime('%b')} {sunday.day}, {sunday.year}")
+            self._date_lbl.setText(lbl)
+            days = [(monday + timedelta(days=i)).isoformat() for i in range(7)]
+            acts = {ds: [a for a in self._all_acts if a.get("date") == ds] for ds in days}
+            cal  = {ds: self._cal_by_date.get(ds, []) for ds in days}
+            self._week_view.set_week(monday, acts, cal)
         elif self._view == "month":
             self._date_lbl.setText(d.strftime("%B %Y"))
             ev: Dict[str, List[Dict]] = {}
