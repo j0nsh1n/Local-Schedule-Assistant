@@ -27,17 +27,24 @@ from PySide6.QtWidgets import (
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox, QFormLayout,
 )
 from PySide6.QtCore import (
-    Qt, QTimer, QThread, Signal, QRect, QTime, QSharedMemory,
+    Qt, QTimer, QThread, Signal, QRect, QTime, QSharedMemory, QUrl,
 )
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QFont, QFontMetrics,
-    QPalette, QPixmap, QIcon,
+    QPalette, QPixmap, QIcon, QDesktopServices,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.1.0"
+__version__  = "3.2.0"
 APP_VERSION  = __version__
+
+# Auto-update check (roadmap #2): compare the newest GitHub release's tag against
+# APP_VERSION once per launch + daily. Returns 404 while the repo is PRIVATE — the
+# check fails silently and simply lights up the day the repo goes public.
+GITHUB_REPO        = "j0nsh1n/Local-Schedule-Assistant"
+RELEASES_PAGE      = f"https://github.com/{GITHUB_REPO}/releases"
+LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 # ── App data paths ─────────────────────────────────────────────────────────
 DATA_DIR   = Path.home() / ".daily-scheduler"
@@ -163,6 +170,36 @@ def fmt_dur(minutes: int) -> str:
     h, m = divmod(minutes, 60)
     return f"{h}h {m}m" if m else f"{h}h"
 
+def strip_v(tag: str) -> str:
+    """'v3.2.0' → '3.2.0'; leaves an already-bare version untouched."""
+    t = (tag or "").strip()
+    return t[1:] if t[:1] in ("v", "V") else t
+
+def _version_tuple(s: str) -> tuple:
+    """('v3.1.0' | '3.1.0' | '3.1.0-beta.2') → (3, 1, 0). Strips a leading 'v' and
+    any '-'/'+' pre-release or build suffix, then parses the dotted integers.
+    Returns () when nothing parseable remains (so garbage never ranks as an update)."""
+    core = strip_v(s).split("-")[0].split("+")[0].strip()
+    if not core:
+        return ()
+    try:
+        return tuple(int(p) for p in core.split("."))
+    except ValueError:
+        return ()
+
+def is_newer_version(latest: str, current: str) -> bool:
+    """True iff release tag `latest` is a strictly newer version than `current`.
+    Fails CLOSED: an unparseable/empty `latest` returns False so we never nag on
+    a malformed tag. Shorter versions are zero-padded ('3.2' == '3.2.0')."""
+    lt = _version_tuple(latest)
+    if not lt:
+        return False
+    ct = _version_tuple(current)
+    n = max(len(lt), len(ct))
+    lt += (0,) * (n - len(lt))
+    ct += (0,) * (n - len(ct))
+    return lt > ct
+
 def today_str() -> str:
     return date.today().isoformat()
 
@@ -285,6 +322,7 @@ DEFAULT_SETTINGS = {
     "plan_day_start":   "08:00",  # default waking window the planner schedules within
     "plan_day_end":     "22:00",
     "ollama_autostart": False,    # keep Ollama off at launch unless the user opts in
+    "update_check_on":  True,     # check GitHub for a newer release on launch + daily
     "temperature":      0.3,
     "num_ctx":          16384,
     # Optional buffer: at Windows sign-in, wait this many seconds before building the
@@ -815,6 +853,32 @@ class OllamaCheckThread(QThread):
             self.result.emit(r.ok)
         except Exception:
             self.result.emit(False)
+
+
+class UpdateCheckThread(QThread):
+    """Ask GitHub, once, whether a newer release exists. Fails SILENTLY on ANY
+    error — offline, timeout, 404 (repo still private / no releases yet), or a
+    403 rate-limit — because an update check must never interrupt the planner.
+    Emits update_available ONLY when the latest published tag is strictly newer
+    than APP_VERSION. GitHub requires a User-Agent or it returns 403."""
+    update_available = Signal(str, str)   # tag_name, html_url
+
+    def run(self):
+        try:
+            r = requests.get(
+                LATEST_RELEASE_API, timeout=(5, 8),
+                headers={"Accept": "application/vnd.github+json",
+                         "User-Agent": f"DailyScheduler/{APP_VERSION}"},
+            )
+            if r.status_code != 200:      # 404 while private, 403 rate-limited, …
+                return
+            data = r.json()
+            tag = str(data.get("tag_name", "")).strip()
+            url = str(data.get("html_url") or RELEASES_PAGE)
+            if is_newer_version(tag, APP_VERSION):
+                self.update_available.emit(tag, url)
+        except Exception:
+            pass
 
 
 class OllamaThread(QThread):
@@ -3167,6 +3231,9 @@ class SettingsDialog(QDialog):
         self.autostart_cb = QCheckBox("Start the Ollama server when the app launches")
         self.autostart_cb.setChecked(bool(settings.get("ollama_autostart")))
         g.addRow("AI server", self.autostart_cb)
+        self.updates_cb = QCheckBox("Check for a newer version on launch")
+        self.updates_cb.setChecked(bool(settings.get("update_check_on", True)))
+        g.addRow("Updates", self.updates_cb)
         lay.addLayout(g)
 
         section("NOTIFICATIONS")
@@ -3253,6 +3320,7 @@ class SettingsDialog(QDialog):
         self.values.update({
             "theme":            self.theme_cb.currentData(),
             "ollama_autostart": self.autostart_cb.isChecked(),
+            "update_check_on":  self.updates_cb.isChecked(),
             "notify_on":        self.notify_cb.isChecked(),
             "notify_lead_min":  self.lead_sb.value(),
             "dnd_override":     self.dnd_cb.isChecked(),
@@ -3288,6 +3356,9 @@ class MainWindow(QMainWindow):
         self._tray         = None
         self._tray_retry_pending = False   # a tray-availability retry chain is running
         self._notify_act = self._dnd_act = self._startup_act = None   # set in _setup_tray
+        self._update_act = None            # tray "update available" item, set in _setup_tray
+        self._update_thread = None         # in-flight UpdateCheckThread (one at a time)
+        self._update_tag = self._update_url = None   # newest release found, if any
         self._notify_on    = self._settings["notify_on"]
         self._dnd_override = self._settings["dnd_override"]   # break through DND via app-drawn popup
         self._popups:      List[QWidget] = []
@@ -3378,12 +3449,27 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(body, 1)
 
-        # Status bar
+        # Status bar — status text on the left, a hidden "update available" pill
+        # on the right (shown only when a newer release is found).
+        status_bar = QWidget()
+        status_bar.setStyleSheet(
+            f"background:{C_SURFACE.name()}; border-top:1px solid {C_BORDER.name()};")
+        sb = QHBoxLayout(status_bar); sb.setContentsMargins(0, 0, 10, 0); sb.setSpacing(8)
         self._status_lbl = QLabel("Ready")
         self._status_lbl.setStyleSheet(
-            f"color: {C_MUTED.name()}; font-size: 11px; padding: 3px 14px;"
-            f"border-top: 1px solid {C_BORDER.name()}; background: {C_SURFACE.name()};")
-        lay.addWidget(self._status_lbl)
+            f"color: {C_MUTED.name()}; font-size: 11px; padding: 3px 14px; background: transparent;")
+        sb.addWidget(self._status_lbl); sb.addStretch()
+        self._update_btn = QPushButton("")
+        self._update_btn.setCursor(Qt.PointingHandCursor)
+        self._update_btn.setStyleSheet(
+            f"QPushButton {{ background:{_rgba(C_ACCENT, .15)}; color:{C_ACCENT.name()};"
+            f" border:1px solid {_rgba(C_ACCENT, .5)}; padding:2px 10px; border-radius:{RAD}px;"
+            f" font-size:11px; font-weight:bold; }}"
+            f"QPushButton:hover {{ background:{_rgba(C_ACCENT, .28)}; }}")
+        self._update_btn.clicked.connect(self._open_releases_page)
+        self._update_btn.hide()
+        sb.addWidget(self._update_btn)
+        lay.addWidget(status_bar)
 
         # Refresh now-line every 30 s
         self._now_timer = QTimer(self)
@@ -3395,6 +3481,13 @@ class MainWindow(QMainWindow):
         self._notify_timer = QTimer(self)
         self._notify_timer.timeout.connect(self._check_block_starts)
         self._notify_timer.start(20_000)   # check every 20 s
+
+        # Update check — once shortly after launch, then daily. Fails silently
+        # (and 404s harmlessly while the repo is private).
+        self._update_timer = QTimer(self)
+        self._update_timer.timeout.connect(self._check_for_update)
+        self._update_timer.start(24 * 3600 * 1000)   # once a day
+        QTimer.singleShot(9000, self._check_for_update)
 
         self._refresh_view()
 
@@ -4649,8 +4742,41 @@ class MainWindow(QMainWindow):
         self._status_lbl.setText(msg)
         color = C_ERR_TXT.name() if error else C_MUTED.name()
         self._status_lbl.setStyleSheet(
-            f"color:{color}; font-size:11px; padding:3px 14px;"
-            f"border-top:1px solid {C_BORDER.name()}; background:{C_SURFACE.name()};")
+            f"color:{color}; font-size:11px; padding:3px 14px; background:transparent;")
+
+    # ── Auto-update check ────────────────────────────────────────────────────
+    def _check_for_update(self):
+        """Kick off a background GitHub release check (opt-out via settings).
+        No-op if one is already running; the thread fails silently on any error."""
+        if not self._settings.get("update_check_on", True):
+            return
+        if self._update_thread is not None and self._update_thread.isRunning():
+            return
+        t = UpdateCheckThread()                       # unparented; ref held below
+        t.update_available.connect(self._on_update_available)
+        t.finished.connect(t.deleteLater)
+        t.finished.connect(lambda: setattr(self, "_update_thread", None))
+        self._update_thread = t
+        t.start()
+
+    def _on_update_available(self, tag, url):
+        ver = strip_v(tag)
+        self._update_tag, self._update_url = tag, url
+        self._update_btn.setText(f"⬆  Update available: v{ver}")
+        self._update_btn.setToolTip(
+            f"Version {ver} is available — click to open the releases page")
+        self._update_btn.show()
+        # Reflect it in the tray too, if the tray has been built yet (it may still
+        # be retrying at Windows login — _setup_tray re-applies this when it lands).
+        if self._tray is not None:
+            self._tray.setToolTip(
+                f"Daily Scheduler v{APP_VERSION} — v{ver} available")
+        if self._update_act is not None:
+            self._update_act.setText(f"⬆  Update to v{ver}…")
+            self._update_act.setVisible(True)
+
+    def _open_releases_page(self):
+        QDesktopServices.openUrl(QUrl(self._update_url or RELEASES_PAGE))
 
     # ── Tray icon & notifications ────────────────────────────────────────────
     def _make_app_icon(self) -> QIcon:
@@ -4695,6 +4821,10 @@ class MainWindow(QMainWindow):
             QMenu::item {{ padding: 6px 16px; border-radius: {RAD}px; }}
             QMenu::item:selected {{ background: {C_SURF2.name()}; }}
         """)
+        # "Update available" — hidden until a newer release is found (top of menu).
+        self._update_act = menu.addAction("")
+        self._update_act.setVisible(False)
+        self._update_act.triggered.connect(self._open_releases_page)
         open_act = menu.addAction("Open Daily Scheduler")
         open_act.triggered.connect(self._show_from_tray)
         self._notify_act = menu.addAction("Notify when blocks start")
@@ -4723,6 +4853,9 @@ class MainWindow(QMainWindow):
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
+        # If an update was already found before the tray existed, surface it now.
+        if self._update_tag:
+            self._on_update_available(self._update_tag, self._update_url)
         # At login the shell may accept isSystemTrayAvailable() but drop this first
         # add. Re-assert once it has settled (only when auto-launched, to avoid a
         # cosmetic flicker on a normal foreground launch where the icon is fine).
