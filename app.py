@@ -3630,6 +3630,9 @@ class MainWindow(QMainWindow):
             sunday = monday + timedelta(days=6)
             if monday.month == sunday.month:
                 lbl = f"{monday.strftime('%B')} {monday.day} – {sunday.day}, {sunday.year}"
+            elif monday.year != sunday.year:   # New-Year week: spell out both years
+                lbl = (f"{monday.strftime('%b')} {monday.day}, {monday.year} – "
+                       f"{sunday.strftime('%b')} {sunday.day}, {sunday.year}")
             else:
                 lbl = (f"{monday.strftime('%b')} {monday.day} – "
                        f"{sunday.strftime('%b')} {sunday.day}, {sunday.year}")
