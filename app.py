@@ -209,7 +209,11 @@ def now_next_summary(blocks: List[Dict], now_min: int) -> str:
         return t if len(t) <= 30 else t[:29] + "…"
     ordered = sorted(blocks, key=lambda b: b["startMin"])
     cur = next((b for b in ordered if b["startMin"] <= now_min < b["endMin"]), None)
-    nxt = next((b for b in ordered if b["startMin"] > now_min), None)
+    # "Next" is the block starting after the current one ENDS — skip blocks that merely
+    # overlap the current one (user blocks and calendar events mix here, so overlaps are
+    # realistic). With no current block, it's the next block starting after now.
+    after = cur["endMin"] if cur else now_min
+    nxt = next((b for b in ordered if b["startMin"] > now_min and b["startMin"] >= after), None)
     parts = []
     if cur:
         parts.append(f"Now: {short(cur)} · {fmt_dur(cur['endMin'] - now_min)} left")
