@@ -115,16 +115,17 @@ The AI is optional — skip this section and you still have a full-featured plan
 [Ollama](https://ollama.com) is a free, open-source runtime that runs large language
 models entirely on your own machine. Nothing you type ever leaves your PC.
 
-**1. Install Ollama** — download the Windows installer from
+**1. Install Ollama** — grab the installer for your OS from
 [ollama.com/download](https://ollama.com/download) and run it. Verify it works by opening
-a terminal (press <kbd>Win</kbd>, type *cmd*, Enter) and running:
+a terminal (Windows: press <kbd>Win</kbd>, type *cmd*, Enter) and running:
 
 ```bat
 ollama --version
 ```
 
-**2. Pull a model** — pick one that fits your GPU's VRAM (check it in Task Manager →
-Performance → GPU → *Dedicated GPU memory*), then run the command in a terminal:
+**2. Pull a model** — pick one that fits your GPU's VRAM (Windows: Task Manager →
+Performance → GPU → *Dedicated GPU memory*; Linux: `nvidia-smi` or `rocm-smi`), then run
+the command in a terminal:
 
 | Your GPU VRAM | Suggested model | Download |
 |---|---|---|
@@ -152,9 +153,10 @@ When you're done, **⏏** *(unload)* frees the model from memory and **⏻** *(s
 server down — both fully release GPU/VRAM, so Ollama uses zero resources until you press ▶
 again. (Prefer it automatic? Settings → **General** can start the server with the app.)
 
-> **Tip:** the Ollama installer also adds its own small tray app that starts with Windows.
-> Daily Scheduler doesn't need it running — the ▶ button starts the server on demand — so
-> you can quit it / remove it from Startup apps if you want zero idle usage.
+> **Tip:** Daily Scheduler doesn't need Ollama running in the background — the ▶ button
+> starts the server on demand. For zero idle usage: on Windows, quit the Ollama tray app
+> and remove it from Startup apps; on Linux, the install script enables a systemd service
+> you can turn off with `sudo systemctl disable --now ollama`.
 
 ---
 
