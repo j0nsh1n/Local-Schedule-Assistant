@@ -13,6 +13,8 @@ import getpass
 import platform
 import subprocess
 import re
+import traceback
+import faulthandler
 import calendar as _cal
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -36,7 +38,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.4.0"
+__version__  = "3.5.0"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -51,6 +53,8 @@ DATA_DIR   = Path.home() / ".daily-scheduler"
 DATA_FILE  = DATA_DIR / "activities.json"
 CREDS_FILE = DATA_DIR / "credentials.json"
 TOKEN_FILE = DATA_DIR / "token.json"
+CRASH_LOG  = DATA_DIR / "crash.log"   # native fatal faults (faulthandler)
+ERROR_LOG  = DATA_DIR / "app.log"     # unhandled Python tracebacks (sys.excepthook)
 DATA_DIR.mkdir(exist_ok=True)
 
 # ── Layout constants ───────────────────────────────────────────────────────
@@ -247,6 +251,51 @@ def today_str() -> str:
 
 def new_id() -> str:
     return str(uuid.uuid4())[:8]
+
+# ── Crash / error logging ───────────────────────────────────────────────────
+# A "flight recorder" for a --windowed app that has no console: persist WHY it died.
+#   app.log   — unhandled Python tracebacks (sys.excepthook), rotated at ~1 MB → .old
+#   crash.log — native fatal faults (segfault/abort, e.g. a GPU-driver crash) via
+#               faulthandler, dumping every thread's stack.
+# Privacy: tracebacks + faulthandler dumps record frames/lines only, NEVER local values,
+# so no schedule data is written (proven by test_error_log.py). All best-effort — a
+# logging failure must never block startup or silence the app.
+_crash_fh = None   # crash.log kept open for the process lifetime (faulthandler writes to it)
+
+def _rotate_log(path: Path, max_bytes: int = 1_000_000) -> None:
+    """Single-generation rotation: once `path` passes max_bytes, move it to `<path>.old`
+    (replacing any previous .old) so the log can't grow without bound."""
+    try:
+        if path.exists() and path.stat().st_size > max_bytes:
+            path.replace(path.with_name(path.name + ".old"))
+    except Exception:
+        pass
+
+def log_exception(exc_type, exc, tb) -> None:
+    """sys.excepthook: append an unhandled exception's traceback to app.log (rotated
+    first), then defer to the default hook so it still reaches stderr. Records the code
+    path only — no local variables — so schedule data never leaks."""
+    try:
+        _rotate_log(ERROR_LOG)
+        with ERROR_LOG.open("a", encoding="utf-8") as f:
+            f.write(f"\n===== {datetime.now().isoformat(timespec='seconds')} "
+                    f"· v{APP_VERSION} · pid {os.getpid()} =====\n")
+            traceback.print_exception(exc_type, exc, tb, file=f)
+    except Exception:
+        pass
+    sys.__excepthook__(exc_type, exc, tb)
+
+def install_crash_logging() -> None:
+    """Wire up the two diagnostics as early as possible in main(). Best-effort: any
+    failure here is swallowed so it can never keep the app from starting."""
+    global _crash_fh
+    try:
+        _rotate_log(CRASH_LOG)
+        _crash_fh = CRASH_LOG.open("a", encoding="utf-8")   # held open for the process life
+        faulthandler.enable(file=_crash_fh, all_threads=True)
+    except Exception:
+        pass
+    sys.excepthook = log_exception
 
 # ── Local storage ──────────────────────────────────────────────────────────
 def _migrate_types(acts: List[Dict]) -> List[Dict]:
@@ -5153,6 +5202,9 @@ def main():
     if "--version" in sys.argv or "-V" in sys.argv:
         print(f"Daily Scheduler {APP_VERSION}")
         return
+
+    # Persist crashes to ~/.daily-scheduler/{app,crash}.log before anything else can fail.
+    install_crash_logging()
 
     # Apply the saved theme before any widget (or the palette below) bakes colours.
     apply_theme(load_settings().get("theme", DEFAULT_THEME))
