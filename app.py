@@ -36,7 +36,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.2.0"
+__version__  = "3.3.0"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -199,6 +199,27 @@ def is_newer_version(latest: str, current: str) -> bool:
     lt += (0,) * (n - len(lt))
     ct += (0,) * (n - len(ct))
     return lt > ct
+
+def now_next_summary(blocks: List[Dict], now_min: int) -> str:
+    """One-line 'Now / Next' status for minute-of-day `now_min`. `blocks` = today's
+    items (each with startMin/endMin/title). Returns '' when nothing is current OR
+    upcoming (e.g. after the last block). Pure so it's unit-testable without a clock."""
+    def short(b) -> str:
+        t = (b.get("title") or "").strip() or "Untitled"
+        return t if len(t) <= 30 else t[:29] + "…"
+    ordered = sorted(blocks, key=lambda b: b["startMin"])
+    cur = next((b for b in ordered if b["startMin"] <= now_min < b["endMin"]), None)
+    nxt = next((b for b in ordered if b["startMin"] > now_min), None)
+    parts = []
+    if cur:
+        parts.append(f"Now: {short(cur)} · {fmt_dur(cur['endMin'] - now_min)} left")
+    if nxt:
+        when = fmt_time(nxt["startMin"])
+        if cur:
+            parts.append(f"Next: {short(nxt)} at {when}")
+        else:
+            parts.append(f"Next: {short(nxt)} at {when} (in {fmt_dur(nxt['startMin'] - now_min)})")
+    return "  →  ".join(parts)
 
 def today_str() -> str:
     return date.today().isoformat()
@@ -3459,6 +3480,12 @@ class MainWindow(QMainWindow):
         self._status_lbl.setStyleSheet(
             f"color: {C_MUTED.name()}; font-size: 11px; padding: 3px 14px; background: transparent;")
         sb.addWidget(self._status_lbl); sb.addStretch()
+        # Live "Now / Next" indicator — always reflects the real current time / today's
+        # schedule (independent of the day being viewed), refreshed by _now_timer.
+        self._nownext_lbl = QLabel("")
+        self._nownext_lbl.setStyleSheet(
+            f"color: {C_TEXT.name()}; font-size: 11px; padding: 3px 8px; background: transparent;")
+        sb.addWidget(self._nownext_lbl)
         self._update_btn = QPushButton("")
         self._update_btn.setCursor(Qt.PointingHandCursor)
         self._update_btn.setStyleSheet(
@@ -3471,9 +3498,10 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._update_btn)
         lay.addWidget(status_bar)
 
-        # Refresh now-line every 30 s
+        # Refresh now-line + the Now/Next indicator every 30 s
         self._now_timer = QTimer(self)
         self._now_timer.timeout.connect(self._timeline.update)
+        self._now_timer.timeout.connect(self._update_nownext)
         self._now_timer.start(30_000)
 
         # Tray icon + block-start notifications
@@ -3700,6 +3728,7 @@ class MainWindow(QMainWindow):
 
     # ── View refresh ───────────────────────────────────────────────────────
     def _refresh_view(self):
+        self._update_nownext()   # keep Now/Next current after any edit/nav/fetch
         d = self._cur_date
         if self._view == "day":
             self._date_lbl.setText(d.strftime("%A, %B %d, %Y"))
@@ -4744,6 +4773,32 @@ class MainWindow(QMainWindow):
         self._status_lbl.setStyleSheet(
             f"color:{color}; font-size:11px; padding:3px 14px; background:transparent;")
 
+    # ── Now / Next indicator ─────────────────────────────────────────────────
+    def _nownext_text(self) -> str:
+        """Current 'Now / Next' line for the REAL clock and TODAY's schedule (user
+        blocks + any loaded calendar events), regardless of the day being viewed."""
+        today = date.today()
+        nm = datetime.now().hour * 60 + datetime.now().minute
+        return now_next_summary(self._day_acts(today) + self._day_cal(today), nm)
+
+    def _update_nownext(self):
+        s = self._nownext_text()
+        self._nownext_lbl.setText(s)
+        self._refresh_tray_tooltip(s)
+
+    def _refresh_tray_tooltip(self, nownext=None):
+        """Compose the tray tooltip: version + Now/Next + (update line if available)."""
+        if self._tray is None:
+            return
+        if nownext is None:
+            nownext = self._nownext_text()
+        lines = [f"Daily Scheduler v{APP_VERSION}"]
+        if nownext:
+            lines.append(nownext)
+        if self._update_tag:
+            lines.append(f"Update to v{strip_v(self._update_tag)} available")
+        self._tray.setToolTip("\n".join(lines))
+
     # ── Auto-update check ────────────────────────────────────────────────────
     def _check_for_update(self):
         """Kick off a background GitHub release check (opt-out via settings).
@@ -4768,9 +4823,7 @@ class MainWindow(QMainWindow):
         self._update_btn.show()
         # Reflect it in the tray too, if the tray has been built yet (it may still
         # be retrying at Windows login — _setup_tray re-applies this when it lands).
-        if self._tray is not None:
-            self._tray.setToolTip(
-                f"Daily Scheduler v{APP_VERSION} — v{ver} available")
+        self._refresh_tray_tooltip()
         if self._update_act is not None:
             self._update_act.setText(f"⬆  Update to v{ver}…")
             self._update_act.setVisible(True)
@@ -4856,6 +4909,7 @@ class MainWindow(QMainWindow):
         # If an update was already found before the tray existed, surface it now.
         if self._update_tag:
             self._on_update_available(self._update_tag, self._update_url)
+        self._refresh_tray_tooltip()   # seed tooltip with version + Now/Next
         # At login the shell may accept isSystemTrayAvailable() but drop this first
         # add. Re-assert once it has settled (only when auto-launched, to avoid a
         # cosmetic flicker on a normal foreground launch where the icon is fine).
