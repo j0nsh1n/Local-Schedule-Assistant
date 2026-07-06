@@ -9,6 +9,7 @@ import json
 import uuid
 import shutil
 import os
+import getpass
 import platform
 import subprocess
 import re
@@ -35,7 +36,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "2.6.1"
+__version__  = "3.0.0"
 APP_VERSION  = __version__
 
 # ── App data paths ─────────────────────────────────────────────────────────
@@ -599,10 +600,12 @@ def start_ollama():
         return False, str(ex)
 
 
-# ── Run-at-login (Windows: Startup-folder shortcut) ─────────────────────────
-# A .lnk in the user's Startup folder is the most visible/reliable method — it shows
-# in Task Manager > Startup and Settings, and the user can see the file directly. (The
-# old HKCU Run-key method worked at boot but Task Manager was slow to display it.)
+# ── Run-at-login ─────────────────────────────────────────────────────────────
+# Windows: a .lnk in the user's Startup folder — the most visible/reliable method; it
+# shows in Task Manager > Startup and Settings, and the user can see the file directly.
+# (The old HKCU Run-key method worked at boot but Task Manager was slow to display it.)
+# Linux: an XDG autostart entry (~/.config/autostart/daily-scheduler.desktop) — the
+# freedesktop standard, honoured by KDE/GNOME and visible in their autostart settings.
 _RUN_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _RUN_NAME = "DailyScheduler"
 
@@ -632,13 +635,55 @@ def _remove_legacy_run_key():
     except OSError:
         pass
 
+def _autostart_desktop() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "autostart" / "daily-scheduler.desktop"
+
+def _desktop_exec_line() -> str:
+    """Exec= value for the autostart entry. Desktop-entry spec: arguments with spaces
+    must be double-quoted, and a literal `"` or `\\` inside them backslash-escaped."""
+    def q(s: str) -> str:
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    target, args, _ = _startup_target()
+    if getattr(sys, "frozen", False):
+        return f"{q(target)} {args}"
+    script = Path(__file__).resolve()
+    return f"{q(target)} {q(str(script))} --startup"
+
+def _set_startup_linux(enabled: bool) -> bool:
+    entry = _autostart_desktop()
+    if not enabled:
+        entry.unlink(missing_ok=True)
+        return not entry.exists()
+    _, _, workdir = _startup_target()
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Daily Scheduler\n"
+        "Comment=Daily planner with a local AI assistant\n"
+        f"Exec={_desktop_exec_line()}\n"
+        f"Path={workdir}\n"
+        "Terminal=false\n"
+        "X-GNOME-Autostart-enabled=true\n",
+        encoding="utf-8",
+    )
+    return entry.exists()
+
 def is_startup_enabled() -> bool:
-    if platform.system() != "Windows":
-        return False
-    return _startup_lnk().exists()
+    if platform.system() == "Windows":
+        return _startup_lnk().exists()
+    if platform.system() == "Linux":
+        return _autostart_desktop().exists()
+    return False
 
 def set_startup(enabled: bool) -> bool:
-    """Create/remove the Startup-folder shortcut. No admin rights needed."""
+    """Create/remove the run-at-login entry. No admin rights needed."""
+    if platform.system() == "Linux":
+        try:
+            return _set_startup_linux(enabled)
+        except Exception:
+            return False
     if platform.system() != "Windows":
         return False
     try:
@@ -667,6 +712,32 @@ def set_startup(enabled: bool) -> bool:
         return ok
     except Exception:
         return False
+
+
+def _ensure_alert_wav() -> Optional[Path]:
+    """Write a small chime wav (stdlib only — keeps app.py self-contained) for alert
+    sounds on non-Windows systems, where QApplication.beep() is often silent (PipeWire
+    ignores the X11 bell; Wayland has none). Written once, reused after."""
+    try:
+        p = DATA_DIR / "alert.wav"
+        if p.exists():
+            return p
+        import wave, math, struct
+        rate = 44100
+        frames = bytearray()
+        def tone(freq, secs, vol=0.5):
+            n = int(rate * secs)
+            for i in range(n):
+                env = min(1.0, i / 300, (n - i) / 1200)   # attack/decay so it can't click
+                frames.extend(struct.pack(
+                    "<h", int(32767 * vol * env * math.sin(2 * math.pi * freq * i / rate))))
+        tone(660, 0.14); tone(0, 0.06); tone(880, 0.22)
+        with wave.open(str(p), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+            w.writeframes(bytes(frames))
+        return p
+    except Exception:
+        return None
 
 
 def list_ollama_models() -> List[str]:
@@ -2805,6 +2876,10 @@ class SetupWidget(QWidget):
 class AlertPopup(QWidget):
     def __init__(self, title, body, icon: QIcon):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        # Stable title so compositor window rules can target the popup — on Wayland
+        # apps can't place their own windows, but e.g. a KWin rule matching this
+        # title can force bottom-right + keep-above.
+        self.setWindowTitle("Daily Scheduler Alert")
         self.setAttribute(Qt.WA_ShowWithoutActivating)   # don't steal focus
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)           # free itself when dismissed
@@ -4423,7 +4498,8 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         settings_act = menu.addAction("Settings…")
         settings_act.triggered.connect(self._open_settings)
-        self._startup_act = menu.addAction("Start with Windows")
+        self._startup_act = menu.addAction(
+            "Start with Windows" if platform.system() == "Windows" else "Start at login")
         self._startup_act.setCheckable(True)
         self._startup_act.setChecked(is_startup_enabled())
         self._startup_act.toggled.connect(self._toggle_startup)
@@ -4516,6 +4592,19 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            wav = _ensure_alert_wav()
+            if wav:
+                from PySide6.QtCore import QUrl
+                from PySide6.QtMultimedia import QSoundEffect
+                if getattr(self, "_alert_fx", None) is None:
+                    self._alert_fx = QSoundEffect(self)
+                    self._alert_fx.setSource(QUrl.fromLocalFile(str(wav)))
+                    self._alert_fx.setVolume(0.9)
+                self._alert_fx.play()
+                return
+        except Exception:
+            pass
+        try:
             QApplication.beep()
         except Exception:
             pass
@@ -4540,12 +4629,12 @@ class MainWindow(QMainWindow):
             self._startup_act.blockSignals(False)
             if self._tray:
                 self._tray.showMessage("Couldn't update startup setting",
-                    "Windows blocked the change.", self._make_app_icon(), 5000)
+                    "The system blocked the change.", self._make_app_icon(), 5000)
             return
         if self._tray:
-            msg = ("Daily Scheduler will open in the tray when Windows starts "
+            msg = ("Daily Scheduler will open when you sign in "
                    "(the AI server stays off until you start it)."
-                   if enabled else "Removed from Windows startup.")
+                   if enabled else "Removed from startup.")
             self._tray.showMessage("Startup setting updated", msg,
                                    self._make_app_icon(), 5000)
 
@@ -4654,7 +4743,11 @@ def main():
     # launch exits after pinging the winner to surface its window. A QLocalServer carries
     # that "show" ping. Wrapped so it can never block launch. On Windows the OS frees the
     # segment when the process ends, so a crash leaves no stale lock.
-    _key = "DailyScheduler.instance." + (os.environ.get("USERNAME") or "user")
+    try:
+        _instance_user = getpass.getuser()   # portable (USERNAME on Win, USER/pwd on Linux)
+    except Exception:
+        _instance_user = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
+    _key = "DailyScheduler.instance." + _instance_user
     _guard, _server = None, None
     try:
         _guard = QSharedMemory(_key)

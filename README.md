@@ -51,7 +51,7 @@ Built with Python + PySide6 (Qt6). MIT licensed.
 
 | Component | Requirement |
 |---|---|
-| **Operating system** | Windows 10 or 11 (Windows-first; running from source on macOS/Linux may work but is untested) |
+| **Operating system** | Windows 10/11, or Linux (v3.0.0+, run from source — see the Linux notes below; macOS may work but is untested) |
 | **The planner itself** | Any modern PC — the app is lightweight |
 | **AI assistant** *(optional)* | [Ollama](https://ollama.com) + ideally a GPU with **8–16 GB VRAM** (see the model guide below). CPU-only works but replies are slow. |
 | **Google Calendar** *(optional)* | A free Google Cloud project (steps below) |
@@ -72,7 +72,7 @@ The planner works fully offline with **neither** Ollama **nor** Google Calendar 
 
 ### Option B — run from source
 
-Requires **Python 3.10+** on Windows.
+Requires **Python 3.10+**.
 
 ```bat
 git clone https://github.com/j0nsh1n/Local-Schedule-Assistant.git
@@ -80,12 +80,31 @@ cd Local-Schedule-Assistant
 run.bat
 ```
 
-`run.bat` installs the dependencies and launches the app. Or manually:
+`run.bat` (Windows) / `./run.sh` (Linux) installs the dependencies and launches the
+app. Or manually:
 
 ```bat
 pip install -r requirements.txt
 python app.py
 ```
+
+### Linux notes (v3.0.0+)
+
+- **Run at login** uses a standard XDG autostart entry
+  (`~/.config/autostart/daily-scheduler.desktop`) — toggle it from the tray menu
+  ("Start at login") or your desktop's autostart settings.
+- **Tray icon:** KDE Plasma works out of the box. Vanilla **GNOME needs the
+  [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/)**
+  or the icon won't show; the app still works — closing the window without a tray
+  just keeps it running, relaunch to surface it.
+- **Alert popups on Wayland:** the always-on-top reminder popup may appear
+  center-screen instead of the bottom-right corner (Wayland doesn't let apps
+  position their own windows). Cosmetic only. On KDE you can restore corner
+  placement with a window rule (System Settings → Window Management → Window
+  Rules) matching the exact window title `Daily Scheduler Alert`: set
+  *Position* (Apply initially) and *Keep above* (Force).
+- **Ollama:** install the Linux build from [ollama.com](https://ollama.com/download);
+  AMD GPUs use the bundled ROCm (RDNA2+ supported out of the box).
 
 ---
 
