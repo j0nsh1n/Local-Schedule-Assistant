@@ -2876,6 +2876,10 @@ class SetupWidget(QWidget):
 class AlertPopup(QWidget):
     def __init__(self, title, body, icon: QIcon):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        # Stable title so compositor window rules can target the popup — on Wayland
+        # apps can't place their own windows, but e.g. a KWin rule matching this
+        # title can force bottom-right + keep-above.
+        self.setWindowTitle("Daily Scheduler Alert")
         self.setAttribute(Qt.WA_ShowWithoutActivating)   # don't steal focus
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)           # free itself when dismissed

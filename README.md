@@ -99,7 +99,10 @@ python app.py
   just keeps it running, relaunch to surface it.
 - **Alert popups on Wayland:** the always-on-top reminder popup may appear
   center-screen instead of the bottom-right corner (Wayland doesn't let apps
-  position their own windows). Cosmetic only.
+  position their own windows). Cosmetic only. On KDE you can restore corner
+  placement with a window rule (System Settings → Window Management → Window
+  Rules) matching the exact window title `Daily Scheduler Alert`: set
+  *Position* (Apply initially) and *Keep above* (Force).
 - **Ollama:** install the Linux build from [ollama.com](https://ollama.com/download);
   AMD GPUs use the bundled ROCm (RDNA2+ supported out of the box).
 
