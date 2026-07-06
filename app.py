@@ -36,7 +36,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.3.0"
+__version__  = "3.4.0"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -224,6 +224,23 @@ def now_next_summary(blocks: List[Dict], now_min: int) -> str:
         else:
             parts.append(f"Next: {short(nxt)} at {when} (in {fmt_dur(nxt['startMin'] - now_min)})")
     return "  →  ".join(parts)
+
+def week_ahead_lines(cal_by_date: Dict[str, List[Dict]], start: date, days: int = 7) -> str:
+    """Compact multi-day calendar preview for the AI system prompt: read-only Google
+    events over [start, start+days), one line per day, days with no events omitted.
+    `start` is the anchor (today) so offset 0/1 label as today/tomorrow — pure (no clock
+    read), so it's unit-testable. Returns '' when nothing is scheduled in the window."""
+    out = []
+    for i in range(days):
+        d  = start + timedelta(days=i)
+        ev = sorted(cal_by_date.get(d.isoformat(), []), key=lambda e: e["startMin"])
+        if not ev:
+            continue
+        label = {0: "today", 1: "tomorrow"}.get(i, d.strftime("%a %b %d"))
+        items = "; ".join(f"{e['title']} {fmt_time(e['startMin'])}–{fmt_time(e['endMin'])}"
+                          for e in ev)
+        out.append(f"  {d.isoformat()} ({label}): {items}")
+    return "\n".join(out)
 
 def today_str() -> str:
     return date.today().isoformat()
@@ -2814,6 +2831,12 @@ class AIPanel(QWidget):
         p += "".join(f"  - \"{a['title']}\" [{a['type']}]: "
                      f"{fmt_time(a['startMin'])}–{fmt_time(a['endMin'])}\n"
                      for a in acts) or "  (none yet)\n"
+        week = ctx.get("week_ahead", "")
+        if week:
+            p += ("\nTHE WEEK AHEAD (read-only Google Calendar, next 7 days from today — "
+                  "use for deadlines and planning ahead; each is a FIXED obstacle on its "
+                  "day). Pass the date the user names when scheduling on one of these days:\n"
+                  + week + "\n")
         p += (
             "\nTOOLS — pick the ONE that fits; never chain small calls for a bulk job:\n"
             "  add_block      – add one block\n"
@@ -3621,6 +3644,27 @@ class MainWindow(QMainWindow):
         self._fetched_keys.clear()
         self._cal_by_date.clear()
         self._ensure_cal_for_view()
+        self._prefetch_ai_months()   # warm this + next month for the AI's week-ahead context
+
+    @staticmethod
+    def _month_range(y: int, m: int):
+        """(_fetched_keys key, start, end-exclusive) covering calendar month (y, m)."""
+        return (f"m{y}-{m}", date(y, m, 1), date(y + (m == 12), m % 12 + 1, 1))
+
+    def _fetch_ranges(self, ranges):
+        """Start a CalFetchThread for each (key, start, end) range not already fetched."""
+        for key, start, end in ranges:
+            if key in self._fetched_keys:
+                continue
+            self._fetched_keys.add(key)
+            self._set_status("Fetching calendar…")
+            t = CalFetchThread(self._creds, start, end)
+            t.done.connect(self._on_cal)
+            t.error.connect(lambda e, k=key: (self._fetched_keys.discard(k),
+                                              self._set_status(e, True)))
+            t.finished.connect(lambda t=t: t in self._cal_threads and self._cal_threads.remove(t))
+            self._cal_threads.append(t)
+            t.start()
 
     def _ensure_cal_for_view(self):
         """Fetch Google events covering the visible range, once per range."""
@@ -3636,20 +3680,21 @@ class MainWindow(QMainWindow):
                 months = {(dd.year, dd.month) for dd in (monday, monday + timedelta(days=6))}
             else:
                 months = {(d.year, d.month)}
-            ranges = [(f"m{y}-{m}", date(y, m, 1),
-                       date(y + (m == 12), m % 12 + 1, 1)) for y, m in sorted(months)]
-        for key, start, end in ranges:
-            if key in self._fetched_keys:
-                continue
-            self._fetched_keys.add(key)
-            self._set_status("Fetching calendar…")
-            t = CalFetchThread(self._creds, start, end)
-            t.done.connect(self._on_cal)
-            t.error.connect(lambda e, k=key: (self._fetched_keys.discard(k),
-                                              self._set_status(e, True)))
-            t.finished.connect(lambda t=t: t in self._cal_threads and self._cal_threads.remove(t))
-            self._cal_threads.append(t)
-            t.start()
+            ranges = [self._month_range(y, m) for y, m in sorted(months)]
+        self._fetch_ranges(ranges)
+
+    def _prefetch_ai_months(self):
+        """Warm the calendar cache for this + next month so the AI's next-7-days context
+        (see week_ahead_lines) is populated without a per-view fetch race, and forward
+        navigation is instant. A 7-day window spans at most two months, so this + next
+        month always covers it. Reuses the per-view fetch keys, so nothing is fetched
+        twice."""
+        if not self._creds:
+            return
+        today = date.today()
+        nxt   = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+        self._fetch_ranges([self._month_range(today.year, today.month),
+                            self._month_range(nxt.year,   nxt.month)])
 
     def _on_cal(self, by_date: dict):
         self._cal_by_date.update(by_date)
@@ -3834,13 +3879,15 @@ class MainWindow(QMainWindow):
 
     def _ai_ctx(self):
         now = datetime.now()
+        today = date.today()
         return {"cal_events": self._day_cal(),
                 "activities": self._day_acts(),
+                "week_ahead": week_ahead_lines(self._cal_by_date, today),
                 "view_date":  self._cur_date.isoformat(),
-                "today":      date.today().isoformat(),
+                "today":      today.isoformat(),
                 "weekday":    now.strftime("%A"),
                 "now_min":    now.hour * 60 + now.minute,
-                "viewing_today": self._cur_date == date.today()}
+                "viewing_today": self._cur_date == today}
 
     # ── AI undo ──────────────────────────────────────────────────────────────
     def _ai_turn_start(self):
