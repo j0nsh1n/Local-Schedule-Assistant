@@ -31,4 +31,5 @@ _*.txt
 
 # ── Local-only dev reference (not part of the published project) ──
 CONTEXT.md
+CLAUDE.md
 tests/
