@@ -62,13 +62,22 @@ The planner works fully offline with **neither** Ollama **nor** Google Calendar 
 
 ## Install
 
-### Option A — prebuilt executable (easiest, no Python)
+### Option A — prebuilt binary (easiest, no Python)
 
-1. Download `DailyScheduler.exe` from the [latest release](../../releases/latest).
-2. Run it. If Windows SmartScreen shows *"Windows protected your PC"*, click
-   **More info → Run anyway** (the exe is unsigned, not malicious — you can audit
+Grab the file for your OS from the [latest release](../../releases/latest):
+
+**Windows** — `DailyScheduler.exe`
+1. Download and run it. If SmartScreen shows *"Windows protected your PC"*, click
+   **More info → Run anyway** (the binary is unsigned, not malicious — you can audit
    [`app.py`](app.py); the whole app is one file).
-3. That's it. Your data lives in `~/.daily-scheduler/` (i.e. `C:\Users\<you>\.daily-scheduler\`).
+
+**Linux** — `DailyScheduler-linux-x86_64` (v3.0.0+)
+1. `chmod +x DailyScheduler-linux-x86_64 && ./DailyScheduler-linux-x86_64`
+2. If it exits complaining about `libxcb-cursor`, install it (Qt 6.5+ needs it):
+   Fedora/Nobara `sudo dnf install xcb-util-cursor` · Debian/Ubuntu
+   `sudo apt install libxcb-cursor0`. See the **Linux notes** below for tray/Wayland tips.
+
+Your data lives in `~/.daily-scheduler/` either way.
 
 ### Option B — run from source
 

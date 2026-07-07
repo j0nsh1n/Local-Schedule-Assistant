@@ -1,0 +1,50 @@
+name: Release — Linux binary
+
+# Builds the Linux binary (PyInstaller can only build for the OS it runs on) and
+# attaches it to the GitHub release. Fires automatically when a release is
+# published; also runnable by hand against an existing tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the Linux binary to (e.g. v3.6.0)"
+        required: true
+
+permissions:
+  contents: write        # needed to upload a release asset
+
+jobs:
+  linux:
+    # 22.04 links an older glibc than 24.04, so the binary runs on more distros.
+    runs-on: ubuntu-22.04
+    steps:
+      # Build the exact tagged commit on BOTH paths (on a release event the tag
+      # ref resolves the same commit; on manual dispatch this avoids building
+      # default-branch HEAD and attaching a mismatched binary to the tag).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build + runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller -r requirements.txt
+
+      - name: Build Linux binary
+        run: |
+          pyinstaller --noconfirm --onefile --name DailyScheduler \
+            --collect-all PySide6 app.py
+          mv dist/DailyScheduler dist/DailyScheduler-linux-x86_64
+          chmod +x dist/DailyScheduler-linux-x86_64
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" dist/DailyScheduler-linux-x86_64 --clobber
