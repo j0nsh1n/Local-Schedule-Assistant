@@ -38,7 +38,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.5.0"
+__version__  = "3.6.0"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -1131,8 +1131,8 @@ AI_TOOLS = [
                        "Use this for 'copy/duplicate my schedule to <day>'. By default it "
                        "REPLACES the target day's blocks with the copies.",
         "parameters": {"type": "object", "properties": {
-            "from_date": {"type": "string", "description": "Source date YYYY-MM-DD (omit = viewed day)."},
-            "to_date":   {"type": "string", "description": "Target date YYYY-MM-DD."},
+            "from_date": {"type": "string", "description": "Source date (omit = viewed day). Pass the user's own words — a weekday name ('Thursday'), 'today', 6/14, or YYYY-MM-DD."},
+            "to_date":   {"type": "string", "description": "Target date. Pass the user's own words — a weekday name ('Thursday'), 'tomorrow', 6/14, or YYYY-MM-DD — NOT a date you worked out yourself; the app resolves it."},
             "merge":     {"type": "boolean", "description": "If true, keep the target's existing blocks and add the copies alongside them. Default false (replace)."},
         }, "required": ["to_date"]}}},
     {"type": "function", "function": {
@@ -2848,8 +2848,11 @@ class AIPanel(QWidget):
             "avoid placing anything earlier than the current time.\n\n"
             "THE DAY\n"
             "Anything the user asks for without a date goes on the day on screen. For "
-            "another day the user names it (e.g. \"6/14\", \"tomorrow\") — pass that "
-            "straight into the tool's date argument; the app resolves the exact date. "
+            "another day the user names it (e.g. \"Thursday\", \"tomorrow\", \"6/14\") — pass "
+            "that word STRAIGHT into the tool's date argument; the app resolves the exact "
+            "date. Do NOT convert a weekday or 'tomorrow' into a calendar date yourself — your "
+            "date arithmetic is unreliable, and the app does it correctly. So for \"copy to "
+            "Thursday\" pass to_date=\"Thursday\", NOT a date you counted out. "
             "Omit the date for the day on screen.\n\n"
             "ACTIVITY TYPES — set each block's \"type\" to what the user will actually be "
             "DOING during it (judge by the activity itself, not the blocks around it):\n"
@@ -2939,9 +2942,11 @@ class AIPanel(QWidget):
             "drop the appointment in a random free slot), and do NOT chain move_block calls.\n\n"
             "RULES\n"
             "  - ALWAYS call a tool when asked to add/move/remove/rename/copy/clear/shift/plan "
-            "— never just describe the change.\n"
-            "  - Times are 24-hour HH:MM. For another day pass the date the user gave "
-            "(e.g. \"6/14\", \"tomorrow\"); omit it for the day on screen.\n"
+            "— never just describe the change. Saying you did it without a tool call is a "
+            "failure — the schedule only changes when a tool runs.\n"
+            "  - Times are 24-hour HH:MM. For another day pass the user's OWN word for it — a "
+            "weekday name (\"Thursday\"), \"tomorrow\", or \"6/14\" — NOT a date you computed; "
+            "omit it for the day on screen.\n"
             "  - Blocks can't overlap — the app auto-adjusts, so don't fuss over exact gaps.\n"
             "  - To delete/move/rename a block, identify it by title and/or by its start "
             "time using 'at' (24h HH:MM). To remove ONE time slot, use 'at' with that "
@@ -2971,6 +2976,7 @@ class AIPanel(QWidget):
             "  \"move AP work to 1pm\"              → move_block(title=\"AP work\", start=\"13:00\")\n"
             "  \"make gym 30 minutes longer\"       → move_block(title=\"gym\", end=\"...\")\n"
             "  \"copy my schedule to 6/14\"         → copy_day(to_date=\"6/14\")\n"
+            "  \"copy today's schedule to Thursday\" → copy_day(to_date=\"Thursday\")  ← pass the weekday word, don't compute the date\n"
             "  \"shift everything two hours later\"  → shift_blocks(minutes=120)\n"
             "  \"clear my afternoon\"               → clear_range(start=\"12:00\", end=\"18:00\")\n"
             "  \"study 16:00-18:00 every weekday\"  → add_recurring(title=\"Study\", start=\"16:00\", end=\"18:00\", weekdays=[\"weekdays\"])\n"
@@ -4143,14 +4149,19 @@ class MainWindow(QMainWindow):
                     "startMin": a["startMin"], "endMin": a["endMin"],
                     "type": a["type"], "color": a["color"], "title": a["title"],
                 } for a in source]
+                # Either way, push the copies off the target day's read-only calendar
+                # events so they never land on a meeting (merge also keeps existing blocks).
                 if merge:
                     kept = [a for a in self._all_acts if a.get("date") == dst]
-                    merged, n_adj, n_drop = sequentialize(kept + copies, blocked=self._cal_intervals(dst))
-                    self._all_acts = [a for a in self._all_acts if a.get("date") != dst] + merged
-                    note = (f" ({n_adj} shifted to avoid overlaps.)" if n_adj else "")
+                    laid, n_adj, n_drop = sequentialize(kept + copies, blocked=self._cal_intervals(dst))
+                    adj_note = "shifted to avoid overlaps"   # could be a meeting OR a kept block
                 else:
-                    self._all_acts = [a for a in self._all_acts if a.get("date") != dst] + copies
-                    note = ""
+                    laid, n_adj, n_drop = sequentialize(copies, blocked=self._cal_intervals(dst))
+                    adj_note = "shifted to clear a meeting"  # copies-only, so only a meeting shifts them
+                self._all_acts = [a for a in self._all_acts if a.get("date") != dst] + laid
+                note = (f" ({n_adj} {adj_note}.)" if n_adj else "")
+                if n_drop:
+                    note += f" ({n_drop} didn't fit the day and were dropped.)"
                 save_all_activities(self._all_acts)
                 self._refresh_view()
                 return f"Copied {len(copies)} block(s) from {src} to {dst}.{note}"
