@@ -38,7 +38,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.6.0"
+__version__  = "3.7.0"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -66,10 +66,79 @@ HOUR_PX     = 96                  # pixels per hour on timeline (scrolls; center
 GUTTER_W    = 64                  # width of time-label column
 OLLAMA_URL  = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5:14b"     # better at tool-use/reasoning than llama3.1:8b
-# Curated picks that fit a 16 GB GPU and are strong at tool-calling (this app is
-# tool-heavy). Shown in the model picker alongside whatever `ollama list` reports.
-RECOMMENDED_MODELS = ["qwen3:14b", "gpt-oss:20b", "deepseek-r1:14b", "qwen2.5:14b",
-                      "gemma4", "glm-4.7-flash", "mistral-small3.1:24b"]
+# Curated picks that fit a ~16 GB GPU and are strong at tool-calling (this app is
+# tool-heavy). Keys are ollama pull tags; shown in the model picker alongside
+# whatever `ollama list` reports. `when` is user-facing guidance in Settings /
+# the AI panel tooltip — keep each blurb one short paragraph.
+MODEL_PROFILES = {
+    "qwen3:14b": {
+        "badge": "★ Best everyday",
+        "vram": "~10 GB",
+        "disk": "~9.3 GB",
+        "when": (
+            "Default recommendation. Reliable tool-calling with context headroom "
+            "on 12–16 GB GPUs — use this as your daily driver for planning and edits."
+        ),
+    },
+    "mistral-small3.1:24b": {
+        "badge": "Strongest (tight fit)",
+        "vram": "~15 GB",
+        "disk": "~15 GB",
+        "when": (
+            "Excellent tool-calling when you want the best quality. Needs ~15 GB "
+            "VRAM — a tight fit on 16 GB cards; unload other GPU apps first."
+        ),
+    },
+    "qwen2.5:14b": {
+        "badge": "Solid fallback",
+        "vram": "~10 GB",
+        "disk": "~9 GB",
+        "when": (
+            "Previous default — still very capable at tools. Use if qwen3 "
+            "misbehaves or you already have it pulled."
+        ),
+    },
+    "gpt-oss:20b": {
+        "badge": "OpenAI open weights",
+        "vram": "~13–14 GB",
+        "disk": "~13 GB",
+        "when": (
+            "OpenAI's open MoE model. Capable generalist; verify tool-calling "
+            "in-app on a few plan/edit requests before trusting multi-step rebuilds."
+        ),
+    },
+    "deepseek-r1:14b": {
+        "badge": "Deep reasoning",
+        "vram": "~10 GB",
+        "disk": "~9 GB",
+        "when": (
+            "Reasoning model that thinks before acting — useful for complex "
+            "\"plan my week\" questions, but slower and may narrate instead of "
+            "calling tools. The app strips its <think> blocks automatically."
+        ),
+    },
+    "gemma4": {
+        "badge": "Try / verify first",
+        "vram": "~10 GB",
+        "disk": "~9.6 GB",
+        "when": (
+            "Google's Gemma 4 (default tag ≈ e4b). Capable with native tools, but "
+            "less battle-tested here than Qwen — try a few plan/edit requests "
+            "before making it your daily driver."
+        ),
+    },
+    "glm-4.7-flash": {
+        "badge": "Large MoE (needs VRAM)",
+        "vram": "~16+ GB",
+        "disk": "~19 GB",
+        "when": (
+            "30B-class MoE — strong and relatively fast when it fits fully on GPU. "
+            "Default quant is ~19 GB on disk, so 16 GB cards may offload to RAM "
+            "(slower). Verify tool-calling before bulk schedule rebuilds."
+        ),
+    },
+}
+RECOMMENDED_MODELS = list(MODEL_PROFILES.keys())
 
 # ── Theme system ───────────────────────────────────────────────────────────
 # Two built-in themes, chosen in Settings and applied at startup. Every piece of
@@ -1560,6 +1629,98 @@ def model_guidance(model: str) -> str:
         return _MISTRAL_GUIDANCE
     return _GENERIC_GUIDANCE
 
+
+def model_profile(model: str) -> Optional[Dict]:
+    """User-facing profile for a model tag, or None if it isn't a curated pick.
+    Exact tag match first, then family/prefix so `qwen3:14b-q4_K_M` still maps."""
+    tag = (model or "").strip().split("@", 1)[0]
+    if not tag:
+        return None
+    if tag in MODEL_PROFILES:
+        return MODEL_PROFILES[tag]
+    low = tag.lower()
+    for key, prof in MODEL_PROFILES.items():
+        if key.lower() == low:
+            return prof
+    # Prefix / quant suffix: curated `qwen3:14b` matches `qwen3:14b-q4_K_M`
+    for key, prof in sorted(MODEL_PROFILES.items(), key=lambda kv: -len(kv[0])):
+        k = key.lower()
+        if low.startswith(k) and (len(low) == len(k) or low[len(k)] in ":-_"):
+            return prof
+    # Family match for size-tagged keys (`deepseek-r1:14b` ↔ `deepseek-r1:14b-…`)
+    # and untagged keys (`gemma4` ↔ `gemma4:e4b` / `gemma4:latest`).
+    for key, prof in sorted(MODEL_PROFILES.items(), key=lambda kv: -len(kv[0])):
+        k = key.lower()
+        k_name, _, k_size = k.partition(":")
+        low_name, _, low_rest = low.partition(":")
+        if low_name != k_name:
+            continue
+        if not k_size:
+            return prof
+        if low_rest == k_size or low_rest.startswith(k_size + "-") or low_rest.startswith(k_size + "_"):
+            return prof
+    return None
+
+
+def model_when_text(model: str) -> str:
+    """One short paragraph for tooltips / the Settings helper under the picker."""
+    p = model_profile(model)
+    if not p:
+        return (
+            "Custom / unlisted model. This app is tool-heavy — prefer a model with "
+            "strong function-calling. Verify plan/edit requests before trusting it."
+        )
+    return f"{p['badge']}  ·  VRAM {p['vram']}  ·  download {p['disk']}\n{p['when']}"
+
+
+def model_guide_text() -> str:
+    """Full multi-model guide for the Settings / AI-panel model guide dialog."""
+    lines = [
+        "This app edits your schedule via tool calls, so tool-calling reliability "
+        "matters more than raw size. Pull with:  ollama pull <tag>",
+        "",
+        "Pick by GPU VRAM (Task Manager → GPU, or nvidia-smi / rocm-smi):",
+        "  • 12–16 GB  →  qwen3:14b  (recommended daily driver)",
+        "  • 16 GB tight  →  mistral-small3.1:24b  (best quality; unload other apps)",
+        "  • Plenty of VRAM (20 GB+)  →  glm-4.7-flash is an option (~19 GB download)",
+        "  • ~8 GB or less  →  ollama pull qwen3:8b (not in the curated list; slower)",
+        "",
+    ]
+    for tag, p in MODEL_PROFILES.items():
+        lines.append(f"── {tag}  ({p['badge']})")
+        lines.append(f"   VRAM {p['vram']}  ·  download {p['disk']}")
+        lines.append(f"   {p['when']}")
+        lines.append("")
+    lines.append(
+        "After pulling, pick the tag in Settings or the AI panel. Press ▶ to start "
+        "Ollama; ⏏ unloads the model and ⏻ stops the server (zero GPU use until ▶)."
+    )
+    return "\n".join(lines)
+
+
+def show_model_guide(parent=None):
+    """Scrollable model guide (QMessageBox truncates long text on some platforms)."""
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Which model should I use?")
+    dlg.resize(520, 480)
+    lay = QVBoxLayout(dlg)
+    body = QTextEdit()
+    body.setReadOnly(True)
+    body.setPlainText(model_guide_text())
+    body.setStyleSheet(
+        f"QTextEdit {{ background: {C_BG.name()}; color: {C_TEXT.name()}; "
+        f"border: 1px solid {C_BORDER.name()}; border-radius: {RAD}px; "
+        f"padding: 8px; font-size: 12px; }}")
+    lay.addWidget(body)
+    close = QPushButton("Close")
+    close.setStyleSheet(
+        f"QPushButton {{ background:{C_ACCENT.name()}; color:{C_ON_ACCENT.name()}; "
+        f"border:none; padding:7px 18px; border-radius:{RAD}px; font-weight:bold; }}")
+    close.clicked.connect(dlg.accept)
+    row = QHBoxLayout(); row.addStretch(); row.addWidget(close)
+    lay.addLayout(row)
+    dlg.exec()
+
 # ══════════════════════════════════════════════════════════════════════════
 #  TIMELINE WIDGET  (custom-painted — pure Qt, no browser)
 # ══════════════════════════════════════════════════════════════════════════
@@ -2607,7 +2768,25 @@ class AIPanel(QWidget):
         """)
         self._model_in.currentTextChanged.connect(self._on_model_changed)
         mr.addWidget(self._model_in, 1)
+        self._model_info_btn = QPushButton("?")
+        self._model_info_btn.setFixedSize(22, 24)
+        self._model_info_btn.setCursor(Qt.PointingHandCursor)
+        self._model_info_btn.setToolTip("When to use each model")
+        self._model_info_btn.setStyleSheet(f"""
+            QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
+            color: {C_MUTED.name()}; border-radius: {RAD}px; font-size: 11px; font-weight: bold; }}
+            QPushButton:hover {{ background: {_rgba(C_ACCENT, .18)}; border-color: {C_ACCENT.name()};
+            color: {C_ACCENT.name()}; }}
+        """)
+        self._model_info_btn.clicked.connect(self._show_model_guide)
+        mr.addWidget(self._model_info_btn)
         hl.addLayout(mr)
+        self._model_hint = QLabel()
+        self._model_hint.setWordWrap(True)
+        self._model_hint.setStyleSheet(
+            f"color:{C_MUTED.name()}; font-size:10px; padding:0 2px;")
+        hl.addWidget(self._model_hint)
+        self._refresh_model_hint()
         lay.addWidget(hdr)
 
         # Tabs
@@ -2690,8 +2869,23 @@ class AIPanel(QWidget):
 
     def _on_model_changed(self, text):
         self.model = text.strip() or DEFAULT_MODEL
+        self._refresh_model_hint()
         if callable(self.on_model_edited):
             self.on_model_edited(self.model)
+
+    def _refresh_model_hint(self):
+        """Show a one-line badge + full 'when to use' as the combo tooltip."""
+        p = model_profile(self.model)
+        if p:
+            self._model_hint.setText(f"{p['badge']}  ·  {p['vram']} VRAM")
+        else:
+            self._model_hint.setText("Custom model — verify tool-calling before trusting")
+        tip = model_when_text(self.model)
+        self._model_in.setToolTip(tip)
+        self._model_hint.setToolTip(tip)
+
+    def _show_model_guide(self):
+        show_model_guide(self)
 
     def apply_settings(self, s):
         """Apply persisted AI settings — on launch and after the Settings dialog."""
@@ -2701,6 +2895,7 @@ class AIPanel(QWidget):
         self._model_in.blockSignals(True)
         self._model_in.setCurrentText(self.model)
         self._model_in.blockSignals(False)
+        self._refresh_model_hint()
 
     def _tab_style(self, active):
         return (f"QPushButton {{ background:transparent; border:none; border-bottom:2px solid {C_ACCENT.name()};"
@@ -3361,7 +3556,22 @@ class SettingsDialog(QDialog):
                 seen.add(m); models.append(m)
         self.model_cb.addItems(models)
         self.model_cb.setCurrentText(settings.get("model", DEFAULT_MODEL))
+        self.model_cb.currentTextChanged.connect(self._on_settings_model_changed)
         a.addRow("Model", self.model_cb)
+        self.model_hint = QLabel()
+        self.model_hint.setWordWrap(True)
+        self.model_hint.setStyleSheet(
+            f"color:{C_MUTED.name()}; font-size:11px; padding:2px 0 4px 0;")
+        a.addRow("", self.model_hint)
+        guide_btn = QPushButton("When to use each model…")
+        guide_btn.setCursor(Qt.PointingHandCursor)
+        guide_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {C_ACCENT.name()}; border: none;"
+            f" text-align: left; padding: 0; font-size: 11px; }}"
+            f"QPushButton:hover {{ text-decoration: underline; }}")
+        guide_btn.clicked.connect(self._show_model_guide)
+        a.addRow("", guide_btn)
+        self._on_settings_model_changed(self.model_cb.currentText())
         self.temp_sb = QDoubleSpinBox(); self.temp_sb.setRange(0.0, 1.5); self.temp_sb.setSingleStep(0.1)
         self.temp_sb.setValue(float(settings.get("temperature", 0.3)))
         a.addRow("Temperature", self.temp_sb)
@@ -3396,6 +3606,14 @@ class SettingsDialog(QDialog):
         save.clicked.connect(self._save)
         br.addWidget(cancel); br.addWidget(save)
         lay.addSpacing(4); lay.addLayout(br)
+
+    def _on_settings_model_changed(self, text):
+        tip = model_when_text(text)
+        self.model_hint.setText(tip)
+        self.model_cb.setToolTip(tip)
+
+    def _show_model_guide(self):
+        show_model_guide(self)
 
     def _open_folder(self):
         try:
