@@ -1,0 +1,62 @@
+name: Release — Windows package
+
+# Builds the Windows onedir package (PyInstaller can only build for the OS it
+# runs on) and attaches a zip to the GitHub release. Fires automatically when a
+# release is published; also runnable by hand against an existing tag.
+#
+# --onedir (not --onefile): no ~6 s self-extract on every launch; ship as a zip
+# so the folder (exe + _internal/) stays intact.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the Windows zip to (e.g. v3.7.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build + runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller -r requirements.txt
+
+      - name: Build Windows onedir package
+        run: |
+          pyinstaller --noconfirm --onedir --windowed --name DailyScheduler `
+            --collect-all PySide6 app.py
+          # Zip the whole folder (exe + _internal)
+          Compress-Archive -Path dist\DailyScheduler `
+            -DestinationPath dist\DailyScheduler-win64.zip -Force
+
+      - name: Smoke-test --version
+        # --windowed freezes have no console; still accept a non-zero exit if
+        # Qt can't open a display in CI — we only need the freeze to exist.
+        run: |
+          if (Test-Path dist\DailyScheduler\DailyScheduler.exe) {
+            Write-Host "Built: dist\DailyScheduler\DailyScheduler.exe"
+            Get-ChildItem dist\DailyScheduler | Select-Object Name, Length
+          } else {
+            throw "DailyScheduler.exe missing after build"
+          }
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          gh release upload "$env:TAG" dist\DailyScheduler-win64.zip --clobber
