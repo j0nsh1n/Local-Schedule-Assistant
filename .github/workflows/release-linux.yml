@@ -1,15 +1,20 @@
 name: Release — Linux binary
 
-# Builds the Linux binary (PyInstaller can only build for the OS it runs on) and
-# attaches it to the GitHub release. Fires automatically when a release is
-# published; also runnable by hand against an existing tag.
+# Builds the Linux onedir package (PyInstaller can only build for the OS it runs
+# on) and attaches a zip to the GitHub release. Fires automatically when a
+# release is published; also runnable by hand against an existing tag.
+#
+# --onedir (not --onefile): no ~6 s self-extract on every launch; ship as a zip
+# so the folder (binary + _internal/) stays intact. Built on ubuntu-22.04 for
+# older glibc → runs on Ubuntu 22.04+/Debian 12+ (a Nobara-built binary would
+# demand Fedora's newer glibc).
 on:
   release:
     types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag to attach the Linux binary to (e.g. v3.6.0)"
+        description: "Existing release tag to attach the Linux binary to (e.g. v3.7.0)"
         required: true
 
 permissions:
@@ -36,15 +41,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller -r requirements.txt
 
-      - name: Build Linux binary
+      - name: Build Linux onedir package
         run: |
-          pyinstaller --noconfirm --onefile --name DailyScheduler \
+          pyinstaller --noconfirm --onedir --name DailyScheduler \
             --collect-all PySide6 app.py
-          mv dist/DailyScheduler dist/DailyScheduler-linux-x86_64
-          chmod +x dist/DailyScheduler-linux-x86_64
+          chmod +x dist/DailyScheduler/DailyScheduler
+          # Folder name matches the historical asset basename so downloaders
+          # still recognise it; the zip is what GitHub hosts.
+          cd dist
+          mv DailyScheduler DailyScheduler-linux-x86_64
+          zip -r DailyScheduler-linux-x86_64.zip DailyScheduler-linux-x86_64
+
+      - name: Smoke-test --version
+        run: |
+          dist/DailyScheduler-linux-x86_64/DailyScheduler --version
 
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
-        run: gh release upload "$TAG" dist/DailyScheduler-linux-x86_64 --clobber
+        run: |
+          gh release upload "$TAG" \
+            dist/DailyScheduler-linux-x86_64.zip \
+            --clobber

@@ -62,18 +62,25 @@ The planner works fully offline with **neither** Ollama **nor** Google Calendar 
 
 ## Install
 
-### Option A — prebuilt binary (easiest, no Python)
+### Option A — prebuilt package (easiest, no Python)
 
-Grab the file for your OS from the [latest release](../../releases/latest):
+Grab the **zip for your OS** from the [latest release](../../releases/latest).
+Releases ship as an **onedir** folder (app binary + libraries) inside a zip — this
+starts in about a second, with no slow self-extract step on every launch.
 
-**Windows** — `DailyScheduler.exe`
-1. Download and run it. If SmartScreen shows *"Windows protected your PC"*, click
-   **More info → Run anyway** (the binary is unsigned, not malicious — you can audit
-   [`app.py`](app.py); the whole app is one file).
+**Windows** — `DailyScheduler-win64.zip` (or `DailyScheduler-vX.Y.Z-win64.zip`)
+1. Unzip anywhere (e.g. `Documents\DailyScheduler\`).
+2. Run `DailyScheduler\DailyScheduler.exe` inside the unzipped folder.
+3. If SmartScreen shows *"Windows protected your PC"*, click **More info → Run
+   anyway** (unsigned binary, not malicious — audit [`app.py`](app.py)).
+4. Keep the whole folder together (the `_internal` directory next to the exe is
+   required). Re-toggle **Start with Windows** after moving the folder so the
+   shortcut points at the new path.
 
-**Linux** — `DailyScheduler-linux-x86_64` (v3.0.0+)
-1. `chmod +x DailyScheduler-linux-x86_64 && ./DailyScheduler-linux-x86_64`
-2. If it exits complaining about `libxcb-cursor`, install it (Qt 6.5+ needs it):
+**Linux** — `DailyScheduler-linux-x86_64.zip` (v3.0.0+; onedir from v3.7.0)
+1. `unzip DailyScheduler-linux-x86_64.zip && chmod +x DailyScheduler-linux-x86_64/DailyScheduler`
+2. `./DailyScheduler-linux-x86_64/DailyScheduler`
+3. If it exits complaining about `libxcb-cursor`, install it (Qt 6.5+ needs it):
    Fedora/Nobara `sudo dnf install xcb-util-cursor` · Debian/Ubuntu
    `sudo apt install libxcb-cursor0`. See the **Linux notes** below for tray/Wayland tips.
 
@@ -134,21 +141,32 @@ ollama --version
 
 **2. Pull a model** — pick one that fits your GPU's VRAM (Windows: Task Manager →
 Performance → GPU → *Dedicated GPU memory*; Linux: `nvidia-smi` or `rocm-smi`), then run
-the command in a terminal:
+the command in a terminal. This app is *tool-heavy* (the model edits your schedule by
+calling functions), so **tool-calling reliability matters more than raw size**.
 
 | Your GPU VRAM | Suggested model | Download |
 |---|---|---|
-| 12–16 GB | `ollama pull qwen3:14b` ← **recommended**; or `qwen2.5:14b` / `deepseek-r1:14b` / `gpt-oss:20b` | ~9–13 GB |
-| 16 GB (tight fit) | `ollama pull mistral-small3.1:24b` — excellent tool-calling | ~14 GB |
-| ~8 GB | `ollama pull qwen3:8b` — smaller; tool-calling is less reliable | ~5 GB |
-| No dedicated GPU | a small model on CPU (e.g. `qwen3:8b`) — expect slow replies | ~5 GB |
+| 12–16 GB | `ollama pull qwen3:14b` ← **recommended daily driver** | ~9 GB |
+| 16 GB (tight fit) | `ollama pull mistral-small3.1:24b` — strongest tool-calling | ~15 GB |
+| 16 GB (roomy alternatives) | `qwen2.5:14b` / `deepseek-r1:14b` / `gemma4` / `gpt-oss:20b` | ~9–13 GB |
+| 20 GB+ VRAM | `ollama pull glm-4.7-flash` (~19 GB download) | ~19 GB |
+| ~8 GB or less / CPU | `ollama pull qwen3:8b` — slower; tool-calling less reliable | ~5 GB |
 
-This app is *tool-heavy* (the model edits your schedule by calling functions), so models
-with strong **tool-calling** matter more than raw size. The in-app picker recommends a
-curated, verified set — `qwen3:14b`, `gpt-oss:20b`, `deepseek-r1:14b`, `qwen2.5:14b`,
-`gemma4`, `glm-4.7-flash`, `mistral-small3.1:24b` — and also lists every model you've
-already pulled. The app tailors its prompting to each recommended model and automatically
-hides reasoning models' `<think>` output.
+**When to use which curated model** (same guide lives in-app under Settings → AI, and the
+**?** button next to the AI panel model picker):
+
+| Model | Best for | Notes |
+|---|---|---|
+| **`qwen3:14b`** | Everyday planning & edits | ★ Default recommendation — reliable tools, roomy on 12–16 GB |
+| **`mistral-small3.1:24b`** | Highest quality replies | ~15 GB VRAM; unload games/other GPU apps first |
+| **`qwen2.5:14b`** | Solid fallback | Previous default; use if qwen3 misbehaves |
+| **`gpt-oss:20b`** | OpenAI open weights | Verify tool-calling in-app before multi-step rebuilds |
+| **`deepseek-r1:14b`** | Complex “plan my week” reasoning | Slower; may narrate instead of calling tools; `<think>` is stripped |
+| **`gemma4`** | Trying Google’s Gemma 4 | Capable; less battle-tested here — verify before daily use |
+| **`glm-4.7-flash`** | Large MoE when VRAM allows | ~19 GB download — may offload on 16 GB cards; verify tools first |
+
+The in-app picker lists this curated set **and** every model you've already pulled. The
+app tailors its prompting per family and hides reasoning models' `<think>` output.
 
 **3. Start it from inside the app** — open the AI panel (the **AI** button in the header)
 and:
@@ -216,7 +234,8 @@ Open **Settings** from the header ⚙ or the tray menu. Everything persists in
 - **General** — theme (dark *Nocturne* / light *Slate*; applied on next launch), Start
   with Windows, and whether to auto-start the Ollama server when the app launches.
 - **Notifications** — block-start alerts on/off, lead time, Do-Not-Disturb override.
-- **AI Assistant** — model, temperature, context window, and default planning hours.
+- **AI Assistant** — model (with a live “when to use this” blurb + full model guide),
+  temperature, context window, and default planning hours.
 - **Data** — open the data folder or export a backup of your schedule.
 
 ---
@@ -249,14 +268,34 @@ Everything lives in `~/.daily-scheduler/` — plain JSON you can back up or insp
 
 ---
 
-## Building the executable yourself
+## Building the package yourself
+
+Releases use PyInstaller **`--onedir`** (a folder, not a single self-extracting file)
+so startup is fast. Zip the whole folder for distribution.
+
+**Windows** (from the repo root):
+
+```bat
+build-windows.bat
+```
+
+Or by hand:
 
 ```bat
 pip install pyinstaller
-py -m PyInstaller --noconfirm --onefile --windowed --name DailyScheduler --collect-all PySide6 app.py
+py -m PyInstaller --noconfirm --onedir --windowed --name DailyScheduler --collect-all PySide6 app.py
 ```
 
-The result lands in `dist\DailyScheduler.exe` (~270 MB — it bundles Python and Qt).
+Result: `dist\DailyScheduler\DailyScheduler.exe` plus `_internal\` (~270 MB total).
+`build-windows.bat` also writes `dist_exe\DailyScheduler-win64.zip` for the release.
+
+**Linux** (local / personal builds only — public assets are CI-built on ubuntu-22.04
+for older glibc):
+
+```bash
+./build-linux.sh
+# → dist/DailyScheduler/DailyScheduler
+```
 
 ---
 
