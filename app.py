@@ -50,7 +50,7 @@ from PySide6.QtCore import (
     QPropertyAnimation, QEasingCurve, QAbstractAnimation,
 )
 from PySide6.QtGui import (
-    QPainter, QColor, QPen, QFont, QFontMetrics,
+    QPainter, QColor, QPen, QFont, QFontMetrics, QPainterPath,
     QPalette, QPixmap, QIcon, QDesktopServices, QKeySequence, QShortcut,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -275,6 +275,27 @@ def min_to_y(minutes: int) -> int:
 
 def y_to_min(y: int) -> int:
     return int(DAY_START + y / HOUR_PX * 60)
+
+def paint_schedule_block(p: QPainter, rect: QRect, fill: QColor, accent: QColor,
+                         radius: int = 6, accent_w: int = 3, outline: bool = False):
+    """Rounded block body + left accent clipped to the same curve (so the strip
+    doesn't square off the corners)."""
+    rr = max(0, min(int(radius), rect.height() // 2, rect.width() // 2))
+    path = QPainterPath()
+    path.addRoundedRect(float(rect.x()), float(rect.y()),
+                        float(rect.width()), float(rect.height()), float(rr), float(rr))
+    p.setPen(Qt.NoPen)
+    p.setBrush(fill)
+    p.drawPath(path)
+    if accent_w > 0:
+        p.save()
+        p.setClipPath(path)
+        p.fillRect(QRect(rect.x(), rect.y(), accent_w, rect.height()), accent)
+        p.restore()
+    if outline:
+        p.setPen(QPen(accent, 1.5))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
 
 def fmt_time(minutes: int) -> str:
     h, m = divmod(int(minutes), 60)   # 24-hour HH:MM (e.g. 09:00, 14:30, 24:00)
