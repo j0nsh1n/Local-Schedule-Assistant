@@ -234,9 +234,12 @@ Open **Settings** from the header ⚙ or the tray menu. Everything persists in
 - **General** — theme (dark *Nocturne* / light *Slate*; applied on next launch), Start
   with Windows, and whether to auto-start the Ollama server when the app launches.
 - **Notifications** — block-start alerts on/off, lead time, Do-Not-Disturb override.
-- **AI Assistant** — model (with a live “when to use this” blurb + full model guide),
-  temperature, context window, and default planning hours.
-- **Data** — open the data folder or export a backup of your schedule.
+- **AI Assistant** — model (with install status, **⬇ pull**, and a live “when to use this”
+  blurb + full model guide), temperature, context window, and default planning hours.
+- **Calendar** — comma-separated Google calendar IDs (default `primary`; add a school
+  calendar ID to overlay it read-only).
+- **Data** — open the data folder, export, or **Restore from backup…** (previous save +
+  daily snapshots).
 
 ---
 
@@ -249,6 +252,8 @@ Everything lives in `~/.daily-scheduler/` — plain JSON you can back up or insp
 | `activities.json` | your scheduled blocks |
 | `settings.json` | app settings |
 | `chat.json` | AI assistant transcript (restored after a crash; local only) |
+| `activities.json.bak` | schedule state one save ago |
+| `backups/activities-YYYY-MM-DD.json` | daily snapshots (kept ~14 days) |
 | `credentials.json` / `token.json` | Google OAuth (only if you connect Calendar) |
 | `startup.log` | launch diagnostics (timestamp, pid, launch flags — never schedule data) |
 

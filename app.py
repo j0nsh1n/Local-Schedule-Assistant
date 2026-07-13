@@ -49,12 +49,12 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QFont, QFontMetrics,
-    QPalette, QPixmap, QIcon, QDesktopServices,
+    QPalette, QPixmap, QIcon, QDesktopServices, QKeySequence, QShortcut,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.9.1"
+__version__  = "4.0.0"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -502,6 +502,8 @@ def save_all_activities(acts: List[Dict]) -> None:
 #                                        kept (recovers across days)
 BACKUP_DIR  = DATA_DIR / "backups"
 BACKUP_KEEP = 14
+BAK_FILE    = DATA_DIR / "activities.json.bak"
+MANUAL_UNDO_KEEP = 24   # v4.0: Ctrl+Z for manual edits
 
 def _write_daily_backup(acts: List[Dict]) -> None:
     """Best-effort: one snapshot per day (latest state of that day); prune to the
@@ -517,6 +519,52 @@ def _write_daily_backup(acts: List[Dict]) -> None:
                 pass
     except Exception:
         pass
+
+def list_schedule_backups() -> List[Dict]:
+    """Discover restore points: .bak + dated dailies. Pure filesystem; no schedule
+    contents loaded. Each item: {path, label, mtime, kind}."""
+    out: List[Dict] = []
+    try:
+        if BAK_FILE.exists():
+            st = BAK_FILE.stat()
+            out.append({
+                "path": BAK_FILE, "kind": "previous",
+                "label": f"Previous save  ·  {datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M')}",
+                "mtime": st.st_mtime,
+            })
+    except OSError:
+        pass
+    try:
+        for p in sorted(BACKUP_DIR.glob("activities-*.json"), reverse=True):
+            try:
+                st = p.stat()
+                day = p.stem.replace("activities-", "", 1)
+                out.append({
+                    "path": p, "kind": "daily",
+                    "label": f"Daily snapshot  ·  {day}  ·  {datetime.fromtimestamp(st.st_mtime).strftime('%H:%M')}",
+                    "mtime": st.st_mtime,
+                })
+            except OSError:
+                continue
+    except OSError:
+        pass
+    out.sort(key=lambda x: -x["mtime"])
+    return out
+
+def load_activities_from_path(path: Path) -> Optional[List[Dict]]:
+    """Load + migrate activities from a backup file. None if unreadable/invalid."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return None
+        return _migrate_types(data)
+    except Exception:
+        return None
+
+def parse_calendar_ids(s: str) -> List[str]:
+    """Comma-separated Google calendar IDs → non-empty list (default primary)."""
+    ids = [x.strip() for x in str(s or "").split(",") if x.strip()]
+    return ids or ["primary"]
 
 # ── AI undo ──────────────────────────────────────────────────────────────────
 # The assistant can rewrite or clear whole days, so snapshot the schedule before
@@ -569,11 +617,13 @@ DEFAULT_SETTINGS = {
     "model":            DEFAULT_MODEL,
     "notify_on":        True,
     "notify_lead_min":  0,        # alert this many minutes before a block starts (0 = at start)
+    "notify_end_chime": True,     # v4.0: short chime when a block ends
     "dnd_override":     True,
     "plan_day_start":   "08:00",  # default waking window the planner schedules within
     "plan_day_end":     "22:00",
     "ollama_autostart": False,    # keep Ollama off at launch unless the user opts in
     "update_check_on":  True,     # check GitHub for a newer release on launch + daily
+    "calendar_ids":     "primary",  # v4.0: comma-separated Google calendar IDs
     "temperature":      0.3,
     "num_ctx":          16384,
     # Optional buffer: at Windows sign-in, wait this many seconds before building the
@@ -821,11 +871,13 @@ class CalFetchThread(QThread):
     done  = Signal(dict)   # {iso_date: [events]}
     error = Signal(str)
 
-    def __init__(self, creds, start: date, end: date):
+    def __init__(self, creds, start: date, end: date, calendar_ids: Optional[List[str]] = None):
         super().__init__()
         self.creds  = creds
         self._start = start     # NB: not 'self.start' — that is QThread.start()
         self._end   = end       # exclusive
+        self._cals  = parse_calendar_ids(
+            ",".join(calendar_ids) if calendar_ids else "primary")
 
     def run(self):
         try:
@@ -834,20 +886,25 @@ class CalFetchThread(QThread):
             t0  = datetime.combine(self._start, datetime.min.time()).astimezone()
             t1  = datetime.combine(self._end,   datetime.min.time()).astimezone()
             by_date: Dict[str, List[Dict]] = {}
-            page = None
-            while True:
-                res = svc.events().list(
-                    calendarId="primary",
-                    timeMin=t0.isoformat(), timeMax=t1.isoformat(),
-                    singleEvents=True, orderBy="startTime",
-                    maxResults=2500, pageToken=page,
-                ).execute()
-                for ev in res.get("items", []):
-                    for entry in normalize_google_event(ev):
-                        by_date.setdefault(entry["date"], []).append(entry)
-                page = res.get("nextPageToken")
-                if not page:
-                    break
+            for cal_id in self._cals:
+                page = None
+                while True:
+                    res = svc.events().list(
+                        calendarId=cal_id,
+                        timeMin=t0.isoformat(), timeMax=t1.isoformat(),
+                        singleEvents=True, orderBy="startTime",
+                        maxResults=2500, pageToken=page,
+                    ).execute()
+                    for ev in res.get("items", []):
+                        for entry in normalize_google_event(ev):
+                            # Namespace id by calendar so two cals can't collide
+                            entry = dict(entry)
+                            entry["id"] = f"{cal_id}:{entry['id']}"
+                            entry["calendarId"] = cal_id
+                            by_date.setdefault(entry["date"], []).append(entry)
+                    page = res.get("nextPageToken")
+                    if not page:
+                        break
             self.done.emit(by_date)
         except Exception as ex:
             self.error.emit(str(ex))
@@ -1066,6 +1123,87 @@ def list_ollama_models() -> List[str]:
         return [m["name"] for m in r.json().get("models", []) if m.get("name")]
     except Exception:
         return []
+
+def _model_tag_key(tag: str) -> str:
+    """Normalize for install checks: 'qwen3:14b' and 'qwen3:14b:latest' match."""
+    t = (tag or "").strip().lower()
+    if t.endswith(":latest"):
+        t = t[:-7]
+    return t
+
+def model_is_installed(tag: str, installed: Optional[List[str]] = None) -> bool:
+    """True if `tag` appears in the local Ollama library (best-effort)."""
+    if not tag or not str(tag).strip():
+        return False
+    have = installed if installed is not None else list_ollama_models()
+    want = _model_tag_key(tag)
+    keys = {_model_tag_key(m) for m in have}
+    if want in keys:
+        return True
+    # Installed name may carry a quant/digest suffix after the curated tag
+    for k in keys:
+        if k.startswith(want + "-") or k.startswith(want + ":"):
+            return True
+    return False
+
+class OllamaPullThread(QThread):
+    """Stream POST /api/pull for one model tag. Progress is a short status string."""
+    progress = Signal(str)
+    finished_ok = Signal(str)   # model tag
+    failed = Signal(str)
+
+    def __init__(self, model: str, parent=None):
+        super().__init__(parent)
+        self.model = (model or "").strip()
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        if not self.model:
+            self.failed.emit("No model name."); return
+        try:
+            self.progress.emit(f"Pulling {self.model}…")
+            # Long read timeout: large models take many minutes; Stop cancels via _stop.
+            resp = requests.post(
+                f"{OLLAMA_URL}/api/pull",
+                json={"name": self.model, "stream": True},
+                stream=True, timeout=(10, 3600),
+            )
+            if resp.status_code == 404:
+                self.failed.emit(f"Model '{self.model}' not found on the Ollama library.")
+                return
+            resp.raise_for_status()
+            last = ""
+            for line in resp.iter_lines():
+                if self._stop:
+                    self.failed.emit("Pull cancelled."); return
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except Exception:
+                    continue
+                st = data.get("status") or ""
+                completed = data.get("completed")
+                total = data.get("total")
+                if total and completed is not None and total > 0:
+                    pct = min(100, int(100 * completed / total))
+                    mb_c = completed / (1024 * 1024)
+                    mb_t = total / (1024 * 1024)
+                    msg = f"{st or 'downloading'}  {pct}%  ({mb_c:.0f}/{mb_t:.0f} MB)"
+                else:
+                    msg = st or "working…"
+                if msg != last:
+                    self.progress.emit(msg); last = msg
+                if data.get("error"):
+                    self.failed.emit(str(data["error"])); return
+            self.finished_ok.emit(self.model)
+        except requests.exceptions.ConnectionError:
+            self.failed.emit("Can't reach Ollama. Press ▶ to start it, then try again.")
+        except Exception as ex:
+            self.failed.emit(str(ex))
 
 
 def strip_think(s: str) -> str:
@@ -3081,12 +3219,32 @@ class AIPanel(QWidget):
         """)
         self._model_info_btn.clicked.connect(self._show_model_guide)
         mr.addWidget(self._model_info_btn)
+        self._pull_btn = QPushButton("⬇")
+        self._pull_btn.setFixedSize(22, 24)
+        self._pull_btn.setCursor(Qt.PointingHandCursor)
+        self._pull_btn.setToolTip("Download this model with Ollama")
+        self._pull_btn.setStyleSheet(f"""
+            QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
+            color: {C_MUTED.name()}; border-radius: {RAD}px; font-size: 11px; }}
+            QPushButton:hover {{ background: {_rgba(C_OK, .18)}; border-color: {C_OK.name()};
+            color: {C_OK_TXT.name()}; }}
+            QPushButton:disabled {{ color: {C_BORDER2.name()}; }}
+        """)
+        self._pull_btn.clicked.connect(self._pull_selected_model)
+        mr.addWidget(self._pull_btn)
         hl.addLayout(mr)
         self._model_hint = QLabel()
         self._model_hint.setWordWrap(True)
         self._model_hint.setStyleSheet(
             f"color:{C_MUTED.name()}; font-size:10px; padding:0 2px;")
         hl.addWidget(self._model_hint)
+        self._pull_prog = QLabel()
+        self._pull_prog.setWordWrap(True)
+        self._pull_prog.setStyleSheet(
+            f"color:{C_ACCENT.name()}; font-size:10px; padding:0 2px 2px 2px;")
+        self._pull_prog.hide()
+        hl.addWidget(self._pull_prog)
+        self._pull_thread: Optional[OllamaPullThread] = None
         self._refresh_model_hint()
         lay.addWidget(hdr)
 
@@ -3104,7 +3262,8 @@ class AIPanel(QWidget):
         self._undo_btn = QPushButton("↶ Undo")
         self._undo_btn.setEnabled(False)
         self._undo_btn.setCursor(Qt.PointingHandCursor)
-        self._undo_btn.setToolTip("Undo the assistant's last change to your schedule")
+        self._undo_btn.setToolTip(
+            "Undo the assistant's last change (Ctrl+Z undoes your own edits)")
         self._undo_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {C_MUTED.name()}; border: none;"
             f" padding: 4px 12px; font-size: 11px; }}"
@@ -3163,10 +3322,22 @@ class AIPanel(QWidget):
 
     def _model_choices(self):
         seen, out = set(), []
-        for m in list_ollama_models() + RECOMMENDED_MODELS:
+        # Installed first, then curated recommendations not yet present
+        installed = list_ollama_models()
+        for m in installed + RECOMMENDED_MODELS:
             if m and m not in seen:
                 seen.add(m); out.append(m)
         return out
+
+    def _refresh_model_list(self):
+        """Rebuild the picker after a pull / Ollama reconnect."""
+        cur = self.model
+        self._model_in.blockSignals(True)
+        self._model_in.clear()
+        self._model_in.addItems(self._model_choices())
+        self._model_in.setCurrentText(cur)
+        self._model_in.blockSignals(False)
+        self._refresh_model_hint()
 
     def _on_model_changed(self, text):
         self.model = text.strip() or DEFAULT_MODEL
@@ -3175,15 +3346,65 @@ class AIPanel(QWidget):
             self.on_model_edited(self.model)
 
     def _refresh_model_hint(self):
-        """Show a one-line badge + full 'when to use' as the combo tooltip."""
+        """Show badge / install state + when-to-use tooltip; enable ⬇ if missing."""
+        installed = list_ollama_models() if self._ollama_up else []
+        have = model_is_installed(self.model, installed) if self._ollama_up else False
         p = model_profile(self.model)
-        if p:
-            self._model_hint.setText(f"{p['badge']}  ·  {p['vram']} VRAM")
+        if not self._ollama_up:
+            status = "Ollama not running"
+        elif have:
+            status = "Installed"
         else:
-            self._model_hint.setText("Custom model — verify tool-calling before trusting")
+            status = "Not installed — click ⬇ to download"
+        if p:
+            self._model_hint.setText(f"{p['badge']}  ·  {p['vram']} VRAM  ·  {status}")
+        else:
+            self._model_hint.setText(f"Custom model  ·  {status}")
         tip = model_when_text(self.model)
+        if not have and self._ollama_up:
+            tip += f"\n\nNot installed. Pull with:  ollama pull {self.model}"
         self._model_in.setToolTip(tip)
         self._model_hint.setToolTip(tip)
+        pulling = self._pull_thread is not None and self._pull_thread.isRunning()
+        self._pull_btn.setEnabled(self._ollama_up and bool(self.model) and not have and not pulling)
+        self._pull_btn.setToolTip(
+            "Download this model with Ollama" if not have else "Already installed")
+
+    def _pull_selected_model(self):
+        tag = (self._model_in.currentText() or self.model or "").strip()
+        if not tag:
+            return
+        if not self._ollama_up:
+            QMessageBox.information(self, "Ollama", "Start Ollama (▶) before pulling a model.")
+            return
+        if model_is_installed(tag):
+            self._refresh_model_hint(); return
+        if self._pull_thread is not None and self._pull_thread.isRunning():
+            return
+        self._pull_prog.setText(f"Pulling {tag}…"); self._pull_prog.show()
+        self._pull_btn.setEnabled(False)
+        t = OllamaPullThread(tag)
+        t.progress.connect(self._on_pull_progress)
+        t.finished_ok.connect(self._on_pull_ok)
+        t.failed.connect(self._on_pull_fail)
+        t.finished.connect(t.deleteLater)
+        t.finished.connect(lambda: setattr(self, "_pull_thread", None))
+        self._pull_thread = t
+        t.start()
+
+    def _on_pull_progress(self, msg: str):
+        self._pull_prog.setText(msg); self._pull_prog.show()
+
+    def _on_pull_ok(self, tag: str):
+        self._pull_prog.setText(f"✓  {tag} ready"); self._pull_prog.show()
+        self._refresh_model_list()
+        QTimer.singleShot(4000, lambda: self._pull_prog.hide()
+                          if not (self._pull_thread and self._pull_thread.isRunning()) else None)
+
+    def _on_pull_fail(self, msg: str):
+        self._pull_prog.setText(f"Pull failed: {msg}"); self._pull_prog.show()
+        self._refresh_model_hint()
+        QMessageBox.warning(self, "Model pull", msg)
 
     def _show_model_guide(self):
         show_model_guide(self)
@@ -3220,12 +3441,18 @@ class AIPanel(QWidget):
         t.start()
 
     def _on_ollama(self, ok: bool):
+        was = self._ollama_up
         self._ollama_up = ok
         self._dot.setStyleSheet(f"color: {(C_OK if ok else C_ERR).name()};")
         if not self._stxt.text().startswith("Starting"):
             self._stxt.setText("Connected" if ok else "Not running")
         self._set_power_state(ok)
         self._unload_btn.setEnabled(ok)
+        # Refresh install-state labels when Ollama comes up (or drops).
+        if ok != was or ok:
+            self._refresh_model_hint()
+            if ok and not was:
+                self._refresh_model_list()
 
     def _set_power_state(self, up: bool):
         """Power button is a toggle: ▶ Start when down, ⏻ Stop when up."""
@@ -3835,6 +4062,7 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(440)
         self.values = dict(settings)
         self.startup_requested = is_startup_enabled()
+        self.restored_acts: Optional[List[Dict]] = None
         self.setStyleSheet(f"""
             QDialog {{ background: {C_SURFACE.name()}; color: {C_TEXT.name()}; }}
             QLabel  {{ background: transparent; color: {C_TEXT.name()}; }}
@@ -3886,6 +4114,10 @@ class SettingsDialog(QDialog):
         self.lead_sb = QSpinBox(); self.lead_sb.setRange(0, 60); self.lead_sb.setSuffix(" min before")
         self.lead_sb.setValue(int(settings.get("notify_lead_min", 0)))
         n.addRow("Lead time", self.lead_sb)
+        self.end_chime_cb = QCheckBox("Chime when a block ends")
+        self.end_chime_cb.setChecked(bool(settings.get("notify_end_chime", True)))
+        self.end_chime_cb.setToolTip("Soft end-of-block chime (same sound as start alerts)")
+        n.addRow("End chime", self.end_chime_cb)
         self.dnd_cb = QCheckBox("Break through Do Not Disturb / Focus Assist")
         self.dnd_cb.setChecked(bool(settings.get("dnd_override")))
         n.addRow("Priority alert", self.dnd_cb)
@@ -3935,11 +4167,23 @@ class SettingsDialog(QDialog):
         a.addRow("Planning hours", ww)
         lay.addLayout(a)
 
+        section("CALENDAR")
+        c = QFormLayout(); c.setSpacing(8)
+        self.cal_ids = QLineEdit(str(settings.get("calendar_ids", "primary")))
+        self.cal_ids.setPlaceholderText("primary, or other calendar IDs, comma-separated")
+        self.cal_ids.setToolTip(
+            "Google Calendar IDs to overlay (read-only). Default is primary. "
+            "Find IDs in Google Calendar → Settings → Integrate calendar. "
+            "Example: primary,school@group.calendar.google.com")
+        c.addRow("Calendar IDs", self.cal_ids)
+        lay.addLayout(c)
+
         section("DATA")
         drow = QHBoxLayout()
         openf = QPushButton("Open data folder"); openf.clicked.connect(self._open_folder)
         expt  = QPushButton("Export schedule…"); expt.clicked.connect(self._export)
-        drow.addWidget(openf); drow.addWidget(expt); drow.addStretch()
+        rest  = QPushButton("Restore from backup…"); rest.clicked.connect(self._restore_backup)
+        drow.addWidget(openf); drow.addWidget(expt); drow.addWidget(rest); drow.addStretch()
         lay.addLayout(drow)
 
         br = QHBoxLayout(); br.addStretch()
@@ -3953,7 +4197,9 @@ class SettingsDialog(QDialog):
 
     def _on_settings_model_changed(self, text):
         tip = model_when_text(text)
-        self.model_hint.setText(tip)
+        have = model_is_installed(text)
+        status = "Installed" if have else "Not installed (use ⬇ in the AI panel to pull)"
+        self.model_hint.setText(f"{status}\n{tip}")
         self.model_cb.setToolTip(tip)
 
     def _show_model_guide(self):
@@ -3980,6 +4226,54 @@ class SettingsDialog(QDialog):
             except Exception:
                 pass
 
+    def _restore_backup(self):
+        """Pick a .bak or dated daily snapshot and stage it for MainWindow to apply."""
+        items = list_schedule_backups()
+        if not items:
+            QMessageBox.information(
+                self, "No backups",
+                "No backup files found yet. Backups appear after you save schedule "
+                "changes (previous-save .bak and daily snapshots under backups/).")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Restore from backup")
+        dlg.setMinimumWidth(420)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            "Choose a restore point. Your current schedule will be replaced "
+            "(a new .bak is written first if possible)."))
+        lb = QComboBox()
+        for it in items:
+            lb.addItem(it["label"], str(it["path"]))
+        lay.addWidget(lb)
+        row = QHBoxLayout(); row.addStretch()
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(dlg.reject)
+        ok = QPushButton("Restore")
+        ok.setStyleSheet(
+            f"QPushButton {{ background:{C_ACCENT.name()}; color:{C_ON_ACCENT.name()}; "
+            f"border:none; padding:7px 18px; border-radius:{RAD}px; font-weight:bold; }}")
+        ok.clicked.connect(dlg.accept)
+        row.addWidget(cancel); row.addWidget(ok)
+        lay.addLayout(row)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        path = Path(lb.currentData())
+        acts = load_activities_from_path(path)
+        if acts is None:
+            QMessageBox.warning(self, "Restore failed",
+                                f"Could not read a valid schedule from:\n{path}")
+            return
+        confirm = QMessageBox.question(
+            self, "Confirm restore",
+            f"Replace your current schedule with:\n\n{lb.currentText()}\n\n"
+            f"({len(acts)} block(s))",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+        self.restored_acts = acts
+        # Close settings with Accept so MainWindow applies the restore + saves settings
+        self._save()
+
     def _save(self):
         self.startup_requested = self.startup_cb.isChecked()
         self.values.update({
@@ -3988,12 +4282,14 @@ class SettingsDialog(QDialog):
             "update_check_on":  self.updates_cb.isChecked(),
             "notify_on":        self.notify_cb.isChecked(),
             "notify_lead_min":  self.lead_sb.value(),
+            "notify_end_chime": self.end_chime_cb.isChecked(),
             "dnd_override":     self.dnd_cb.isChecked(),
             "model":            self.model_cb.currentText().strip() or DEFAULT_MODEL,
             "temperature":      round(self.temp_sb.value(), 2),
             "num_ctx":          self.ctx_cb.currentData(),
             "plan_day_start":   self.pstart.time().toString("HH:mm"),
             "plan_day_end":     self.pend.time().toString("HH:mm"),
+            "calendar_ids":     self.cal_ids.text().strip() or "primary",
         })
         self.accept()
 
@@ -4012,6 +4308,7 @@ class MainWindow(QMainWindow):
         self._cal_threads: List[QThread] = []
         self._all_acts:    List[Dict] = load_all_activities()
         self._ai_undo:     List[List[Dict]] = []   # schedule snapshots for AI undo
+        self._manual_undo: List[List[Dict]] = []   # v4.0: Ctrl+Z for manual edits
         self._ai_turn_snapshotted = False
         self._ai_turn_active = False   # a turn is streaming — Undo is locked meanwhile
         self._cur_date:    date = date.today()
@@ -4028,12 +4325,17 @@ class MainWindow(QMainWindow):
         self._dnd_override = self._settings["dnd_override"]   # break through DND via app-drawn popup
         self._popups:      List[QWidget] = []
         self._notified:    set = set()     # (block_id, startMin) already announced today
+        self._notified_ends: set = set()   # (block_id, endMin) end-chimes already fired
         self._notified_day = date.today().isoformat()
         self._really_quit  = False
         self._tray_hinted  = False
 
         self.setStyleSheet(f"QMainWindow {{ background: {C_BG.name()}; }}")
         self.setWindowIcon(self._make_app_icon())
+        # Ctrl+Z — undo the last MANUAL edit (AI has its own ↶ Undo button)
+        sc = QShortcut(QKeySequence("Ctrl+Z"), self)
+        sc.setContext(Qt.WindowShortcut)
+        sc.activated.connect(self._manual_undo_last)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -4289,7 +4591,9 @@ class MainWindow(QMainWindow):
                 continue
             self._fetched_keys.add(key)
             self._set_status("Fetching calendar…")
-            t = CalFetchThread(self._creds, start, end)
+            t = CalFetchThread(
+                self._creds, start, end,
+                calendar_ids=parse_calendar_ids(self._settings.get("calendar_ids", "primary")))
             t.done.connect(self._on_cal)
             t.error.connect(lambda e, k=key: (self._fetched_keys.discard(k),
                                               self._set_status(e, True)))
@@ -4473,10 +4777,27 @@ class MainWindow(QMainWindow):
             self._year_view.set_year(d.year, busy)
 
     # ── Activity actions ───────────────────────────────────────────────────
+    def _manual_snapshot(self):
+        """Push current schedule so Ctrl+Z can restore it after a manual edit."""
+        self._manual_undo.append([dict(a) for a in self._all_acts])
+        del self._manual_undo[:-MANUAL_UNDO_KEEP]
+
+    def _manual_undo_last(self):
+        """Ctrl+Z: restore the schedule to before the last create/edit/drag/delete."""
+        if not self._manual_undo:
+            self._set_status("Nothing to undo.")
+            return
+        self._all_acts = self._manual_undo.pop()
+        save_all_activities(self._all_acts)
+        self._ai_undo_invalidate()
+        self._refresh_view()
+        self._set_status("Undid last edit. (Ctrl+Z)")
+
     def _on_block_create(self, s, e):
         dlg = AddActivityDialog(s, e, self._sidebar.selected_type,
                                 self._cur_date.isoformat(), parent=self)
         if dlg.exec() == QDialog.Accepted and dlg.result_activity:
+            self._manual_snapshot()
             self._all_acts.append(dlg.result_activity)
             save_all_activities(self._all_acts)
             self._ai_undo_invalidate()
@@ -4490,6 +4811,7 @@ class MainWindow(QMainWindow):
                                 existing=act, parent=self)
         if dlg.exec() != QDialog.Accepted:
             return
+        self._manual_snapshot()
         if dlg.result_deleted:
             self._all_acts = [a for a in self._all_acts if a["id"] != aid]
         elif dlg.result_activity:
@@ -4501,6 +4823,7 @@ class MainWindow(QMainWindow):
 
     def _commit_activity_change(self, aid, start, end):
         """Apply a drag move/resize to an existing block."""
+        self._manual_snapshot()
         for a in self._all_acts:
             if a["id"] == aid:
                 a["startMin"] = max(DAY_START, int(start))
@@ -4511,6 +4834,7 @@ class MainWindow(QMainWindow):
         self._refresh_view()
 
     def _delete_activity(self, aid):
+        self._manual_snapshot()
         self._all_acts = [a for a in self._all_acts if a["id"] != aid]
         save_all_activities(self._all_acts)
         self._ai_undo_invalidate()
@@ -5648,6 +5972,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.Accepted:
             return
         old_theme = self._settings.get("theme")
+        old_cals  = self._settings.get("calendar_ids", "primary")
         self._settings = dlg.values
         save_settings(self._settings)
         # Startup shortcut (a filesystem .lnk, so it persists on its own)
@@ -5662,6 +5987,21 @@ class MainWindow(QMainWindow):
             if act:
                 act.blockSignals(True); act.setChecked(val); act.blockSignals(False)
         self._ai_panel.apply_settings(self._settings)
+        # Backup restore (staged in the dialog)
+        if getattr(dlg, "restored_acts", None) is not None:
+            self._manual_snapshot()
+            self._all_acts = dlg.restored_acts
+            save_all_activities(self._all_acts)
+            self._ai_undo_invalidate()
+            self._manual_undo.clear()   # stack after restore is meaningless
+            self._refresh_view()
+            self._set_status(f"Restored schedule ({len(self._all_acts)} blocks).")
+        # Calendar ID change → re-fetch
+        if self._settings.get("calendar_ids", "primary") != old_cals:
+            self._cal_by_date.clear()
+            self._fetched_keys.clear()
+            self._ensure_cal_for_view()
+            self._prefetch_ai_months()
         if self._settings.get("theme") != old_theme:
             QMessageBox.information(
                 self, "Theme changed",
@@ -5755,37 +6095,57 @@ class MainWindow(QMainWindow):
     NOTIFY_WINDOW = 2   # minutes — only notify a block starting right around now
 
     def _check_block_starts(self):
-        """Notify only for blocks on TODAY that are starting right now (within a small
-        window). Using a tight window — rather than 'anything since the last check' —
-        means a forward clock jump (waking from sleep, manual time change) can't replay
-        a backlog of notifications all at once; only a genuinely-now block fires."""
-        if not self._notify_on:
-            return
+        """Notify only for blocks on TODAY that are starting (or ending) right now
+        within a small window. A tight window — rather than 'anything since the last
+        check' — means a forward clock jump can't replay a backlog of notifications."""
         now = datetime.now()
         now_min = now.hour * 60 + now.minute
         today = date.today().isoformat()
         if today != self._notified_day:       # new day → forget yesterday's notifications
             self._notified.clear()
+            self._notified_ends.clear()
             self._notified_day = today
             purge_old_alert_marks(today)
-        for b in self._all_acts:
-            if b.get("date") != today:
-                continue
-            sm = b["startMin"]
-            key = (b["id"], sm)
-            if key in self._notified:
-                continue
-            lead = int(self._settings.get("notify_lead_min", 0) or 0)
-            fire_at = sm - lead          # alert this many minutes before the block starts
-            if now_min - self.NOTIFY_WINDOW <= fire_at <= now_min:
-                self._notified.add(key)   # this process won't re-check this block
-                # Fire exactly once even if another instance is also running: only
-                # the process that wins the atomic claim shows the alert.
-                if claim_block_alert(today, b["id"], sm):
-                    when = f"Starting in {lead} min · " if lead else "Starting now · "
-                    self._alert(
-                        f"▶ {b['title']}",
-                        f"{when}{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
+
+        # Start alerts
+        if self._notify_on:
+            for b in self._all_acts:
+                if b.get("date") != today:
+                    continue
+                sm = b["startMin"]
+                key = (b["id"], sm)
+                if key in self._notified:
+                    continue
+                lead = int(self._settings.get("notify_lead_min", 0) or 0)
+                fire_at = sm - lead          # alert this many minutes before the block starts
+                if now_min - self.NOTIFY_WINDOW <= fire_at <= now_min:
+                    self._notified.add(key)   # this process won't re-check this block
+                    # Fire exactly once even if another instance is also running: only
+                    # the process that wins the atomic claim shows the alert.
+                    if claim_block_alert(today, b["id"], sm):
+                        when = f"Starting in {lead} min · " if lead else "Starting now · "
+                        self._alert(
+                            f"▶ {b['title']}",
+                            f"{when}{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
+
+        # End-of-block chime (v4.0) — sound-only by default, same cross-process claim
+        if self._settings.get("notify_end_chime", True):
+            for b in self._all_acts:
+                if b.get("date") != today:
+                    continue
+                em = b["endMin"]
+                ekey = (b["id"], em)
+                if ekey in self._notified_ends:
+                    continue
+                if now_min - self.NOTIFY_WINDOW <= em <= now_min:
+                    self._notified_ends.add(ekey)
+                    if claim_block_alert(today, f"end_{b['id']}", em):
+                        self._play_alert_sound()
+                        # Quiet tray toast if start-notify is off; still chime above
+                        if self._notify_on or self._dnd_override:
+                            self._alert(
+                                f"■ {b['title']} ended",
+                                f"{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
 
     def closeEvent(self, ev):
         # Closing the window keeps the app alive in the tray so reminders still fire.

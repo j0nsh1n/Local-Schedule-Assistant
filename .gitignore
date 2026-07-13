@@ -32,4 +32,4 @@ _*.txt
 # ── Local-only dev reference (not part of the published project) ──
 CONTEXT.md
 CLAUDE.md
-tests/
+# tests/ is committed (v4.0) so contributors and CI can verify — synthetic data only

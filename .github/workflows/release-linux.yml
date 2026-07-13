@@ -53,6 +53,7 @@ jobs:
           cd dist
           mv DailyScheduler DailyScheduler-linux-x86_64
           zip -r DailyScheduler-linux-x86_64.zip DailyScheduler-linux-x86_64
+          sha256sum DailyScheduler-linux-x86_64.zip | tee DailyScheduler-linux-x86_64.zip.sha256
 
       - name: Smoke-test package
         run: |
@@ -72,4 +73,5 @@ jobs:
         run: |
           gh release upload "$TAG" \
             dist/DailyScheduler-linux-x86_64.zip \
+            dist/DailyScheduler-linux-x86_64.zip.sha256 \
             --clobber
