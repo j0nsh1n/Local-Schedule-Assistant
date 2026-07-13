@@ -41,7 +41,9 @@ Built with Python + PySide6 (Qt6). Licensed under **GPL-3.0**.
   Open / notification toggles / Test / Settings / Quit.
 - **Start with Windows** — optional. At sign-in the app opens its window after a short
   settle delay (configurable).
-- **Two themes** — *Nocturne* (dark) and *Slate* (light), switchable in Settings.
+- **Two themes** — *Nocturne* (dark) and *Slate* (light), with a soft modern chrome
+  (gentle corner radii, polished controls) while the timeline stays crisp and planner-like.
+  Switchable in Settings.
 - **Optional Google Calendar** — overlays your real events (read-only); the AI plans
   around them and never touches them.
 

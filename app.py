@@ -43,9 +43,11 @@ from PySide6.QtWidgets import (
     QDialog, QFileDialog, QTimeEdit, QStackedWidget, QSizePolicy,
     QMessageBox, QMenu, QGridLayout, QProgressBar, QSystemTrayIcon,
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox, QFormLayout,
+    QGraphicsOpacityEffect,
 )
 from PySide6.QtCore import (
     Qt, QTimer, QThread, Signal, QRect, QTime, QSharedMemory, QUrl,
+    QPropertyAnimation, QEasingCurve, QAbstractAnimation,
 )
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QFont, QFontMetrics,
@@ -158,34 +160,32 @@ MODEL_PROFILES = {
 }
 RECOMMENDED_MODELS = list(MODEL_PROFILES.keys())
 
-# ── Theme system ───────────────────────────────────────────────────────────
-# Two built-in themes, chosen in Settings and applied at startup. Every piece of
-# chrome reads its colour from the C_* globals below, so re-pointing them with
-# apply_theme() re-themes the whole app. Category colours (ACTIVITY_TYPES) are
-# deliberately theme-independent. Corners are driven by RAD / RAD_LG (sharp by
-# design — a small radius, or 0 for fully square).
+# ── Theme system (v4.0 visual refresh) ─────────────────────────────────────
+# Softly modern: modest corner radii on chrome, slightly richer surfaces, while
+# keeping *crisp* geometry for timeline hour lines, left accent bars, and the
+# now-line (structure still reads as a planner, not a blob of rounded cards).
 THEMES = {
-    "nocturne": {   # high-contrast dark, fully square corners
+    "nocturne": {   # refined dark — amber accent, soft radius
         "label": "Nocturne — dark",
-        "bg": "#0a0a0b", "surface": "#141416", "surf2": "#1c1c20",
-        "border": "#2b2b2f", "border2": "#3a3a40",
-        "text": "#f5f5f6", "muted": "#8a8a92",
-        "accent": "#e0a93b", "accent2": "#b9852a", "on_accent": "#0a0a0b",
-        "now": "#e5564b", "grid": "#1e1e22", "ghost": "#3a3a40",
-        "ok": "#5fb87a", "ok_txt": "#8fd9a3", "err": "#e5564b", "err_txt": "#f0938c",
-        "warn": "#e0a93b", "info": "#6f9bd9",
-        "rad": 0, "rad_lg": 0, "mono": True,
+        "bg": "#0c0c0e", "surface": "#16161a", "surf2": "#1e1e24",
+        "border": "#2a2a32", "border2": "#3c3c48",
+        "text": "#f4f4f5", "muted": "#94949e",
+        "accent": "#e8b84a", "accent2": "#c9962e", "on_accent": "#0c0c0e",
+        "now": "#f07167", "grid": "#1a1a20", "ghost": "#3c3c48",
+        "ok": "#5fbf85", "ok_txt": "#8fd9a8", "err": "#f07167", "err_txt": "#f5a8a2",
+        "warn": "#e8b84a", "info": "#7aa2e3",
+        "rad": 8, "rad_lg": 14, "mono": True,
     },
-    "slate": {      # cool enterprise light, crisp corners
+    "slate": {      # cool light — blue accent, airy surfaces
         "label": "Slate — light",
-        "bg": "#f6f7f9", "surface": "#ffffff", "surf2": "#f0f2f5",
-        "border": "#e3e6eb", "border2": "#d2d7de",
-        "text": "#1a2430", "muted": "#6a737d",
-        "accent": "#2563eb", "accent2": "#1d4fd0", "on_accent": "#ffffff",
-        "now": "#e2574c", "grid": "#eceef2", "ghost": "#c4cbd4",
+        "bg": "#f3f5f8", "surface": "#ffffff", "surf2": "#eef1f6",
+        "border": "#e2e6ee", "border2": "#cfd5e0",
+        "text": "#141c28", "muted": "#64708a",
+        "accent": "#3b6cf0", "accent2": "#2f5ad4", "on_accent": "#ffffff",
+        "now": "#e85d52", "grid": "#e8ebf1", "ghost": "#c5ccda",
         "ok": "#2ba37e", "ok_txt": "#1e7a5e", "err": "#dc2626", "err_txt": "#b91c1c",
-        "warn": "#d97706", "info": "#2563eb",
-        "rad": 3, "rad_lg": 4, "mono": False,
+        "warn": "#d97706", "info": "#3b6cf0",
+        "rad": 10, "rad_lg": 16, "mono": False,
     },
 }
 DEFAULT_THEME = "nocturne"
@@ -224,6 +224,31 @@ def apply_theme(name: str):
     C_WARN      = QColor(t["warn"]);      C_INFO      = QColor(t["info"])
     RAD         = t["rad"];               RAD_LG      = t["rad_lg"]
     THEME_MONO  = t["mono"]
+
+def app_chrome_stylesheet() -> str:
+    """Global widget chrome for a more modern, cohesive look (applied once at launch)."""
+    return f"""
+        QToolTip {{
+            background: {C_SURFACE.name()}; color: {C_TEXT.name()};
+            border: 1px solid {C_BORDER2.name()}; border-radius: {RAD}px;
+            padding: 6px 8px; font-size: 11px;
+        }}
+        QScrollBar:vertical {{
+            background: transparent; width: 10px; margin: 2px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {_rgba(C_MUTED, .35)}; border-radius: 5px; min-height: 32px;
+        }}
+        QScrollBar::handle:vertical:hover {{ background: {_rgba(C_MUTED, .55)}; }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        QScrollBar:horizontal {{
+            background: transparent; height: 10px; margin: 2px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {_rgba(C_MUTED, .35)}; border-radius: 5px; min-width: 32px;
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+    """
 
 apply_theme(DEFAULT_THEME)
 
@@ -2217,11 +2242,15 @@ class TimelineWidget(QWidget):
             x = GUTTER_W + 4
             w = self.width() - GUTTER_W - 8
             rect = QRect(x, y, w, h)
-            p.fillRect(rect, QColor(124, 111, 247, 14))
-            p.setPen(QPen(QColor(124, 111, 247, 70), 1, Qt.DashLine))
-            p.drawRect(rect)
+            fill = QColor(C_ACCENT); fill.setAlpha(18)
+            p.setPen(Qt.NoPen); p.setBrush(fill)
+            p.drawRoundedRect(rect, max(RAD, 4), max(RAD, 4))
+            pen = QPen(C_ACCENT, 1, Qt.DashLine); pen.setColor(QColor(
+                C_ACCENT.red(), C_ACCENT.green(), C_ACCENT.blue(), 90))
+            p.setPen(pen); p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(rect, max(RAD, 4), max(RAD, 4))
             if dur >= 20:
-                p.setPen(QColor(124, 111, 247, 170))
+                p.setPen(QColor(C_ACCENT.red(), C_ACCENT.green(), C_ACCENT.blue(), 180))
                 p.setFont(QFont("Segoe UI", 9))
                 p.drawText(rect.adjusted(10, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft,
                            "＋ drag to create, or click")
@@ -2238,11 +2267,11 @@ class TimelineWidget(QWidget):
         x = GUTTER_W + 4
         w = self.width() - GUTTER_W - 8
         rect = QRect(x, y, w, h)
-        fill = QColor(C_ACCENT); fill.setAlpha(60)
-        p.fillRect(rect, fill)
-        p.setPen(QPen(C_ACCENT, 1.5))
-        p.setBrush(Qt.NoBrush)
-        p.drawRect(rect)
+        fill = QColor(C_ACCENT); fill.setAlpha(70)
+        p.setPen(Qt.NoPen); p.setBrush(fill)
+        p.drawRoundedRect(rect, max(RAD, 4), max(RAD, 4))
+        p.setPen(QPen(C_ACCENT, 1.5)); p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(rect, max(RAD, 4), max(RAD, 4))
         p.setPen(C_TEXT)
         p.setFont(QFont("Segoe UI", 9, QFont.Bold))
         p.drawText(rect.adjusted(10, 4, -8, -4), Qt.AlignTop | Qt.AlignLeft,
@@ -2289,15 +2318,19 @@ class TimelineWidget(QWidget):
             x, y, h = rect.x(), rect.y(), rect.height()
 
             c    = QColor(blk.get("color") or C_ACCENT.name())
-            bg   = QColor(c.red(), c.green(), c.blue(), 45)
+            bg   = QColor(c.red(), c.green(), c.blue(), 52)
+            rr   = max(4, min(RAD + 2, rect.height() // 2, 10))
 
-            p.fillRect(rect, bg)
-            p.fillRect(QRect(x, y, 3, h), c)
+            # Soft card body + crisp left accent strip (structure stays sharp)
+            p.setPen(Qt.NoPen); p.setBrush(bg)
+            p.drawRoundedRect(rect, rr, rr)
+            p.fillRect(QRect(x, y + 1, 3, max(h - 2, 1)), c)
             # highlight the block currently being dragged
             if self._preview and blk.get("_btype") == "user" and blk["id"] == self._preview[0]:
-                p.setPen(QPen(c, 1.5)); p.setBrush(Qt.NoBrush); p.drawRect(rect)
+                p.setPen(QPen(c, 1.5)); p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(rect, rr, rr)
 
-            tr = rect.adjusted(8, 4, -4, -4)
+            tr = rect.adjusted(10, 4, -6, -4)
             if dur >= 25:
                 p.setFont(fn_bold); p.setPen(c)
                 p.drawText(tr, Qt.AlignTop | Qt.AlignLeft | Qt.TextWordWrap, blk["title"])
@@ -2853,10 +2886,12 @@ class WeekViewWidget(QWidget):
                 bx = int(x0 + 3 + b["_col"] * bw)
                 rect = QRect(bx, by, int(bw - 2), bh)
                 c  = QColor(b.get("color") or C_ACCENT.name())
-                bg = QColor(c.red(), c.green(), c.blue(), 45)
-                p.setPen(Qt.NoPen)
-                p.fillRect(rect, bg)
-                p.fillRect(QRect(rect.x(), by, 2, bh), c)
+                bg = QColor(c.red(), c.green(), c.blue(), 52)
+                rr = max(3, min(RAD, rect.height() // 2, 8))
+                p.setPen(Qt.NoPen); p.setBrush(bg)
+                p.drawRoundedRect(rect, rr, rr)
+                # Crisp left accent (readable at tiny heights)
+                p.fillRect(QRect(rect.x(), by + 1, 2, max(bh - 2, 1)), c)
                 if b["_btype"] == "user":
                     self._block_hits.append((rect, b["id"]))
                 if bh >= 26:
@@ -3154,8 +3189,15 @@ class AIPanel(QWidget):
         self._loop_msgs: List[Dict] = []  # running conversation for the tool loop
         self._depth = 0                   # tool-round counter (loop guard)
 
-        self.setFixedWidth(320)
-        self.setStyleSheet(f"background: {C_SURFACE.name()}; color: {C_TEXT.name()};")
+        # Width is animated when the panel opens/closes (MainWindow._toggle_ai).
+        self._panel_w = 340
+        self.setObjectName("aiPanel")
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(self._panel_w)
+        self.setFixedWidth(self._panel_w)
+        self.setStyleSheet(
+            f"#aiPanel {{ background: {C_SURFACE.name()}; color: {C_TEXT.name()}; "
+            f"border-left: 1px solid {C_BORDER.name()}; }}")
 
         lay = QVBoxLayout(self); lay.setSpacing(0); lay.setContentsMargins(0,0,0,0)
 
@@ -4044,7 +4086,18 @@ class AlertPopup(QWidget):
     def show_at(self, x, y):
         self.adjustSize()
         self.move(x, y - self.height())
+        # Soft fade-in so the alert doesn't hard-pop
+        eff = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(eff)
+        eff.setOpacity(0.0)
         self.show()
+        anim = QPropertyAnimation(eff, b"opacity", self)
+        anim.setDuration(180)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._fade_in = anim
 
     def mousePressEvent(self, _ev):
         self.close()
@@ -4382,9 +4435,9 @@ class MainWindow(QMainWindow):
         self._allday_banner.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._allday_banner.hide()
         self._allday_banner.setStyleSheet(
-            f"QLabel {{ background: {_rgba(C_INFO, .12)}; color: {C_INFO.name()}; "
-            f"border-bottom: 1px solid {_rgba(C_INFO, .35)}; padding: 6px 12px; "
-            f"font-size: 12px; }}")
+            f"QLabel {{ background: {_rgba(C_INFO, .14)}; color: {C_INFO.name()}; "
+            f"border-bottom: 1px solid {_rgba(C_INFO, .32)}; padding: 8px 14px; "
+            f"font-size: 12px; font-weight: 500; }}")
         self._day_page = QWidget()
         day_l = QVBoxLayout(self._day_page)
         day_l.setContentsMargins(0, 0, 0, 0); day_l.setSpacing(0)
@@ -4480,24 +4533,28 @@ class MainWindow(QMainWindow):
         self._refresh_view()
 
     def _build_header(self) -> QWidget:
-        hdr = QWidget(); hdr.setFixedHeight(52)
-        hdr.setStyleSheet(f"background:{C_SURFACE.name()}; border-bottom:1px solid {C_BORDER.name()};")
-        hl  = QHBoxLayout(hdr); hl.setContentsMargins(16,0,16,0); hl.setSpacing(8)
+        hdr = QWidget(); hdr.setFixedHeight(56)
+        hdr.setStyleSheet(
+            f"background:{C_SURFACE.name()}; border-bottom:1px solid {C_BORDER.name()};")
+        hl  = QHBoxLayout(hdr); hl.setContentsMargins(18, 0, 14, 0); hl.setSpacing(8)
 
         def hbtn(text, checked=False):
             b = QPushButton(text)
             b.setCheckable(checked)
+            b.setCursor(Qt.PointingHandCursor)
             b.setStyleSheet(f"""
                 QPushButton {{ background:{C_SURF2.name()}; border:1px solid {C_BORDER.name()};
-                color:{C_MUTED.name()}; padding:5px 13px; border-radius:{RAD}px; font-size:12px; }}
-                QPushButton:hover {{ color:{C_TEXT.name()}; border-color:{C_BORDER2.name()}; }}
-                QPushButton:checked {{ background:{_rgba(C_ACCENT, .15)};
-                border-color:{_rgba(C_ACCENT, .5)}; color:{C_ACCENT.name()}; }}
+                color:{C_MUTED.name()}; padding:6px 14px; border-radius:{RAD}px; font-size:12px; }}
+                QPushButton:hover {{ color:{C_TEXT.name()}; border-color:{C_BORDER2.name()};
+                background:{_rgba(C_TEXT, .04)}; }}
+                QPushButton:checked {{ background:{_rgba(C_ACCENT, .16)};
+                border-color:{_rgba(C_ACCENT, .55)}; color:{C_ACCENT.name()}; font-weight:600; }}
             """)
             return b
 
-        logo = QLabel("◈ Daily Scheduler")
-        logo.setStyleSheet(f"font-size:15px; font-weight:bold; color:{C_ACCENT.name()};")
+        logo = QLabel("◈  Daily Scheduler")
+        logo.setStyleSheet(
+            f"font-size:15px; font-weight:700; color:{C_ACCENT.name()}; letter-spacing:0.2px;")
         hl.addWidget(logo)
         ver = QLabel(f"v{APP_VERSION}")
         ver.setStyleSheet(f"color:{C_MUTED.name()}; font-size:10px; padding-top:4px;")
@@ -4688,6 +4745,19 @@ class MainWindow(QMainWindow):
         self._view_stack.setCurrentIndex({"day": 0, "week": 1, "month": 2, "year": 3}[v])
         self._ensure_cal_for_view()
         self._refresh_view()
+        # Soft fade-in of the active view (natural, short)
+        w = self._view_stack.currentWidget()
+        if w is not None:
+            eff = QGraphicsOpacityEffect(w)
+            w.setGraphicsEffect(eff)
+            anim = QPropertyAnimation(eff, b"opacity", self)
+            anim.setDuration(160)
+            anim.setStartValue(0.25)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.finished.connect(lambda: w.setGraphicsEffect(None))
+            anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+            self._view_fade = anim
 
     def _goto_date(self, d: date):
         self._cur_date = d
@@ -4842,9 +4912,45 @@ class MainWindow(QMainWindow):
 
     # ── AI panel ───────────────────────────────────────────────────────────
     def _toggle_ai(self):
+        """Slide the AI panel in/out (width animation) instead of a hard pop."""
         self._ai_visible = not self._ai_visible
-        self._ai_panel.setVisible(self._ai_visible)
         self._ai_btn.setChecked(self._ai_visible)
+        panel = self._ai_panel
+        target = getattr(panel, "_panel_w", 340)
+        # Stop any in-flight slide
+        if getattr(self, "_ai_slide", None) is not None:
+            try:
+                self._ai_slide.stop()
+            except Exception:
+                pass
+        panel.setMinimumWidth(0)
+        if self._ai_visible:
+            panel.show()
+            panel.setMaximumWidth(0)
+            panel.setFixedWidth(0)
+            anim = QPropertyAnimation(panel, b"maximumWidth", self)
+            anim.setDuration(240)
+            anim.setStartValue(0)
+            anim.setEndValue(target)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            def _opened():
+                panel.setFixedWidth(target)
+                panel.setMaximumWidth(target)
+            anim.finished.connect(_opened)
+        else:
+            panel.setMaximumWidth(panel.width() or target)
+            anim = QPropertyAnimation(panel, b"maximumWidth", self)
+            anim.setDuration(200)
+            anim.setStartValue(panel.width() or target)
+            anim.setEndValue(0)
+            anim.setEasingCurve(QEasingCurve.Type.InCubic)
+            def _closed():
+                panel.hide()
+                panel.setFixedWidth(target)
+                panel.setMaximumWidth(target)
+            anim.finished.connect(_closed)
+        self._ai_slide = anim
+        anim.start()
 
     def _ai_ctx(self):
         now = datetime.now()
@@ -6206,6 +6312,7 @@ def main():
     pal.setColor(QPalette.ToolTipBase,     C_SURF2)
     pal.setColor(QPalette.ToolTipText,     C_TEXT)
     app.setPalette(pal)
+    app.setStyleSheet(app_chrome_stylesheet())
 
     # ── Single instance ──────────────────────────────────────────────────────
     # Detect a running copy with an ATOMIC shared-memory create — race-safe at boot,
