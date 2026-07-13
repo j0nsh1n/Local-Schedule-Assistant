@@ -51,8 +51,18 @@ check("load garbage → None",
 
 # settings defaults include new keys
 s = app.load_settings()
-check("notify_end_chime default", s.get("notify_end_chime") is True)
+check("notify_end_chime default off", s.get("notify_end_chime") is False)
+check("notify_sound default on", s.get("notify_sound") is True)
+check("notify_tone default chime", s.get("notify_tone") == "chime")
+check("ollama_models_dir empty default", s.get("ollama_models_dir") == "")
 check("calendar_ids default", s.get("calendar_ids") == "primary")
+
+# tone synthesis + env helper
+wav = app.ensure_alert_wav("soft")
+check("synth soft tone wav", wav is not None and wav.exists() and wav.stat().st_size > 64)
+env = app.ollama_env({"ollama_models_dir": str(TMP / "ollama-models")})
+check("OLLAMA_MODELS in env when set",
+      env.get("OLLAMA_MODELS") == str(TMP / "ollama-models"))
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

@@ -750,10 +750,14 @@ DEFAULT_SETTINGS = {
     "notify_on":        True,
     "notify_lead_min":  0,        # alert this many minutes before a block starts (0 = at start)
     "notify_end_chime": False,    # off by default — start alerts only
+    "notify_sound":     True,     # play a tone with alerts (visual still shows)
+    "notify_tone":      "chime",  # chime | soft | bright | low | glass
+    "notify_volume":    80,       # 0–100
     "dnd_override":     True,
     "plan_day_start":   "08:00",  # default waking window the planner schedules within
     "plan_day_end":     "22:00",
     "ollama_autostart": False,    # keep Ollama off at launch unless the user opts in
+    "ollama_models_dir": "",      # empty = Ollama default (~/.ollama/models); used when app starts Ollama
     "update_check_on":  True,     # check GitHub for a newer release on launch + daily
     "calendar_ids":     "primary",  # v4.0: comma-separated Google calendar IDs
     "body_split":       [],       # [calendar_px, sidebar_px, ai_px] — empty = defaults
@@ -1075,14 +1079,63 @@ def stop_ollama():
         return False, str(ex)
 
 
-def start_ollama():
-    """Launch the local Ollama server (detached). Returns (ok, message)."""
+def default_ollama_models_dir() -> Path:
+    """Ollama's usual models root when OLLAMA_MODELS is unset."""
+    # OLLAMA_MODELS overrides; else models live under OLLAMA_HOME or ~/.ollama
+    env = (os.environ.get("OLLAMA_MODELS") or "").strip()
+    if env:
+        return Path(env).expanduser()
+    home = (os.environ.get("OLLAMA_HOME") or "").strip()
+    base = Path(home).expanduser() if home else (Path.home() / ".ollama")
+    return base / "models"
+
+def resolve_ollama_models_dir(settings: Optional[Dict] = None) -> Path:
+    """Configured models folder, or Ollama's default path."""
+    raw = ""
+    if settings is not None:
+        raw = str(settings.get("ollama_models_dir") or "").strip()
+    if not raw:
+        try:
+            raw = str(load_settings().get("ollama_models_dir") or "").strip()
+        except Exception:
+            raw = ""
+    if raw:
+        return Path(raw).expanduser()
+    return default_ollama_models_dir()
+
+def ollama_env(settings: Optional[Dict] = None) -> Dict[str, str]:
+    """Environment for `ollama serve` / pull: optional OLLAMA_MODELS override."""
+    env = os.environ.copy()
+    raw = ""
+    if settings is not None:
+        raw = str(settings.get("ollama_models_dir") or "").strip()
+    else:
+        try:
+            raw = str(load_settings().get("ollama_models_dir") or "").strip()
+        except Exception:
+            pass
+    if raw:
+        p = Path(raw).expanduser()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        env["OLLAMA_MODELS"] = str(p)
+    return env
+
+def start_ollama(settings: Optional[Dict] = None):
+    """Launch the local Ollama server (detached). Returns (ok, message).
+    If settings include ollama_models_dir, set OLLAMA_MODELS so pulls land there.
+    Only applies when *this app* starts the server — a tray/service Ollama already
+    running keeps its own path until restarted."""
     try:
+        env = ollama_env(settings)
         if platform.system() == "Windows":
             DETACHED = 0x00000008  # DETACHED_PROCESS
             NO_WIN   = 0x08000000  # CREATE_NO_WINDOW
             subprocess.Popen(
                 ["ollama", "serve"],
+                env=env,
                 creationflags=DETACHED | NO_WIN,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 close_fds=True,
@@ -1090,10 +1143,15 @@ def start_ollama():
         else:
             subprocess.Popen(
                 ["ollama", "serve"],
+                env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-        return True, "Starting Ollama…"
+        msg = "Starting Ollama…"
+        mid = str((settings or {}).get("ollama_models_dir") or "").strip()
+        if mid:
+            msg += f"\nModels → {Path(mid).expanduser()}"
+        return True, msg
     except FileNotFoundError:
         return False, "Ollama not found on PATH.\nInstall it from https://ollama.com/download"
     except Exception as ex:
@@ -1214,30 +1272,116 @@ def set_startup(enabled: bool) -> bool:
         return False
 
 
-def _ensure_alert_wav() -> Optional[Path]:
-    """Write a small chime wav (stdlib only — keeps app.py self-contained) for alert
-    sounds on non-Windows systems, where QApplication.beep() is often silent (PipeWire
-    ignores the X11 bell; Wayland has none). Written once, reused after."""
+# Built-in alert tones (id → label). Synthesized to ~/.daily-scheduler/tones/.
+NOTIFY_TONES = [
+    ("chime",  "Chime (default)"),
+    ("soft",   "Soft ping"),
+    ("bright", "Bright ping"),
+    ("low",    "Low thump"),
+    ("glass",  "Glass tap"),
+]
+
+def _synth_tone_wav(path: Path, tone_id: str) -> bool:
+    """Write a short mono WAV for `tone_id`. Returns True on success."""
     try:
-        p = DATA_DIR / "alert.wav"
-        if p.exists():
-            return p
         import wave, math, struct
         rate = 44100
         frames = bytearray()
-        def tone(freq, secs, vol=0.5):
-            n = int(rate * secs)
+
+        def blip(freq, secs, vol=0.45):
+            n = max(1, int(rate * secs))
             for i in range(n):
-                env = min(1.0, i / 300, (n - i) / 1200)   # attack/decay so it can't click
-                frames.extend(struct.pack(
-                    "<h", int(32767 * vol * env * math.sin(2 * math.pi * freq * i / rate))))
-        tone(660, 0.14); tone(0, 0.06); tone(880, 0.22)
-        with wave.open(str(p), "wb") as w:
+                # Attack / decay envelope so samples never click
+                env = min(1.0, i / 280.0, (n - i) / 900.0)
+                if freq <= 0:
+                    sample = 0.0
+                else:
+                    t = i / rate
+                    # Slight 2nd harmonic for a less sterile beep
+                    sample = math.sin(2 * math.pi * freq * t)
+                    sample += 0.18 * math.sin(4 * math.pi * freq * t)
+                frames.extend(struct.pack("<h", int(32767 * vol * env * sample)))
+
+        tid = (tone_id or "chime").lower()
+        if tid == "soft":
+            blip(520, 0.12, 0.35); blip(0, 0.04); blip(620, 0.18, 0.28)
+        elif tid == "bright":
+            blip(880, 0.08, 0.4); blip(0, 0.03); blip(1175, 0.1, 0.38); blip(0, 0.02); blip(1397, 0.14, 0.32)
+        elif tid == "low":
+            blip(180, 0.22, 0.55); blip(0, 0.04); blip(140, 0.28, 0.4)
+        elif tid == "glass":
+            blip(1480, 0.06, 0.32); blip(0, 0.02); blip(1760, 0.2, 0.22)
+        else:  # chime
+            blip(660, 0.14, 0.45); blip(0, 0.06); blip(880, 0.22, 0.4)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(path), "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
             w.writeframes(bytes(frames))
+        return True
+    except Exception:
+        return False
+
+def ensure_alert_wav(tone_id: str = "chime") -> Optional[Path]:
+    """Return a reusable WAV path for the given tone (stdlib synthesis)."""
+    tid = (tone_id or "chime").lower()
+    if tid not in {t[0] for t in NOTIFY_TONES}:
+        tid = "chime"
+    try:
+        p = DATA_DIR / "tones" / f"alert_{tid}.wav"
+        # Re-synth if missing or empty (allows tone set to grow without stale files)
+        if not p.exists() or p.stat().st_size < 64:
+            if not _synth_tone_wav(p, tid):
+                return None
         return p
     except Exception:
         return None
+
+# Back-compat alias used by older call sites / tests
+def _ensure_alert_wav() -> Optional[Path]:
+    return ensure_alert_wav("chime")
+
+def play_alert_sound(parent=None, *, tone: str = "chime", volume: float = 0.8) -> None:
+    """Play a short alert tone. `volume` is 0..1. Uses Qt multimedia when available;
+    falls back to Windows MessageBeep or QApplication.beep()."""
+    vol = max(0.0, min(1.0, float(volume)))
+    if vol <= 0.001:
+        return
+    # Prefer synthesized WAV so the chosen tone is audible on all platforms
+    try:
+        wav = ensure_alert_wav(tone)
+        if wav:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtMultimedia import QSoundEffect
+            # Reuse one QSoundEffect on the parent when possible so rapid previews
+            # don't pile up player objects.
+            fx = None
+            if parent is not None:
+                fx = getattr(parent, "_alert_fx", None)
+            if fx is None:
+                fx = QSoundEffect(parent)
+                if parent is not None:
+                    parent._alert_fx = fx
+            path = str(wav)
+            if getattr(fx, "_tone_path", None) != path:
+                fx.setSource(QUrl.fromLocalFile(path))
+                fx._tone_path = path  # type: ignore[attr-defined]
+            fx.setVolume(vol)
+            fx.play()
+            return
+    except Exception:
+        pass
+    try:
+        if platform.system() == "Windows":
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            return
+    except Exception:
+        pass
+    try:
+        QApplication.beep()
+    except Exception:
+        pass
 
 
 def list_ollama_models() -> List[str]:
@@ -3595,6 +3739,7 @@ class AIPanel(QWidget):
 
     def apply_settings(self, s):
         """Apply persisted AI settings — on launch and after the Settings dialog."""
+        self._settings   = dict(s or {})
         self.model       = s.get("model", DEFAULT_MODEL)
         self.temperature = float(s.get("temperature", 0.3))
         self.num_ctx     = int(s.get("num_ctx", 16384))
@@ -3664,7 +3809,7 @@ class AIPanel(QWidget):
             self._start_ollama()
 
     def _start_ollama(self):
-        ok, msg = start_ollama()
+        ok, msg = start_ollama(getattr(self, "_settings", None))
         if not ok:
             QMessageBox.information(self, "Ollama", msg)
             return
@@ -4157,9 +4302,10 @@ class SetupWidget(QWidget):
 # ══════════════════════════════════════════════════════════════════════════
 #  ALERT POPUP — app-drawn, always-on-top. Bypasses the Windows notification
 #  pipeline, so it shows even with Do Not Disturb / Focus Assist on.
+#  Planner-style card (square tiles + left accent), not OS balloon chrome.
 # ══════════════════════════════════════════════════════════════════════════
 class AlertPopup(QWidget):
-    def __init__(self, title, body, icon: QIcon):
+    def __init__(self, title, body, icon: QIcon, kind: str = "start"):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         # Stable title so compositor window rules can target the popup — on Wayland
         # apps can't place their own windows, but e.g. a KWin rule matching this
@@ -4168,41 +4314,66 @@ class AlertPopup(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)   # don't steal focus
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)           # free itself when dismissed
-        self.setFixedWidth(360)
+        self.setFixedWidth(380)
 
-        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
+        # kind: start | end | test — accent + badge text
+        is_end = kind == "end"
+        accent = C_MUTED if is_end else C_ACCENT
+        badge  = "BLOCK ENDED" if is_end else ("TEST" if kind == "test" else "STARTING NOW")
+
+        # Soft outer margin so a faux shadow rim stays inside the translucent window
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+
+        shell = QFrame(); shell.setObjectName("alertShell")
+        shell.setStyleSheet(
+            f"#alertShell {{ background: {_rgba(C_BG, 0.55)}; border-radius: 6px; }}")
+        outer.addWidget(shell)
+        shell_l = QVBoxLayout(shell); shell_l.setContentsMargins(3, 3, 3, 3)
+
         card = QFrame(); card.setObjectName("alertCard")
-        # Scope to #alertCard so the border/background don't cascade onto child labels
-        # (QLabel subclasses QFrame, so a bare `QFrame {…}` rule boxes every label).
+        # Scope to #alertCard so rules don't cascade onto child QLabels (also QFrame).
         card.setStyleSheet(
-            f"#alertCard {{ background: {C_SURFACE.name()}; border: 1px solid {C_ACCENT.name()};"
-            f" border-radius: {RAD_LG}px; }}")
-        outer.addWidget(card)
+            f"#alertCard {{ background: {C_SURFACE.name()}; "
+            f"border: 1px solid {_rgba(accent, 0.55)}; border-radius: 4px; }}")
+        shell_l.addWidget(card)
+
         cl = QHBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
 
-        bar = QFrame(); bar.setFixedWidth(5)
-        bar.setStyleSheet(f"background: {C_ACCENT.name()}; border-top-left-radius: {RAD_LG}px;"
-                          f" border-bottom-left-radius: {RAD_LG}px;")
+        # Crisp left accent — same language as schedule blocks
+        bar = QFrame(); bar.setFixedWidth(4)
+        bar.setStyleSheet(f"background: {accent.name()}; border: none;")
         cl.addWidget(bar)
 
-        col = QVBoxLayout(); col.setContentsMargins(14, 11, 14, 12); col.setSpacing(5)
+        col = QVBoxLayout(); col.setContentsMargins(14, 12, 14, 12); col.setSpacing(6)
+
         head = QHBoxLayout(); head.setSpacing(8)
-        ic = QLabel(); ic.setPixmap(icon.pixmap(18, 18))
-        app_lbl = QLabel("Daily Scheduler")
-        app_lbl.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 10px; font-weight: bold;"
-                              " letter-spacing: 1px;")
-        head.addWidget(ic); head.addWidget(app_lbl); head.addStretch()
-        x = QLabel("✕"); x.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 11px;")
-        head.addWidget(x)
+        ic = QLabel(); ic.setPixmap(icon.pixmap(20, 20))
+        app_lbl = QLabel("DAILY SCHEDULER")
+        app_lbl.setStyleSheet(
+            f"color: {C_MUTED.name()}; font-size: 10px; font-weight: 700;"
+            " letter-spacing: 1.2px;")
+        badge_lbl = QLabel(badge)
+        badge_lbl.setStyleSheet(
+            f"color: {accent.name()}; background: {_rgba(accent, 0.14)}; "
+            f"border: 1px solid {_rgba(accent, 0.35)}; border-radius: 3px; "
+            f"padding: 2px 7px; font-size: 9px; font-weight: 700; letter-spacing: 0.6px;")
+        head.addWidget(ic); head.addWidget(app_lbl); head.addStretch(); head.addWidget(badge_lbl)
         col.addLayout(head)
 
         t = QLabel(title); t.setWordWrap(True)
-        t.setStyleSheet(f"color: {C_TEXT.name()}; font-size: 14px; font-weight: bold;")
+        t.setStyleSheet(
+            f"color: {C_TEXT.name()}; font-size: 15px; font-weight: 700; padding-top: 2px;")
         col.addWidget(t)
+
         b = QLabel(body); b.setWordWrap(True)
-        b.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 12px;")
+        b.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 12px; line-height: 1.3;")
         col.addWidget(b)
-        cl.addLayout(col)
+
+        foot = QLabel("Click to dismiss")
+        foot.setStyleSheet(f"color: {_rgba(C_MUTED, 0.75)}; font-size: 10px; padding-top: 2px;")
+        col.addWidget(foot)
+        cl.addLayout(col, 1)
 
         self._timer = QTimer(self); self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.close)
@@ -4226,7 +4397,9 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: Dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(460)
+        self.setMinimumHeight(520)
+        self.resize(480, 640)
         self.values = dict(settings)
         self.startup_requested = is_startup_enabled()
         self.restored_acts: Optional[List[Dict]] = None
@@ -4243,7 +4416,16 @@ class SettingsDialog(QDialog):
                 color: {C_TEXT.name()}; padding: 6px 12px; border-radius: {RAD}px; }}
             QPushButton:hover {{ border-color: {C_BORDER2.name()}; }}
         """)
-        lay = QVBoxLayout(self); lay.setSpacing(8); lay.setContentsMargins(22, 18, 22, 18)
+        # Scrollable body so added notify/AI rows still fit on short displays
+        root = QVBoxLayout(self); root.setSpacing(0); root.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        body = QWidget()
+        lay = QVBoxLayout(body); lay.setSpacing(8); lay.setContentsMargins(22, 18, 22, 12)
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
 
         def section(text, top=True):
             lbl = QLabel(text)
@@ -4286,9 +4468,33 @@ class SettingsDialog(QDialog):
         self.end_chime_cb.setToolTip(
             "Optional: soft sound when a block ends (off by default; start alerts stay separate)")
         n.addRow("End chime", self.end_chime_cb)
+        self.sound_cb = QCheckBox("Play a sound with alerts")
+        self.sound_cb.setChecked(bool(settings.get("notify_sound", True)))
+        n.addRow("Sound", self.sound_cb)
+        self.tone_cb = QComboBox()
+        for tid, label in NOTIFY_TONES:
+            self.tone_cb.addItem(label, tid)
+        cur_tone = str(settings.get("notify_tone", "chime") or "chime")
+        ti = self.tone_cb.findData(cur_tone)
+        self.tone_cb.setCurrentIndex(ti if ti >= 0 else 0)
+        n.addRow("Tone", self.tone_cb)
+        self.vol_sb = QSpinBox()
+        self.vol_sb.setRange(0, 100)
+        self.vol_sb.setSuffix("%")
+        self.vol_sb.setValue(int(settings.get("notify_volume", 80) or 80))
+        n.addRow("Volume", self.vol_sb)
         self.dnd_cb = QCheckBox("Break through Do Not Disturb / Focus Assist")
         self.dnd_cb.setChecked(bool(settings.get("dnd_override")))
+        self.dnd_cb.setToolTip(
+            "Uses an in-app popup (planner-style card) instead of the OS tray balloon, "
+            "so alerts still show under Focus Assist / DND.")
         n.addRow("Priority alert", self.dnd_cb)
+        preview_row = QHBoxLayout()
+        prev_btn = QPushButton("Preview alert…")
+        prev_btn.setToolTip("Show a sample popup and play the selected tone")
+        prev_btn.clicked.connect(self._preview_alert)
+        preview_row.addWidget(prev_btn); preview_row.addStretch()
+        n.addRow("", preview_row)
         lay.addLayout(n)
 
         section("AI ASSISTANT")
@@ -4333,6 +4539,32 @@ class SettingsDialog(QDialog):
         wrow.addWidget(self.pend); wrow.addStretch()
         ww = QWidget(); ww.setLayout(wrow)
         a.addRow("Planning hours", ww)
+
+        # Where Ollama stores pulled models (OLLAMA_MODELS when this app starts Ollama)
+        models_row = QHBoxLayout(); models_row.setContentsMargins(0, 0, 0, 0)
+        self.models_dir = QLineEdit(str(settings.get("ollama_models_dir") or ""))
+        self.models_dir.setPlaceholderText(str(default_ollama_models_dir()))
+        self.models_dir.setToolTip(
+            "Folder where Ollama saves downloaded models (sets OLLAMA_MODELS).\n"
+            "Applies when Daily Scheduler starts Ollama. If Ollama is already "
+            "running from the tray/service, restart it from this app (or quit "
+            "the system Ollama first) so pulls use the new folder.\n"
+            "Leave blank for Ollama’s default (~/.ollama/models).")
+        browse_m = QPushButton("Browse…")
+        browse_m.clicked.connect(self._browse_models_dir)
+        open_m = QPushButton("Open")
+        open_m.setToolTip("Open the effective models folder in your file manager")
+        open_m.clicked.connect(self._open_models_dir)
+        models_row.addWidget(self.models_dir, 1)
+        models_row.addWidget(browse_m)
+        models_row.addWidget(open_m)
+        mw = QWidget(); mw.setLayout(models_row)
+        a.addRow("Models folder", mw)
+        models_hint = QLabel(
+            "Custom path only takes effect when this app starts Ollama (▶ in the AI panel).")
+        models_hint.setWordWrap(True)
+        models_hint.setStyleSheet(f"color:{C_MUTED.name()}; font-size:10px;")
+        a.addRow("", models_hint)
         lay.addLayout(a)
 
         section("CALENDAR")
@@ -4354,14 +4586,17 @@ class SettingsDialog(QDialog):
         drow.addWidget(openf); drow.addWidget(expt); drow.addWidget(rest); drow.addStretch()
         lay.addLayout(drow)
 
-        br = QHBoxLayout(); br.addStretch()
+        # Footer buttons stay outside the scroll area so Save is always reachable
+        foot = QWidget()
+        foot.setStyleSheet(f"background:{C_SURFACE.name()}; border-top:1px solid {C_BORDER.name()};")
+        br = QHBoxLayout(foot); br.setContentsMargins(22, 10, 22, 14); br.addStretch()
         cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
         save = QPushButton("Save")
         save.setStyleSheet(f"QPushButton {{ background:{C_ACCENT.name()}; color:{C_ON_ACCENT.name()}; "
                            f"border:none; padding:7px 18px; border-radius:{RAD}px; font-weight:bold; }}")
         save.clicked.connect(self._save)
         br.addWidget(cancel); br.addWidget(save)
-        lay.addSpacing(4); lay.addLayout(br)
+        root.addWidget(foot)
 
     def _on_settings_model_changed(self, text):
         tip = model_when_text(text)
@@ -4372,6 +4607,56 @@ class SettingsDialog(QDialog):
 
     def _show_model_guide(self):
         show_model_guide(self)
+
+    def _browse_models_dir(self):
+        start = self.models_dir.text().strip() or str(default_ollama_models_dir())
+        path = QFileDialog.getExistingDirectory(self, "Ollama models folder", start)
+        if path:
+            self.models_dir.setText(path)
+
+    def _open_models_dir(self):
+        raw = self.models_dir.text().strip()
+        p = Path(raw).expanduser() if raw else default_ollama_models_dir()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            if platform.system() == "Windows":
+                os.startfile(str(p))  # type: ignore[attr-defined]
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", str(p)])
+            else:
+                subprocess.run(["xdg-open", str(p)])
+        except Exception:
+            pass
+
+    def _preview_alert(self):
+        """Live sample of the current tone/volume/DND choices (does not Save)."""
+        # Stash preview settings so MainWindow helpers can read them if parent is MainWindow
+        tone = self.tone_cb.currentData() or "chime"
+        vol  = self.vol_sb.value()
+        sound = self.sound_cb.isChecked()
+        parent = self.parent()
+        # Play sound using the same synthesis path as production
+        if sound and vol > 0:
+            try:
+                play_alert_sound(parent if isinstance(parent, QWidget) else self,
+                                 tone=tone, volume=vol / 100.0)
+            except Exception:
+                pass
+        icon = parent._make_app_icon() if parent is not None and hasattr(parent, "_make_app_icon") else QIcon()
+        # Always show our planner-style card for preview (appearance is the point)
+        popup = AlertPopup("▶ Study session", "14:00 – 15:00  ·  preview",
+                           icon, kind="test")
+        if not hasattr(self, "_preview_popups"):
+            self._preview_popups = []
+        self._preview_popups.append(popup)
+        popup.destroyed.connect(
+            lambda *_: self._preview_popups.remove(popup)
+            if popup in getattr(self, "_preview_popups", []) else None)
+        geo = QApplication.primaryScreen().availableGeometry()
+        popup.show_at(geo.right() - popup.width() - 16, geo.bottom() - 16)
 
     def _open_folder(self):
         try:
@@ -4447,10 +4732,14 @@ class SettingsDialog(QDialog):
         self.values.update({
             "theme":            self.theme_cb.currentData(),
             "ollama_autostart": self.autostart_cb.isChecked(),
+            "ollama_models_dir": self.models_dir.text().strip(),
             "update_check_on":  self.updates_cb.isChecked(),
             "notify_on":        self.notify_cb.isChecked(),
             "notify_lead_min":  self.lead_sb.value(),
             "notify_end_chime": self.end_chime_cb.isChecked(),
+            "notify_sound":     self.sound_cb.isChecked(),
+            "notify_tone":      self.tone_cb.currentData() or "chime",
+            "notify_volume":    int(self.vol_sb.value()),
             "dnd_override":     self.dnd_cb.isChecked(),
             "model":            self.model_cb.currentText().strip() or DEFAULT_MODEL,
             "temperature":      round(self.temp_sb.value(), 2),
@@ -6301,53 +6590,40 @@ class MainWindow(QMainWindow):
     def _test_notification(self):
         self._alert("✓ Notifications are working",
                     "This is how you'll be alerted when a block starts."
-                    + (" (Do Not Disturb override is ON.)" if self._dnd_override else ""))
+                    + (" (Do Not Disturb override is ON.)" if self._dnd_override else ""),
+                    kind="test")
 
     # ── Alerting ─────────────────────────────────────────────────────────────
-    def _alert(self, title, body):
+    def _alert(self, title, body, *, kind: str = "start"):
         """Fire a block alert. With DND override on, draw our own always-on-top popup
-        (+ sound) so it shows even under Do Not Disturb; otherwise a normal tray toast."""
+        (+ sound) so it shows even under Do Not Disturb; otherwise a normal tray toast.
+        `kind` is start | end | test — drives popup badge/color."""
+        if self._settings.get("notify_sound", True):
+            self._play_alert_sound()
         if self._dnd_override:
-            self._show_alert_popup(title, body)
+            self._show_alert_popup(title, body, kind=kind, play_sound=False)
         elif self._tray:
             self._tray.showMessage(title, body, self._make_app_icon(), 12000)
 
     def _play_alert_sound(self):
-        try:
-            if platform.system() == "Windows":
-                import winsound
-                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-                return
-        except Exception:
-            pass
-        try:
-            wav = _ensure_alert_wav()
-            if wav:
-                from PySide6.QtCore import QUrl
-                from PySide6.QtMultimedia import QSoundEffect
-                if getattr(self, "_alert_fx", None) is None:
-                    self._alert_fx = QSoundEffect(self)
-                    self._alert_fx.setSource(QUrl.fromLocalFile(str(wav)))
-                    self._alert_fx.setVolume(0.9)
-                self._alert_fx.play()
-                return
-        except Exception:
-            pass
-        try:
-            QApplication.beep()
-        except Exception:
-            pass
+        if not self._settings.get("notify_sound", True):
+            return
+        tone = str(self._settings.get("notify_tone", "chime") or "chime")
+        vol  = int(self._settings.get("notify_volume", 80) or 80) / 100.0
+        play_alert_sound(self, tone=tone, volume=vol)
 
-    def _show_alert_popup(self, title, body):
-        self._play_alert_sound()
-        popup = AlertPopup(title, body, self._make_app_icon())
+    def _show_alert_popup(self, title, body, *, kind: str = "start", play_sound: bool = True):
+        if play_sound and self._settings.get("notify_sound", True):
+            self._play_alert_sound()
+        popup = AlertPopup(title, body, self._make_app_icon(), kind=kind)
         popup.destroyed.connect(lambda *_: self._popups.remove(popup)
                                 if popup in self._popups else None)
         self._popups.append(popup)
         geo = QApplication.primaryScreen().availableGeometry()
         idx = max(0, len(self._popups) - 1)
+        # Stack newer popups upward; taller card (~110px) than the old toast
         popup.show_at(geo.right() - popup.width() - 16,
-                      geo.bottom() - 16 - idx * 92)
+                      geo.bottom() - 16 - idx * 118)
 
     def _toggle_startup(self, enabled):
         ok = set_startup(enabled)
@@ -6421,12 +6697,14 @@ class MainWindow(QMainWindow):
                 if now_min - self.NOTIFY_WINDOW <= em <= now_min:
                     self._notified_ends.add(ekey)
                     if claim_block_alert(today, f"end_{b['id']}", em):
-                        self._play_alert_sound()
-                        # Toast only if start-notify / DND path is active; sound already played
+                        # Visual card when start-notify or DND popup is on; else sound only
                         if self._notify_on or self._dnd_override:
                             self._alert(
                                 f"■ {b['title']} ended",
-                                f"{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
+                                f"{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}",
+                                kind="end")
+                        else:
+                            self._play_alert_sound()
 
     def closeEvent(self, ev):
         # Closing the window keeps the app alive in the tray so reminders still fire.
