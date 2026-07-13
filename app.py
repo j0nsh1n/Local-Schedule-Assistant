@@ -54,7 +54,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.8.0"
+__version__  = "3.9.0"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -316,20 +316,93 @@ def now_next_summary(blocks: List[Dict], now_min: int) -> str:
             parts.append(f"Next: {short(nxt)} at {when} (in {fmt_dur(nxt['startMin'] - now_min)})")
     return "  →  ".join(parts)
 
+def is_all_day_event(e: Dict) -> bool:
+    """True for Google all-day (and multi-day) events — they do not occupy a time span."""
+    return bool(e.get("allDay"))
+
+def timed_cal_events(events: List[Dict]) -> List[Dict]:
+    return [e for e in events if not is_all_day_event(e)]
+
+def allday_cal_events(events: List[Dict]) -> List[Dict]:
+    return [e for e in events if is_all_day_event(e)]
+
+def format_cal_event_brief(e: Dict) -> str:
+    """One short phrase for AI / banners: timed with HH:MM range, all-day labeled."""
+    title = e.get("title") or "(no title)"
+    if is_all_day_event(e):
+        return f"{title} (all day)"
+    return f"{title} {fmt_time(e['startMin'])}–{fmt_time(e['endMin'])}"
+
+def normalize_google_event(ev: dict) -> List[Dict]:
+    """Turn one Google Calendar API event into 0+ day-scoped dicts used in
+    `_cal_by_date`. Timed events → one entry; all-day → one entry per day in the
+    half-open [start.date, end.date) range Google uses. Pure (no network)."""
+    title = ev.get("summary") or "(no title)"
+    eid   = ev.get("id") or new_id()
+    start = ev.get("start") or {}
+    end   = ev.get("end") or {}
+    color = C_INFO.name()
+
+    if start.get("dateTime"):
+        s_raw = start["dateTime"]
+        e_raw = end.get("dateTime") or s_raw
+        try:
+            s  = datetime.fromisoformat(s_raw.replace("Z", "+00:00")).astimezone()
+            en = datetime.fromisoformat(e_raw.replace("Z", "+00:00")).astimezone()
+        except Exception:
+            return []
+        sm = max(s.hour * 60 + s.minute, DAY_START)
+        em = min(en.hour * 60 + en.minute, DAY_END)
+        if em <= sm:
+            return []
+        ds = s.date().isoformat()
+        return [{
+            "id": eid, "title": title, "startMin": sm, "endMin": em,
+            "type": "calendar", "color": color, "date": ds, "allDay": False,
+        }]
+
+    # All-day: start.date / end.date (end exclusive). Multi-day holidays expand.
+    d0s = start.get("date")
+    if not d0s:
+        return []
+    try:
+        d0 = date.fromisoformat(d0s)
+        d1s = end.get("date") or d0s
+        d1 = date.fromisoformat(d1s)
+    except Exception:
+        return []
+    if d1 <= d0:
+        d1 = d0 + timedelta(days=1)
+    out = []
+    d = d0
+    while d < d1:
+        ds = d.isoformat()
+        out.append({
+            "id": f"{eid}:{ds}", "title": title,
+            "startMin": 0, "endMin": 0,   # not a timed span — filtered from free slots
+            "type": "calendar", "color": color, "date": ds, "allDay": True,
+        })
+        d += timedelta(days=1)
+    return out
+
 def week_ahead_lines(cal_by_date: Dict[str, List[Dict]], start: date, days: int = 7) -> str:
     """Compact multi-day calendar preview for the AI system prompt: read-only Google
     events over [start, start+days), one line per day, days with no events omitted.
     `start` is the anchor (today) so offset 0/1 label as today/tomorrow — pure (no clock
-    read), so it's unit-testable. Returns '' when nothing is scheduled in the window."""
+    read), so it's unit-testable. Returns '' when nothing is scheduled in the window.
+    All-day events render as 'Title (all day)'; timed keep HH:MM–HH:MM."""
     out = []
     for i in range(days):
         d  = start + timedelta(days=i)
-        ev = sorted(cal_by_date.get(d.isoformat(), []), key=lambda e: e["startMin"])
-        if not ev:
+        raw = cal_by_date.get(d.isoformat(), [])
+        if not raw:
             continue
+        # All-day first (deadlines/holidays), then timed by start.
+        ad  = allday_cal_events(raw)
+        tm  = sorted(timed_cal_events(raw), key=lambda e: e["startMin"])
+        ev  = ad + tm
         label = {0: "today", 1: "tomorrow"}.get(i, d.strftime("%a %b %d"))
-        items = "; ".join(f"{e['title']} {fmt_time(e['startMin'])}–{fmt_time(e['endMin'])}"
-                          for e in ev)
+        items = "; ".join(format_cal_event_brief(e) for e in ev)
         out.append(f"  {d.isoformat()} ({label}): {items}")
     return "\n".join(out)
 
@@ -758,21 +831,8 @@ class CalFetchThread(QThread):
                     maxResults=2500, pageToken=page,
                 ).execute()
                 for ev in res.get("items", []):
-                    s_raw = ev.get("start", {}).get("dateTime")
-                    e_raw = ev.get("end",   {}).get("dateTime")
-                    if not s_raw:
-                        continue   # skip all-day events
-                    s  = datetime.fromisoformat(s_raw.replace("Z", "+00:00")).astimezone()
-                    en = datetime.fromisoformat(e_raw.replace("Z", "+00:00")).astimezone()
-                    sm = max(s.hour*60 + s.minute, DAY_START)
-                    em = min(en.hour*60 + en.minute, DAY_END)
-                    if em <= sm:
-                        continue
-                    by_date.setdefault(s.date().isoformat(), []).append({
-                        "id": ev.get("id", new_id()), "title": ev.get("summary", "(no title)"),
-                        "startMin": sm, "endMin": em, "type": "calendar",
-                        "color": C_INFO.name(), "date": s.date().isoformat(),
-                    })
+                    for entry in normalize_google_event(ev):
+                        by_date.setdefault(entry["date"], []).append(entry)
                 page = res.get("nextPageToken")
                 if not page:
                     break
@@ -1945,7 +2005,8 @@ class TimelineWidget(QWidget):
         return max(DAY_START, min(DAY_END, m))
 
     def set_data(self, cal, acts, view_date=None):
-        self.cal_events = cal
+        # Timed calendar events only on the timeline; all-day uses the day banner.
+        self.cal_events = timed_cal_events(cal or [])
         self.activities = acts
         self.view_date  = view_date or date.today()
         self.update()
@@ -2495,7 +2556,8 @@ class SidebarWidget(QWidget):
             item = self._sum_area.takeAt(0)
             if item.widget(): item.widget().deleteLater()
 
-        all_b = cal_events + activities
+        # All-day events have no duration on the timeline — exclude from totals.
+        all_b = timed_cal_events(cal_events or []) + list(activities or [])
         DAY_T = DAY_END - DAY_START
         totals: Dict[str, int] = {}
         for b in all_b:
@@ -2539,7 +2601,8 @@ class WeekViewWidget(QWidget):
     day_clicked   = Signal(object)   # datetime.date — header click → Day view
     block_clicked = Signal(str)      # user activity id — open the edit dialog
 
-    HDR_H = 34    # day-header strip height
+    HDR_H = 34    # day-name strip
+    AD_H  = 18    # all-day banner under the name (0 height when empty)
     GUT_W = 46    # time-gutter width (narrower than the Day view's GUTTER_W)
 
     def __init__(self, parent=None):
@@ -2561,11 +2624,18 @@ class WeekViewWidget(QWidget):
     def days(self) -> List[date]:
         return [self._monday + timedelta(days=i) for i in range(7)]
 
+    def _top_h(self) -> int:
+        """Header + optional all-day row if any day this week has an all-day event."""
+        any_ad = any(allday_cal_events(self._cal.get(d.isoformat(), []))
+                     for d in self.days())
+        return self.HDR_H + (self.AD_H if any_ad else 0)
+
     def _y(self, minutes: int) -> int:
         """Per-column minute→y: the full 24h day scaled to fit under the header
         (an overview — no scrolling, unlike the Day timeline)."""
-        span = self.height() - self.HDR_H
-        return int(self.HDR_H + (minutes - DAY_START) / (DAY_END - DAY_START) * span)
+        top = self._top_h()
+        span = self.height() - top
+        return int(top + (minutes - DAY_START) / (DAY_END - DAY_START) * span)
 
     def paintEvent(self, _ev):
         p = QPainter(self)
@@ -2576,6 +2646,8 @@ class WeekViewWidget(QWidget):
         self._hdr_hits   = []
 
         days  = self.days()
+        top_h = self._top_h()
+        any_ad = top_h > self.HDR_H
         cw    = (self.width() - self.GUT_W) / 7.0
         today = date.today()
 
@@ -2594,6 +2666,7 @@ class WeekViewWidget(QWidget):
         fn_chip  = QFont("Segoe UI", 8)
         fn_tiny  = QFont("Segoe UI", 7)
         fm_chip  = QFontMetrics(fn_chip)
+        fm_tiny  = QFontMetrics(fn_tiny)
 
         for i, d in enumerate(days):
             x0 = int(self.GUT_W + i * cw)
@@ -2601,13 +2674,12 @@ class WeekViewWidget(QWidget):
 
             # column separator
             p.setPen(QPen(C_BORDER, 1))
-            p.drawLine(x0, self.HDR_H, x0, self.height())
+            p.drawLine(x0, top_h, x0, self.height())
 
-            # blocks: read-only calendar events + user activities, side-by-side
-            # on overlap exactly like the Day timeline (shared assign_overlap_cols)
+            # blocks: TIMED calendar events + user activities only (all-day is in header)
             ds  = d.isoformat()
             blk = sorted(
-                [{"_btype": "calendar", **e} for e in self._cal.get(ds, [])] +
+                [{"_btype": "calendar", **e} for e in timed_cal_events(self._cal.get(ds, []))] +
                 [{"_btype": "user",     **e} for e in self._acts.get(ds, [])],
                 key=lambda b: (b["startMin"], b["endMin"]))
             area_w = cw - 5
@@ -2652,24 +2724,38 @@ class WeekViewWidget(QWidget):
                     p.drawEllipse(x0 - 3, ny - 3, 7, 7)
 
             # header last, on top — click target for "open this day"
-            hdr = QRect(x0, 0, int(cw), self.HDR_H)
+            hdr = QRect(x0, 0, int(cw), top_h)
             self._hdr_hits.append((hdr, d))
             p.setBrush(C_SURFACE); p.setPen(Qt.NoPen)
             p.drawRect(hdr)
             p.setPen(QPen(C_BORDER, 1))
-            p.drawLine(x0, self.HDR_H, x1, self.HDR_H)
+            p.drawLine(x0, top_h, x1, top_h)
             if i:
-                p.drawLine(x0, 0, x0, self.HDR_H)
+                p.drawLine(x0, 0, x0, top_h)
+            name_rect = QRect(x0, 0, int(cw), self.HDR_H)
             lbl = d.strftime("%a %d")
             if d == today:
                 p.setPen(Qt.NoPen); p.setBrush(C_ACCENT)
                 w = QFontMetrics(fn_hdr_d).horizontalAdvance(lbl) + 16
-                p.drawRoundedRect(QRect(hdr.center().x() - w // 2, 7, w, 20), RAD, RAD)
+                p.drawRoundedRect(QRect(name_rect.center().x() - w // 2, 7, w, 20), RAD, RAD)
                 p.setPen(C_ON_ACCENT)
             else:
                 p.setPen(C_TEXT)
             p.setFont(fn_hdr_d)
-            p.drawText(hdr, Qt.AlignCenter, lbl)
+            p.drawText(name_rect, Qt.AlignCenter, lbl)
+
+            # all-day strip under the day name (holidays, due dates, spirit week)
+            if any_ad:
+                ads = allday_cal_events(self._cal.get(ds, []))
+                ad_rect = QRect(x0 + 2, self.HDR_H, int(cw) - 4, self.AD_H - 2)
+                if ads:
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor(C_INFO.red(), C_INFO.green(), C_INFO.blue(), 40))
+                    p.drawRoundedRect(ad_rect, RAD, RAD)
+                    p.setPen(C_INFO); p.setFont(fn_tiny)
+                    text = " · ".join(e.get("title", "") for e in ads)
+                    p.drawText(ad_rect.adjusted(4, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft,
+                               fm_tiny.elidedText(text, Qt.ElideRight, ad_rect.width() - 8))
 
         # gutter/header corner + outer frame line under the header row
         p.setPen(QPen(C_BORDER, 1))
@@ -3282,11 +3368,22 @@ class AIPanel(QWidget):
             "  - When you split a study block into chunks with breaks, the focus chunks are "
             "\"study\" and the breaks are \"gaming\" (pass break_type to split_block).\n\n"
             "SCHEDULE (day on screen)\n"
-            "Google Calendar (READ-ONLY — you cannot move or delete these; treat each as a "
-            "FIXED obstacle and schedule your blocks around it):\n")
+            "Google Calendar (READ-ONLY — you cannot move or delete these). Timed events are "
+            "FIXED obstacles — schedule around them. All-day events (holidays, due dates, "
+            "spirit week) do not block free time but are real deadlines/context you must "
+            "respect when planning:\n")
         cal = ctx.get("cal_events", [])
-        p += "".join(f"  - {e['title']}: {fmt_time(e['startMin'])}–{fmt_time(e['endMin'])}\n"
-                     for e in cal) or "  (none)\n"
+        ads = allday_cal_events(cal)
+        tms = sorted(timed_cal_events(cal), key=lambda e: e["startMin"])
+        if ads:
+            p += "All-day:\n"
+            p += "".join(f"  - {e['title']} (all day)\n" for e in ads)
+        if tms:
+            p += "Timed (fixed):\n"
+            p += "".join(f"  - {e['title']}: {fmt_time(e['startMin'])}–{fmt_time(e['endMin'])}\n"
+                         for e in tms)
+        if not ads and not tms:
+            p += "  (none)\n"
         p += "Your editable blocks:\n"
         acts = ctx.get("activities", [])
         p += "".join(f"  - \"{a['title']}\" [{a['type']}]: "
@@ -3941,7 +4038,7 @@ class MainWindow(QMainWindow):
         body    = QWidget()
         body_l  = QHBoxLayout(body); body_l.setSpacing(0); body_l.setContentsMargins(0,0,0,0)
 
-        # Day view — timeline in a scroll area
+        # Day view — all-day banner + timeline in a scroll area
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -3952,6 +4049,20 @@ class MainWindow(QMainWindow):
         self._timeline.activity_edit_req.connect(self._edit_activity)
         self._timeline.activity_changed.connect(self._commit_activity_change)
         self._scroll.setWidget(self._timeline)
+
+        self._allday_banner = QLabel()
+        self._allday_banner.setWordWrap(True)
+        self._allday_banner.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._allday_banner.hide()
+        self._allday_banner.setStyleSheet(
+            f"QLabel {{ background: {_rgba(C_INFO, .12)}; color: {C_INFO.name()}; "
+            f"border-bottom: 1px solid {_rgba(C_INFO, .35)}; padding: 6px 12px; "
+            f"font-size: 12px; }}")
+        self._day_page = QWidget()
+        day_l = QVBoxLayout(self._day_page)
+        day_l.setContentsMargins(0, 0, 0, 0); day_l.setSpacing(0)
+        day_l.addWidget(self._allday_banner)
+        day_l.addWidget(self._scroll, 1)
 
         # Week / month / year views
         self._week_view = WeekViewWidget()
@@ -3967,7 +4078,7 @@ class MainWindow(QMainWindow):
         self._year_scroll.setWidget(self._year_view)
 
         self._view_stack = QStackedWidget()
-        self._view_stack.addWidget(self._scroll)       # 0 — day
+        self._view_stack.addWidget(self._day_page)     # 0 — day
         self._view_stack.addWidget(self._week_view)    # 1 — week
         self._view_stack.addWidget(self._month_view)   # 2 — month
         self._view_stack.addWidget(self._year_scroll)  # 3 — year
@@ -4203,19 +4314,23 @@ class MainWindow(QMainWindow):
         return self._cal_by_date.get(d.isoformat(), [])
 
     def _cal_intervals(self, ds: str):
-        """(start, end) minute pairs of read-only calendar events on date `ds`, passed to
-        sequentialize() so editable blocks get pushed off meetings during shift/reflow/rebuild."""
-        return [(e["startMin"], e["endMin"]) for e in self._cal_by_date.get(ds, [])]
+        """(start, end) minute pairs of TIMED read-only calendar events on date `ds`,
+        passed to sequentialize() so editable blocks get pushed off meetings.
+        All-day events are informational only — they must not occupy the whole day."""
+        return [(e["startMin"], e["endMin"])
+                for e in timed_cal_events(self._cal_by_date.get(ds, []))]
 
     def _day_acts(self, d: Optional[date] = None) -> List[Dict]:
         ds = (d or self._cur_date).isoformat()
         return [a for a in self._all_acts if a.get("date") == ds]
 
     def _free_gaps(self, ds: str, after=DAY_START, before=DAY_END):
-        """Open intervals on `ds` not occupied by editable blocks OR calendar events,
-        within [after, before]. Returns [(start, end)] in minutes."""
+        """Open intervals on `ds` not occupied by editable blocks OR timed calendar
+        events, within [after, before]. All-day events do not consume free time.
+        Returns [(start, end)] in minutes."""
         occ = [(a["startMin"], a["endMin"]) for a in self._all_acts if a.get("date") == ds] + \
-              [(e["startMin"], e["endMin"]) for e in self._cal_by_date.get(ds, [])]
+              [(e["startMin"], e["endMin"])
+               for e in timed_cal_events(self._cal_by_date.get(ds, []))]
         return [(s, e) for s, e in _free_slots(occ, after, before) if e > s]
 
     def _select_acts(self, ds: str, title=None, at=None) -> List[Dict]:
@@ -4280,6 +4395,16 @@ class MainWindow(QMainWindow):
             acts   = self._day_acts()
             self._timeline.set_data(cal_ev, acts, d)
             self._sidebar.update_summary(cal_ev, acts)
+            # All-day Google events (holidays, due dates) — banner above the timeline
+            ads = allday_cal_events(cal_ev)
+            if ads:
+                titles = " · ".join(e.get("title") or "(no title)" for e in ads)
+                self._allday_banner.setText(f"All day  ·  {titles}")
+                self._allday_banner.setToolTip(
+                    "\n".join(e.get("title") or "(no title)" for e in ads))
+                self._allday_banner.show()
+            else:
+                self._allday_banner.hide()
             # Only re-center the timeline when the shown day actually changes (initial
             # load or navigation). On an in-place refresh — an edit, drag, or calendar
             # fetch — keep the user's scroll position instead of jumping back to now/top.
@@ -4457,7 +4582,7 @@ class MainWindow(QMainWindow):
                 at  = next((t for t in ACTIVITY_TYPES if t["id"] == tid), ACTIVITY_TYPES[0])
                 title = str(args.get("title") or f"{at['icon']} {at['label']}")
                 day_blocks = [b for b in self._all_acts if b.get("date") == ds] + \
-                             self._cal_by_date.get(ds, [])
+                             timed_cal_events(self._cal_by_date.get(ds, []))
                 dur    = em - sm
                 placed = find_free_placement(day_blocks, sm, dur)
                 if placed is None:
@@ -4546,7 +4671,7 @@ class MainWindow(QMainWindow):
                 dur = a["endMin"] - a["startMin"]
                 day_blocks = [b for b in self._all_acts
                               if b is not a and b.get("date") == a["date"]] + \
-                             self._cal_by_date.get(a["date"], [])
+                             timed_cal_events(self._cal_by_date.get(a["date"], []))
                 placed = find_free_placement(day_blocks, a["startMin"], dur)
                 if placed is None:
                     a["startMin"], a["endMin"], a["date"], a["title"] = orig
@@ -4878,7 +5003,8 @@ class MainWindow(QMainWindow):
                     return "Error: no valid tasks."
                 tasks.sort(key=lambda x: (x["pr"], x["i"]))
                 occ = [(a["startMin"], a["endMin"]) for a in self._all_acts if a.get("date") == ds] + \
-                      [(e["startMin"], e["endMin"]) for e in self._cal_by_date.get(ds, [])]
+                      [(e["startMin"], e["endMin"])
+                       for e in timed_cal_events(self._cal_by_date.get(ds, []))]
                 # idempotent: don't re-add a task already on the day (repeat calls are safe)
                 have = {norm_title(a["title"]) for a in self._all_acts if a.get("date") == ds}
                 placed, unplaced, already, shortened = [], [], [], []
@@ -5133,16 +5259,19 @@ class MainWindow(QMainWindow):
                 return out
 
             if name == "list_blocks":
-                cal = sorted(self._cal_by_date.get(ds, []), key=lambda x: x["startMin"])
+                cal_all = self._cal_by_date.get(ds, [])
+                cal_ad  = allday_cal_events(cal_all)
+                cal     = sorted(timed_cal_events(cal_all), key=lambda x: x["startMin"])
                 day_acts = sorted([x for x in self._all_acts if x.get("date") == ds],
                                   key=lambda x: x["startMin"])
-                lines = [f"[calendar] {ev['title']}: {fmt_time(ev['startMin'])}–{fmt_time(ev['endMin'])}"
-                         for ev in cal]
+                lines = [f"[calendar all-day] {ev['title']}" for ev in cal_ad]
+                lines += [f"[calendar] {ev['title']}: {fmt_time(ev['startMin'])}–{fmt_time(ev['endMin'])}"
+                          for ev in cal]
                 lines += [f"[{a['type']}] {a['title']}: {fmt_time(a['startMin'])}–{fmt_time(a['endMin'])}"
                           for a in day_acts]
                 if not lines:
                     return f"Nothing scheduled on {ds}."
-                # Conflict scan, so verification doesn't depend on the model eyeballing overlaps.
+                # Conflict scan (timed cal only — all-day never occupies minutes).
                 conflicts = []
                 for i, a in enumerate(day_acts):
                     for ev in cal:
@@ -5254,7 +5383,8 @@ class MainWindow(QMainWindow):
                         if dstr == date.today().isoformat():
                             lo = max(ws, datetime.now().hour * 60 + datetime.now().minute)
                         occ = [(a["startMin"], a["endMin"]) for a in self._all_acts if a.get("date") == dstr] + \
-                              [(e["startMin"], e["endMin"]) for e in self._cal_by_date.get(dstr, [])]
+                              [(e["startMin"], e["endMin"])
+                               for e in timed_cal_events(self._cal_by_date.get(dstr, []))]
                         slot = None
                         for gs, ge in _free_slots(occ, lo, we):
                             if ge - gs >= length:
@@ -5330,7 +5460,8 @@ class MainWindow(QMainWindow):
         blocks + any loaded calendar events), regardless of the day being viewed."""
         today = date.today()
         nm = datetime.now().hour * 60 + datetime.now().minute
-        return now_next_summary(self._day_acts(today) + self._day_cal(today), nm)
+        return now_next_summary(
+            self._day_acts(today) + timed_cal_events(self._day_cal(today)), nm)
 
     def _update_nownext(self):
         s = self._nownext_text()
