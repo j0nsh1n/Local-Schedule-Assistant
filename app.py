@@ -4086,18 +4086,7 @@ class AlertPopup(QWidget):
     def show_at(self, x, y):
         self.adjustSize()
         self.move(x, y - self.height())
-        # Soft fade-in so the alert doesn't hard-pop
-        eff = QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(eff)
-        eff.setOpacity(0.0)
-        self.show()
-        anim = QPropertyAnimation(eff, b"opacity", self)
-        anim.setDuration(180)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
-        self._fade_in = anim
+        self.show()  # no opacity effect — keeps the alert snappy under DND
 
     def mousePressEvent(self, _ev):
         self.close()
@@ -4552,6 +4541,22 @@ class MainWindow(QMainWindow):
             """)
             return b
 
+        def nav_btn(text, tip):
+            # Fixed-width + large padding was clipping ‹ › to invisibility.
+            b = QPushButton(text)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedSize(36, 32)
+            b.setToolTip(tip)
+            b.setStyleSheet(f"""
+                QPushButton {{ background:{C_SURF2.name()}; border:1px solid {C_BORDER.name()};
+                color:{C_TEXT.name()}; padding:0; border-radius:{RAD}px;
+                font-size:18px; font-weight:600; }}
+                QPushButton:hover {{ color:{C_ACCENT.name()}; border-color:{C_ACCENT.name()};
+                background:{_rgba(C_ACCENT, .12)}; }}
+                QPushButton:pressed {{ background:{_rgba(C_ACCENT, .22)}; }}
+            """)
+            return b
+
         logo = QLabel("◈  Daily Scheduler")
         logo.setStyleSheet(
             f"font-size:15px; font-weight:700; color:{C_ACCENT.name()}; letter-spacing:0.2px;")
@@ -4560,11 +4565,11 @@ class MainWindow(QMainWindow):
         ver.setStyleSheet(f"color:{C_MUTED.name()}; font-size:10px; padding-top:4px;")
         hl.addWidget(ver)
 
-        prev_b = hbtn("‹"); prev_b.setFixedWidth(30)
+        prev_b = nav_btn("‹", "Previous")
         prev_b.clicked.connect(lambda: self._nav(-1))
         today_b = hbtn("Today")
         today_b.clicked.connect(lambda: self._goto_date(date.today()))
-        next_b = hbtn("›"); next_b.setFixedWidth(30)
+        next_b = nav_btn("›", "Next")
         next_b.clicked.connect(lambda: self._nav(1))
         hl.addWidget(prev_b); hl.addWidget(today_b); hl.addWidget(next_b)
 
@@ -4745,19 +4750,8 @@ class MainWindow(QMainWindow):
         self._view_stack.setCurrentIndex({"day": 0, "week": 1, "month": 2, "year": 3}[v])
         self._ensure_cal_for_view()
         self._refresh_view()
-        # Soft fade-in of the active view (natural, short)
-        w = self._view_stack.currentWidget()
-        if w is not None:
-            eff = QGraphicsOpacityEffect(w)
-            w.setGraphicsEffect(eff)
-            anim = QPropertyAnimation(eff, b"opacity", self)
-            anim.setDuration(160)
-            anim.setStartValue(0.25)
-            anim.setEndValue(1.0)
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            anim.finished.connect(lambda: w.setGraphicsEffect(None))
-            anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
-            self._view_fade = anim
+        # No opacity fade on painted views — QGraphicsOpacityEffect re-rasterizes the
+        # full timeline/week grid every frame and stutters badly.
 
     def _goto_date(self, d: date):
         self._cur_date = d
@@ -4912,45 +4906,40 @@ class MainWindow(QMainWindow):
 
     # ── AI panel ───────────────────────────────────────────────────────────
     def _toggle_ai(self):
-        """Slide the AI panel in/out (width animation) instead of a hard pop."""
+        """Show/hide the AI panel. Width animation was removed — resizing forces a
+        full timeline relayout every frame and stutters on the day/week views."""
         self._ai_visible = not self._ai_visible
         self._ai_btn.setChecked(self._ai_visible)
         panel = self._ai_panel
         target = getattr(panel, "_panel_w", 340)
-        # Stop any in-flight slide
         if getattr(self, "_ai_slide", None) is not None:
             try:
                 self._ai_slide.stop()
             except Exception:
                 pass
+            self._ai_slide = None
+        # Instant layout size (no multi-frame reflow), light opacity on the panel only
         panel.setMinimumWidth(0)
+        panel.setMaximumWidth(target)
+        panel.setFixedWidth(target)
         if self._ai_visible:
             panel.show()
-            panel.setMaximumWidth(0)
-            panel.setFixedWidth(0)
-            anim = QPropertyAnimation(panel, b"maximumWidth", self)
-            anim.setDuration(240)
-            anim.setStartValue(0)
-            anim.setEndValue(target)
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            def _opened():
-                panel.setFixedWidth(target)
-                panel.setMaximumWidth(target)
-            anim.finished.connect(_opened)
+            eff = QGraphicsOpacityEffect(panel)
+            panel.setGraphicsEffect(eff)
+            eff.setOpacity(0.0)
+            anim = QPropertyAnimation(eff, b"opacity", self)
+            anim.setDuration(140)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+            def _clear():
+                panel.setGraphicsEffect(None)
+            anim.finished.connect(_clear)
+            self._ai_slide = anim
+            anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
         else:
-            panel.setMaximumWidth(panel.width() or target)
-            anim = QPropertyAnimation(panel, b"maximumWidth", self)
-            anim.setDuration(200)
-            anim.setStartValue(panel.width() or target)
-            anim.setEndValue(0)
-            anim.setEasingCurve(QEasingCurve.Type.InCubic)
-            def _closed():
-                panel.hide()
-                panel.setFixedWidth(target)
-                panel.setMaximumWidth(target)
-            anim.finished.connect(_closed)
-        self._ai_slide = anim
-        anim.start()
+            panel.hide()
+            panel.setGraphicsEffect(None)
 
     def _ai_ctx(self):
         now = datetime.now()
