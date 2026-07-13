@@ -54,7 +54,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.9.0"
+__version__  = "3.9.1"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -601,15 +601,27 @@ def save_settings(s: Dict) -> None:
         pass
 
 def parse_hhmm(s: str) -> int:
-    """'18:30' / '6:30 pm' / '6 pm' → minutes from midnight. Raises ValueError."""
+    """'18:30' / '6:30 pm' / '6 pm' / '24:00' → minutes from midnight.
+    End-of-day is 1440 (DAY_END). QTime / strptime reject hour=24, so we accept
+    the string form for AI tools and typed times. Raises ValueError on garbage."""
     s = (s or "").strip().lower().replace(".", "")
+    if s in ("24:00", "24:0", "24", "2400"):
+        return DAY_END
     for fmt in ("%H:%M", "%I:%M %p", "%I %p", "%H"):
         try:
             t = datetime.strptime(s, fmt)
             return t.hour * 60 + t.minute
         except ValueError:
             continue
-    raise ValueError(f"can't parse time '{s}' — use 24h HH:MM")
+    raise ValueError(f"can't parse time '{s}' — use 24h HH:MM (or 24:00 for end of day)")
+
+def coerce_end_min(sm: int, em: int) -> int:
+    """Map end-of-day conventions onto DAY_END (1440).
+    QTime only holds 00:00–23:59, so End=00:00 with Start later the same day means
+    through midnight (e.g. sleep 22:00–24:00). Start=End=00:00 stays zero-length."""
+    if em == 0 and sm > 0:
+        return DAY_END
+    return em
 
 
 _WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
@@ -2375,13 +2387,21 @@ class AddActivityDialog(QDialog):
             grid.addWidget(btn, i // 3, i % 3)
         lay.addWidget(grid_w)
 
-        # Times — respect the exact range the user dragged/clicked (24-hour display)
+        # Times — respect the exact range the user dragged/clicked (24-hour display).
+        # QTime only goes 00:00–23:59, so end-of-day (1440 / "24:00") is shown as
+        # 00:00 and re-mapped on save when start is later the same day (see _save).
         trow = QHBoxLayout()
         end_min = max(end_min, start_min + 15)
         self.t_start = QTimeEdit(QTime(start_min // 60, start_min % 60))
-        self.t_end   = QTimeEdit(QTime((end_min // 60) % 24, end_min % 60))
+        if end_min >= DAY_END:
+            self.t_end = QTimeEdit(QTime(0, 0))   # display stand-in for 24:00
+        else:
+            self.t_end = QTimeEdit(QTime(end_min // 60, end_min % 60))
         self.t_start.setDisplayFormat("HH:mm")
         self.t_end.setDisplayFormat("HH:mm")
+        self.t_end.setToolTip(
+            "End time (24h). To run until midnight, set End to 00:00 when Start is "
+            "later (saved as 24:00). Or drag the block to the bottom of the day.")
         for lbl, w in [("Start", self.t_start), ("End", self.t_end)]:
             col = QVBoxLayout()
             ql  = QLabel(lbl.upper())
@@ -2451,9 +2471,14 @@ class AddActivityDialog(QDialog):
     def _save(self):
         st = self.t_start.time(); en = self.t_end.time()
         sm = st.hour() * 60 + st.minute()
-        em = en.hour() * 60 + en.minute()
+        em = coerce_end_min(sm, en.hour() * 60 + en.minute())
         if em <= sm:
-            QMessageBox.warning(self, "Invalid", "End must be after start."); return
+            QMessageBox.warning(
+                self, "Invalid",
+                "End must be after start.\n\n"
+                "Tip: to run a block until midnight, set End to 00:00 "
+                "(saved as end of day, 24:00).")
+            return
         at = next((t for t in ACTIVITY_TYPES if t["id"] == self._sel), ACTIVITY_TYPES[0])
         self.result_activity = {
             "id": self._existing["id"] if self._existing else new_id(),
@@ -4575,9 +4600,9 @@ class MainWindow(QMainWindow):
 
             if name == "add_block":
                 sm = parse_hhmm(str(args["start"]))
-                em = parse_hhmm(str(args["end"]))
+                em = coerce_end_min(sm, parse_hhmm(str(args["end"])))
                 if em <= sm:
-                    return "Error: end must be after start."
+                    return "Error: end must be after start (use 24:00 for end of day)."
                 tid = str(args.get("type", "study"))
                 at  = next((t for t in ACTIVITY_TYPES if t["id"] == tid), ACTIVITY_TYPES[0])
                 title = str(args.get("title") or f"{at['icon']} {at['label']}")
@@ -4655,7 +4680,7 @@ class MainWindow(QMainWindow):
                     if not args.get("end"):   # only start given → keep the duration
                         a["endMin"] = min(a["startMin"] + old_dur, DAY_END)
                 if args.get("end"):
-                    a["endMin"] = parse_hhmm(str(args["end"]))
+                    a["endMin"] = coerce_end_min(a["startMin"], parse_hhmm(str(args["end"])))
                 if args.get("new_date"):
                     nd = resolve_date(args["new_date"], self._cur_date)
                     if nd is None:
@@ -4776,7 +4801,7 @@ class MainWindow(QMainWindow):
                 for b in raw:
                     try:
                         sm = parse_hhmm(str(b["start"]))
-                        em = parse_hhmm(str(b["end"]))
+                        em = coerce_end_min(sm, parse_hhmm(str(b["end"])))
                         if em <= sm:
                             raise ValueError("end before start")
                         tid = str(b.get("type", "study"))
@@ -4809,9 +4834,9 @@ class MainWindow(QMainWindow):
 
             if name == "add_recurring":
                 sm = parse_hhmm(str(args["start"]))
-                em = parse_hhmm(str(args["end"]))
+                em = coerce_end_min(sm, parse_hhmm(str(args["end"])))
                 if em <= sm:
-                    return "Error: end must be after start."
+                    return "Error: end must be after start (use 24:00 for end of day)."
                 tid = str(args.get("type", "study"))
                 at_t = next((t for t in ACTIVITY_TYPES if t["id"] == tid), ACTIVITY_TYPES[0])
                 title = str(args.get("title") or at_t["label"])
