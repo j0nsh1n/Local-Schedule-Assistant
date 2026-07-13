@@ -8,7 +8,9 @@ cd "$(dirname "$0")"
 
 python3 -m pip install -q pyinstaller -r requirements.txt
 python3 -m PyInstaller --noconfirm --onedir --name DailyScheduler \
-  --collect-all PySide6 app.py
+  --collect-all PySide6 \
+  --add-data "LICENSE:." \
+  app.py
 
 chmod +x dist/DailyScheduler/DailyScheduler
 echo "Built: dist/DailyScheduler/DailyScheduler"

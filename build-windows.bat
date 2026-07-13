@@ -13,6 +13,7 @@ if errorlevel 1 exit /b 1
 
 py -m PyInstaller --noconfirm --onedir --windowed --name DailyScheduler ^
   --collect-all PySide6 ^
+  --add-data "LICENSE;." ^
   --distpath dist_exe --workpath build --specpath . ^
   app.py
 if errorlevel 1 exit /b 1

@@ -4,7 +4,7 @@ A native Windows desktop **daily planner** with a **local, private AI assistant*
 read and edit your schedule — all running on your own machine. No cloud, no accounts, no
 telemetry: the UI is native Qt, and the AI runs locally through [Ollama](https://ollama.com).
 
-Built with Python + PySide6 (Qt6). MIT licensed.
+Built with Python + PySide6 (Qt6). Licensed under **GPL-3.0**.
 *(This repository is named `Local-Schedule-Assistant`; the app itself is **Daily Scheduler**.)*
 
 > **Private by design** — your schedule never leaves your computer. The AI assistant and
@@ -306,4 +306,24 @@ Google Calendar API (optional, read-only) · single-file app (`app.py`)
 
 ## License
 
-[MIT](LICENSE) © Jonathan Shin
+[GNU General Public License v3.0](LICENSE) © Jonathan Shin
+
+Daily Scheduler is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but **without
+any warranty**; without even the implied warranty of merchantability or fitness
+for a particular purpose. See the [GNU General Public License](LICENSE) for
+more details.
+
+**Note on older releases:** the **v3.7.0** tag and earlier were published under
+the [MIT License](https://opensource.org/licenses/MIT). Recipients of those
+builds keep the MIT grant for those copies. This repository and all **future**
+releases are **GPL-3.0 only**.
+
+**Third-party:** [PySide6](https://doc.qt.io/qtforpython/) / Qt are available
+under the LGPL (and commercial licenses from The Qt Company). Ollama and any
+models you pull are separate software with their own terms — they are not part
+of this repository’s license.
