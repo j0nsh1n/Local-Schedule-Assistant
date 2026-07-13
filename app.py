@@ -4541,8 +4541,8 @@ class MainWindow(QMainWindow):
             """)
             return b
 
-        def nav_btn(text, tip):
-            # Fixed-width + large padding was clipping ‹ › to invisibility.
+        def icon_btn(text, tip, font_px=16):
+            # Fixed-width + large padding clips emoji/glyphs (‹ › ⚙) to invisibility.
             b = QPushButton(text)
             b.setCursor(Qt.PointingHandCursor)
             b.setFixedSize(36, 32)
@@ -4550,7 +4550,7 @@ class MainWindow(QMainWindow):
             b.setStyleSheet(f"""
                 QPushButton {{ background:{C_SURF2.name()}; border:1px solid {C_BORDER.name()};
                 color:{C_TEXT.name()}; padding:0; border-radius:{RAD}px;
-                font-size:18px; font-weight:600; }}
+                font-size:{font_px}px; font-weight:600; }}
                 QPushButton:hover {{ color:{C_ACCENT.name()}; border-color:{C_ACCENT.name()};
                 background:{_rgba(C_ACCENT, .12)}; }}
                 QPushButton:pressed {{ background:{_rgba(C_ACCENT, .22)}; }}
@@ -4565,11 +4565,11 @@ class MainWindow(QMainWindow):
         ver.setStyleSheet(f"color:{C_MUTED.name()}; font-size:10px; padding-top:4px;")
         hl.addWidget(ver)
 
-        prev_b = nav_btn("‹", "Previous")
+        prev_b = icon_btn("‹", "Previous", font_px=18)
         prev_b.clicked.connect(lambda: self._nav(-1))
         today_b = hbtn("Today")
         today_b.clicked.connect(lambda: self._goto_date(date.today()))
-        next_b = nav_btn("›", "Next")
+        next_b = icon_btn("›", "Next", font_px=18)
         next_b.clicked.connect(lambda: self._nav(1))
         hl.addWidget(prev_b); hl.addWidget(today_b); hl.addWidget(next_b)
 
@@ -4594,8 +4594,7 @@ class MainWindow(QMainWindow):
         self._refresh_btn.clicked.connect(self._refresh_cal)
         hl.addWidget(self._refresh_btn)
 
-        settings_b = hbtn("⚙"); settings_b.setFixedWidth(34)
-        settings_b.setToolTip("Settings")
+        settings_b = icon_btn("⚙", "Settings", font_px=15)
         settings_b.clicked.connect(self._open_settings)
         hl.addWidget(settings_b)
 
