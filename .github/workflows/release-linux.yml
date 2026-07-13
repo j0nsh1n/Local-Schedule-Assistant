@@ -44,7 +44,9 @@ jobs:
       - name: Build Linux onedir package
         run: |
           pyinstaller --noconfirm --onedir --name DailyScheduler \
-            --collect-all PySide6 app.py
+            --collect-all PySide6 \
+            --add-data "LICENSE:." \
+            app.py
           chmod +x dist/DailyScheduler/DailyScheduler
           # Folder name matches the historical asset basename so downloaders
           # still recognise it; the zip is what GitHub hosts.

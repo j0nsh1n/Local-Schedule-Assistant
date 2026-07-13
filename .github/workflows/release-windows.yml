@@ -38,7 +38,9 @@ jobs:
       - name: Build Windows onedir package
         run: |
           pyinstaller --noconfirm --onedir --windowed --name DailyScheduler `
-            --collect-all PySide6 app.py
+            --collect-all PySide6 `
+            --add-data "LICENSE;." `
+            app.py
           # Zip the whole folder (exe + _internal)
           Compress-Archive -Path dist\DailyScheduler `
             -DestinationPath dist\DailyScheduler-win64.zip -Force
