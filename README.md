@@ -18,8 +18,9 @@ Built with Python + PySide6 (Qt6). Licensed under **GPL-3.0**.
   the `‹` / `›` arrows and the **Today** button.
 - **Direct editing** — drag on empty timeline to create a block, drag a block to move it,
   drag its edges to resize, click (or right-click → Edit) to change its title/type/time,
-  right-click → Delete to remove it. Eight activity types (Assignments, Projects, Study,
-  Extracurriculars, Anime/Gaming, Exercise, Meals, Sleep), each with its own color.
+  right-click → Delete to remove it. Many activity types (Assignments, Study, Class,
+  Clubs, Music, Creative, Social, Chores, Work, Free/Rest, Sleep, and more), each with
+  its own color.
 - **Local AI assistant** — three modes (*Chat*, *Plan*, *Analyze*) backed by a local LLM
   that edits your schedule with real tools:
   - *"Add a study block from 2 to 4pm"*
@@ -41,9 +42,8 @@ Built with Python + PySide6 (Qt6). Licensed under **GPL-3.0**.
   Open / notification toggles / Test / Settings / Quit.
 - **Start with Windows** — optional. At sign-in the app opens its window after a short
   settle delay (configurable).
-- **Two themes** — *Nocturne* (dark) and *Slate* (light), with a soft modern chrome
-  (gentle corner radii, polished controls) while the timeline stays crisp and planner-like.
-  Switchable in Settings.
+- **Two themes** — *Nocturne* (dark) and *Slate* (light): planner-first look with square
+  schedule blocks and a crisp grid (not Google Calendar-style cards). Switchable in Settings.
 - **Optional Google Calendar** — overlays your real events (read-only); the AI plans
   around them and never touches them.
 

@@ -50,7 +50,7 @@ from PySide6.QtCore import (
     QPropertyAnimation, QEasingCurve, QAbstractAnimation,
 )
 from PySide6.QtGui import (
-    QPainter, QColor, QPen, QFont, QFontMetrics, QPainterPath,
+    QPainter, QColor, QPen, QFont, QFontMetrics,
     QPalette, QPixmap, QIcon, QDesktopServices, QKeySequence, QShortcut,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -160,32 +160,31 @@ MODEL_PROFILES = {
 }
 RECOMMENDED_MODELS = list(MODEL_PROFILES.keys())
 
-# ── Theme system (v4.0 visual refresh) ─────────────────────────────────────
-# Softly modern: modest corner radii on chrome, slightly richer surfaces, while
-# keeping *crisp* geometry for timeline hour lines, left accent bars, and the
-# now-line (structure still reads as a planner, not a blob of rounded cards).
+# ── Theme system (v4.0) ────────────────────────────────────────────────────
+# Planner-first look (not Google Calendar cards): square schedule blocks, crisp
+# grid, modest chrome radii only on buttons/dialogs. Amber dark / ink light.
 THEMES = {
-    "nocturne": {   # refined dark — amber accent, soft radius
+    "nocturne": {   # high-contrast dark planner
         "label": "Nocturne — dark",
-        "bg": "#0c0c0e", "surface": "#16161a", "surf2": "#1e1e24",
-        "border": "#2a2a32", "border2": "#3c3c48",
-        "text": "#f4f4f5", "muted": "#94949e",
-        "accent": "#e8b84a", "accent2": "#c9962e", "on_accent": "#0c0c0e",
-        "now": "#f07167", "grid": "#1a1a20", "ghost": "#3c3c48",
+        "bg": "#0b0b0d", "surface": "#141418", "surf2": "#1c1c22",
+        "border": "#2c2c34", "border2": "#40404c",
+        "text": "#f2f2f4", "muted": "#8e8e98",
+        "accent": "#e8b84a", "accent2": "#c9962e", "on_accent": "#0b0b0d",
+        "now": "#f07167", "grid": "#1a1a20", "ghost": "#3a3a44",
         "ok": "#5fbf85", "ok_txt": "#8fd9a8", "err": "#f07167", "err_txt": "#f5a8a2",
-        "warn": "#e8b84a", "info": "#7aa2e3",
-        "rad": 8, "rad_lg": 14, "mono": True,
+        "warn": "#e8b84a", "info": "#6b8cae",   # muted steel, not GCal blue
+        "rad": 4, "rad_lg": 6, "mono": True,
     },
-    "slate": {      # cool light — blue accent, airy surfaces
+    "slate": {      # paper-light planner
         "label": "Slate — light",
-        "bg": "#f3f5f8", "surface": "#ffffff", "surf2": "#eef1f6",
-        "border": "#e2e6ee", "border2": "#cfd5e0",
-        "text": "#141c28", "muted": "#64708a",
-        "accent": "#3b6cf0", "accent2": "#2f5ad4", "on_accent": "#ffffff",
-        "now": "#e85d52", "grid": "#e8ebf1", "ghost": "#c5ccda",
-        "ok": "#2ba37e", "ok_txt": "#1e7a5e", "err": "#dc2626", "err_txt": "#b91c1c",
-        "warn": "#d97706", "info": "#3b6cf0",
-        "rad": 10, "rad_lg": 16, "mono": False,
+        "bg": "#f0f0ee", "surface": "#fafaf8", "surf2": "#e8e8e4",
+        "border": "#d4d4ce", "border2": "#b8b8b0",
+        "text": "#1a1a18", "muted": "#5c5c56",
+        "accent": "#b45309", "accent2": "#92400e", "on_accent": "#fffbeb",
+        "now": "#c2410c", "grid": "#e4e4de", "ghost": "#c4c4bc",
+        "ok": "#2ba37e", "ok_txt": "#1e7a5e", "err": "#b91c1c", "err_txt": "#991b1b",
+        "warn": "#b45309", "info": "#57534e",
+        "rad": 4, "rad_lg": 6, "mono": False,
     },
 }
 DEFAULT_THEME = "nocturne"
@@ -253,21 +252,56 @@ def app_chrome_stylesheet() -> str:
 apply_theme(DEFAULT_THEME)
 
 # ── Activity types ─────────────────────────────────────────────────────────
+# Expanded set for high-school life. Tool schemas + AI prompt are generated from
+# this list, so adding a type here is enough for pickers and the model.
 ACTIVITY_TYPES = [
     {"id": "assignments", "label": "Assignments",      "icon": "📝", "color": "#ef4444"},
     {"id": "project",     "label": "Projects",         "icon": "🛠",  "color": "#f59e0b"},
     {"id": "study",       "label": "Study",            "icon": "📚", "color": "#8b5cf6"},
+    {"id": "class",       "label": "Class / School",   "icon": "🏫", "color": "#3b82f6"},
+    {"id": "reading",     "label": "Reading",          "icon": "📖", "color": "#a78bfa"},
     {"id": "extra",       "label": "Extracurriculars", "icon": "🎯", "color": "#ec4899"},
+    {"id": "club",        "label": "Clubs",            "icon": "🏛", "color": "#d946ef"},
+    {"id": "music",       "label": "Music / Practice", "icon": "🎵", "color": "#14b8a6"},
+    {"id": "creative",    "label": "Creative / Art",   "icon": "🎨", "color": "#f472b6"},
     {"id": "gaming",      "label": "Anime/Gaming",     "icon": "🎮", "color": "#06b6d4"},
+    {"id": "social",      "label": "Social",           "icon": "👥", "color": "#22d3ee"},
     {"id": "exercise",    "label": "Exercise",         "icon": "💪", "color": "#10b981"},
     {"id": "meals",       "label": "Meals",            "icon": "🍽", "color": "#f97316"},
+    {"id": "chores",      "label": "Chores",           "icon": "🏠", "color": "#a3a3a3"},
+    {"id": "work",        "label": "Work / Job",       "icon": "💼", "color": "#64748b"},
+    {"id": "commute",     "label": "Commute",          "icon": "🚌", "color": "#78716c"},
+    {"id": "health",      "label": "Health",           "icon": "🏥", "color": "#fb7185"},
+    {"id": "free",        "label": "Free / Rest",      "icon": "☕", "color": "#94a3b8"},
     {"id": "sleep",       "label": "Sleep",            "icon": "🌙", "color": "#6366f1"},
 ]
 
 # Map legacy type ids (from older data) onto the current set, so existing blocks
 # keep a sensible category/color after this change.
-_OLD_TYPE_MAP = {"anime": "gaming", "friends": "extra",
-                 "gym": "exercise", "workout": "exercise"}
+_OLD_TYPE_MAP = {"anime": "gaming", "friends": "extra", "social": "social",
+                 "gym": "exercise", "workout": "exercise", "rest": "free",
+                 "break": "free", "school": "class", "lesson": "class"}
+
+def activity_type_prompt_block() -> str:
+    """Human lines for the AI system prompt — always stays in sync with ACTIVITY_TYPES."""
+    lines = [
+        "ACTIVITY TYPES — set each block's \"type\" to what the user will actually be "
+        "DOING (judge by the activity itself, not the blocks around it):"
+    ]
+    for t in ACTIVITY_TYPES:
+        lines.append(f"  {t['id']:<12} – {t['label']}")
+    lines += [
+        "TYPE RULES (the model often gets these wrong — follow them):",
+        "  - A BREAK or REST between work → use \"free\" (or \"gaming\" for entertainment,",
+        "    \"exercise\" for a physical break, \"meals\" for a snack). NEVER label a break",
+        "    as \"study\", \"assignments\", \"project\", or \"class\".",
+        "  - A break between two study blocks is still a break — don't copy the surrounding type.",
+        "  - split_block focus chunks keep the task type; breaks default to \"free\"",
+        "    (override with break_type).",
+        "  - School lessons / periods → \"class\". Homework due soon → \"assignments\".",
+        "  - Hangouts → \"social\". Band/orchestra practice → \"music\".",
+    ]
+    return "\n".join(lines)
 
 # ── Pure helper functions ──────────────────────────────────────────────────
 def min_to_y(minutes: int) -> int:
@@ -277,25 +311,19 @@ def y_to_min(y: int) -> int:
     return int(DAY_START + y / HOUR_PX * 60)
 
 def paint_schedule_block(p: QPainter, rect: QRect, fill: QColor, accent: QColor,
-                         radius: int = 6, accent_w: int = 3, outline: bool = False):
-    """Rounded block body + left accent clipped to the same curve (so the strip
-    doesn't square off the corners)."""
-    rr = max(0, min(int(radius), rect.height() // 2, rect.width() // 2))
-    path = QPainterPath()
-    path.addRoundedRect(float(rect.x()), float(rect.y()),
-                        float(rect.width()), float(rect.height()), float(rr), float(rr))
-    p.setPen(Qt.NoPen)
+                         radius: int = 0, accent_w: int = 3, outline: bool = False):
+    """Square planner tiles (deliberately not GCal-style rounded cards): solid fill,
+    1px outline, crisp left accent bar. `radius` is ignored (kept for call-site
+    compatibility)."""
+    p.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), 160), 1))
     p.setBrush(fill)
-    p.drawPath(path)
+    p.drawRect(rect.adjusted(0, 0, -1, -1))
     if accent_w > 0:
-        p.save()
-        p.setClipPath(path)
         p.fillRect(QRect(rect.x(), rect.y(), accent_w, rect.height()), accent)
-        p.restore()
     if outline:
-        p.setPen(QPen(accent, 1.5))
+        p.setPen(QPen(accent, 2))
         p.setBrush(Qt.NoBrush)
-        p.drawPath(path)
+        p.drawRect(rect.adjusted(1, 1, -2, -2))
 
 def fmt_time(minutes: int) -> str:
     h, m = divmod(int(minutes), 60)   # 24-hour HH:MM (e.g. 09:00, 14:30, 24:00)
@@ -1699,7 +1727,7 @@ AI_TOOLS = [
             "chunk":  {"type": "integer", "description": "Length of each focus chunk in minutes (default 30)."},
             "break":  {"type": "integer", "description": "Length of each break in minutes (default 5; 0 for none)."},
             "break_type": {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES],
-                            "description": "Category for the breaks (default 'gaming' = downtime). A break is rest, not study — don't reuse the work block's type."},
+                            "description": "Category for the breaks (default 'free' = rest). A break is rest, not study — don't reuse the work block's type."},
         }}}},
     {"type": "function", "function": {
         "name": "schedule_tasks",
@@ -2265,11 +2293,11 @@ class TimelineWidget(QWidget):
             rect = QRect(x, y, w, h)
             fill = QColor(C_ACCENT); fill.setAlpha(18)
             p.setPen(Qt.NoPen); p.setBrush(fill)
-            p.drawRoundedRect(rect, max(RAD, 4), max(RAD, 4))
-            pen = QPen(C_ACCENT, 1, Qt.DashLine); pen.setColor(QColor(
-                C_ACCENT.red(), C_ACCENT.green(), C_ACCENT.blue(), 90))
+            p.drawRect(rect)
+            pen = QPen(C_ACCENT, 1, Qt.DashLine)
+            pen.setColor(QColor(C_ACCENT.red(), C_ACCENT.green(), C_ACCENT.blue(), 100))
             p.setPen(pen); p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(rect, max(RAD, 4), max(RAD, 4))
+            p.drawRect(rect.adjusted(0, 0, -1, -1))
             if dur >= 20:
                 p.setPen(QColor(C_ACCENT.red(), C_ACCENT.green(), C_ACCENT.blue(), 180))
                 p.setFont(QFont("Segoe UI", 9))
@@ -2290,9 +2318,9 @@ class TimelineWidget(QWidget):
         rect = QRect(x, y, w, h)
         fill = QColor(C_ACCENT); fill.setAlpha(70)
         p.setPen(Qt.NoPen); p.setBrush(fill)
-        p.drawRoundedRect(rect, max(RAD, 4), max(RAD, 4))
+        p.drawRect(rect)
         p.setPen(QPen(C_ACCENT, 1.5)); p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(rect, max(RAD, 4), max(RAD, 4))
+        p.drawRect(rect.adjusted(0, 0, -1, -1))
         p.setPen(C_TEXT)
         p.setFont(QFont("Segoe UI", 9, QFont.Bold))
         p.drawText(rect.adjusted(10, 4, -8, -4), Qt.AlignTop | Qt.AlignLeft,
@@ -2341,15 +2369,10 @@ class TimelineWidget(QWidget):
             c    = QColor(blk.get("color") or C_ACCENT.name())
             bg   = QColor(c.red(), c.green(), c.blue(), 52)
             rr   = max(4, min(RAD + 2, rect.height() // 2, 10))
-
-            # Soft card body + crisp left accent strip (structure stays sharp)
-            p.setPen(Qt.NoPen); p.setBrush(bg)
-            p.drawRoundedRect(rect, rr, rr)
-            p.fillRect(QRect(x, y + 1, 3, max(h - 2, 1)), c)
-            # highlight the block currently being dragged
-            if self._preview and blk.get("_btype") == "user" and blk["id"] == self._preview[0]:
-                p.setPen(QPen(c, 1.5)); p.setBrush(Qt.NoBrush)
-                p.drawRoundedRect(rect, rr, rr)
+            dragging = (self._preview and blk.get("_btype") == "user"
+                        and blk["id"] == self._preview[0])
+            paint_schedule_block(p, rect, bg, c, radius=rr, accent_w=3,
+                                 outline=bool(dragging))
 
             tr = rect.adjusted(10, 4, -6, -4)
             if dur >= 25:
@@ -2564,7 +2587,7 @@ class AddActivityDialog(QDialog):
         title.setStyleSheet("font-size: 15px; font-weight: bold;")
         lay.addWidget(title)
 
-        # Type buttons grid
+        # Type buttons grid (scrollable — many categories)
         grid_w = QWidget()
         grid   = QGridLayout(grid_w)
         grid.setSpacing(5); grid.setContentsMargins(0,0,0,0)
@@ -2577,7 +2600,14 @@ class AddActivityDialog(QDialog):
             btn.clicked.connect(lambda _, aid=at["id"]: self._pick(aid))
             self._type_btns[at["id"]] = (btn, at)
             grid.addWidget(btn, i // 3, i % 3)
-        lay.addWidget(grid_w)
+        type_scroll = QScrollArea()
+        type_scroll.setWidgetResizable(True)
+        type_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        type_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        type_scroll.setMaximumHeight(240)
+        type_scroll.setStyleSheet("background: transparent;")
+        type_scroll.setWidget(grid_w)
+        lay.addWidget(type_scroll)
 
         # Times — respect the exact range the user dragged/clicked (24-hour display).
         # QTime only goes 00:00–23:59, so end-of-day (1440 / "24:00") is shown as
@@ -2704,17 +2734,18 @@ class SidebarWidget(QWidget):
         lay = QVBoxLayout(self)
         lay.setSpacing(0); lay.setContentsMargins(0,0,0,0)
 
-        # ── Add activity section ───────────────────────────────────────────
+        # ── Add activity section (scrollable type list) ────────────────────
         add_sec = QWidget()
         add_sec.setStyleSheet(f"border-bottom: 1px solid {C_BORDER.name()};")
         al = QVBoxLayout(add_sec)
-        al.setContentsMargins(12, 14, 12, 14); al.setSpacing(8)
+        al.setContentsMargins(12, 12, 12, 10); al.setSpacing(6)
 
         hl = QLabel("ADD ACTIVITY")
         hl.setStyleSheet(f"font-size: 9px; font-weight: bold; letter-spacing: 1px; color: {C_MUTED.name()};")
         al.addWidget(hl)
 
-        grid = QGridLayout(); grid.setSpacing(5); grid.setContentsMargins(0,0,0,0)
+        grid_host = QWidget()
+        grid = QGridLayout(grid_host); grid.setSpacing(4); grid.setContentsMargins(0,0,0,0)
         for i, at in enumerate(ACTIVITY_TYPES):
             btn = QPushButton(f"{at['icon']} {at['label']}")
             btn.setCheckable(True)
@@ -2723,12 +2754,21 @@ class SidebarWidget(QWidget):
             btn.clicked.connect(lambda _, aid=at["id"]: self._select(aid))
             self._type_btns[at["id"]] = (btn, at)
             grid.addWidget(btn, i // 2, i % 2)
-        al.addLayout(grid)
+        type_scroll = QScrollArea()
+        type_scroll.setWidgetResizable(True)
+        type_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        type_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        type_scroll.setMinimumHeight(200)
+        type_scroll.setMaximumHeight(280)
+        type_scroll.setStyleSheet(
+            f"QScrollArea {{ background: transparent; border: none; }}")
+        type_scroll.setWidget(grid_host)
+        al.addWidget(type_scroll, 1)
 
-        hint = QLabel("Pick a type, then drag on the\ntimeline to create a block\n(or click for a quick 1-hour block).")
+        hint = QLabel("Pick a type, then drag on the timeline\n(or click for a quick 1-hour block).")
         hint.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 10px;")
         al.addWidget(hint)
-        lay.addWidget(add_sec)
+        lay.addWidget(add_sec, 1)
 
         # ── Summary section ────────────────────────────────────────────────
         sum_sec = QWidget()
@@ -2749,12 +2789,12 @@ class SidebarWidget(QWidget):
         if selected:
             btn.setStyleSheet(f"""
                 QPushButton {{ background: {c}28; border: 1.5px solid {c}; color: {C_TEXT.name()};
-                font-weight: bold; padding: 4px 5px; border-radius: {RAD}px; font-size: 10px; }}
+                font-weight: bold; padding: 3px 4px; border-radius: 2px; font-size: 9px; }}
             """)
         else:
             btn.setStyleSheet(f"""
                 QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-                color: {C_MUTED.name()}; padding: 4px 5px; border-radius: {RAD}px; font-size: 10px; }}
+                color: {C_MUTED.name()}; padding: 3px 4px; border-radius: 2px; font-size: 9px; }}
                 QPushButton:hover {{ border-color: {C_BORDER2.name()}; color: {C_TEXT.name()}; }}
             """)
 
@@ -2909,10 +2949,7 @@ class WeekViewWidget(QWidget):
                 c  = QColor(b.get("color") or C_ACCENT.name())
                 bg = QColor(c.red(), c.green(), c.blue(), 52)
                 rr = max(3, min(RAD, rect.height() // 2, 8))
-                p.setPen(Qt.NoPen); p.setBrush(bg)
-                p.drawRoundedRect(rect, rr, rr)
-                # Crisp left accent (readable at tiny heights)
-                p.fillRect(QRect(rect.x(), by + 1, 2, max(bh - 2, 1)), c)
+                paint_schedule_block(p, rect, bg, c, radius=rr, accent_w=2)
                 if b["_btype"] == "user":
                     self._block_hits.append((rect, b["id"]))
                 if bh >= 26:
@@ -3664,24 +3701,7 @@ class AIPanel(QWidget):
             "date arithmetic is unreliable, and the app does it correctly. So for \"copy to "
             "Thursday\" pass to_date=\"Thursday\", NOT a date you counted out. "
             "Omit the date for the day on screen.\n\n"
-            "ACTIVITY TYPES — set each block's \"type\" to what the user will actually be "
-            "DOING during it (judge by the activity itself, not the blocks around it):\n"
-            "  assignments – homework/tasks that are due (worksheets, problem sets)\n"
-            "  project     – longer-term project or build work\n"
-            "  study       – focused studying / revision / reading. ONLY for real studying.\n"
-            "  extra       – extracurriculars, clubs, lessons, social or other commitments\n"
-            "  gaming      – Anime/Gaming and general downtime/relaxation — USE THIS FOR BREAKS\n"
-            "  exercise    – workouts, sports, walks (also fine for an active break)\n"
-            "  meals       – eating: breakfast / lunch / dinner / snacks\n"
-            "  sleep       – sleeping or naps\n"
-            "TYPE RULES (the model often gets these wrong — follow them):\n"
-            "  - A BREAK or REST between work is downtime → use \"gaming\" (or \"exercise\" "
-            "for a physical break, \"meals\" for a snack). NEVER label a break as \"study\", "
-            "\"assignments\", or \"project\".\n"
-            "  - A break between two study blocks is still a break, NOT study — don't copy the "
-            "surrounding block's type onto it.\n"
-            "  - When you split a study block into chunks with breaks, the focus chunks are "
-            "\"study\" and the breaks are \"gaming\" (pass break_type to split_block).\n\n"
+            + activity_type_prompt_block() + "\n\n"
             "SCHEDULE (day on screen)\n"
             "Google Calendar (READ-ONLY — you cannot move or delete these). Timed events are "
             "FIXED obstacles — schedule around them. All-day events (holidays, due dates, "
@@ -5385,11 +5405,11 @@ class MainWindow(QMainWindow):
                 except (TypeError, ValueError):
                     brk = 5
                 # Breaks are downtime, not a continuation of the work block — give them their
-                # own category (default gaming = Anime/Gaming) instead of inheriting the type.
-                btid = str(args.get("break_type") or "gaming")
+                # own category (default free = rest) instead of inheriting the type.
+                btid = str(args.get("break_type") or "free")
                 b_at = next((t for t in ACTIVITY_TYPES if t["id"] == btid), None)
                 if b_at is None:
-                    b_at = next((t for t in ACTIVITY_TYPES if t["id"] == "gaming"), ACTIVITY_TYPES[0])
+                    b_at = next((t for t in ACTIVITY_TYPES if t["id"] == "free"), ACTIVITY_TYPES[0])
                 s0, e0 = a["startMin"], a["endMin"]
                 segs, cur = [], s0
                 while cur < e0:
@@ -5570,7 +5590,7 @@ class MainWindow(QMainWindow):
 
                 # Ordered tasks: each gets its full focus time, split into chunks with breaks,
                 # flowing past anchors/meetings. Breaks do NOT count toward a task's minutes.
-                brk_t = _atype("gaming", "gaming")
+                brk_t = _atype("free", "free")
                 cursor, unplaced = ws, []
                 for t in raw_tasks[:12]:
                     if not isinstance(t, dict):
@@ -5635,7 +5655,7 @@ class MainWindow(QMainWindow):
                 tid  = str(args.get("type", "extra"))
                 at_e = next((x for x in ACTIVITY_TYPES if x["id"] == tid),
                             next(x for x in ACTIVITY_TYPES if x["id"] == "extra"))
-                brk_t = next((x for x in ACTIVITY_TYPES if x["id"] == "gaming"), ACTIVITY_TYPES[0])
+                brk_t = next((x for x in ACTIVITY_TYPES if x["id"] == "free"), ACTIVITY_TYPES[0])
                 # Resolve any pinned blocks (kept exactly where they are).
                 pin_args = args.get("pin") or []
                 if isinstance(pin_args, str):
