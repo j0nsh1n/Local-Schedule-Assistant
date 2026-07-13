@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
     QDialog, QFileDialog, QTimeEdit, QStackedWidget, QSizePolicy,
     QMessageBox, QMenu, QGridLayout, QProgressBar, QSystemTrayIcon,
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox, QFormLayout,
-    QGraphicsOpacityEffect,
+    QGraphicsOpacityEffect, QSplitter,
 )
 from PySide6.QtCore import (
     Qt, QTimer, QThread, Signal, QRect, QTime, QSharedMemory, QUrl,
@@ -310,12 +310,70 @@ def min_to_y(minutes: int) -> int:
 def y_to_min(y: int) -> int:
     return int(DAY_START + y / HOUR_PX * 60)
 
+# Calendar-block color recipe — chips / pickers must use the same alphas so a
+# selected activity type looks like the box that will land on the timeline.
+BLOCK_FILL_A = 52          # translucent body fill (0–255)
+BLOCK_OUTLINE_A = 160      # 1px outline around the tile
+BLOCK_FILL_CSS = BLOCK_FILL_A / 255.0
+BLOCK_OUTLINE_CSS = BLOCK_OUTLINE_A / 255.0
+
+def block_colors(hex_color: str) -> tuple:
+    """(accent solid QColor, translucent fill QColor) for a category hex."""
+    c = QColor(hex_color or C_ACCENT.name())
+    fill = QColor(c.red(), c.green(), c.blue(), BLOCK_FILL_A)
+    return c, fill
+
+def style_activity_type_chip(btn, at: dict, selected: bool, *, compact: bool = False):
+    """Style a type-picker chip to match the calendar block recipe:
+    solid left accent + translucent category fill + category-colored label when
+    selected; unselected chips still show a thin left accent so each type’s
+    calendar color is obvious before you pick it."""
+    c = at["color"]
+    # Sidebar (compact) and dialog chips — readable type labels without
+    # blowing out the grid (was 9px / 11px and felt tiny with 19 types).
+    pad = "5px 6px" if compact else "6px 8px"
+    fsz = "11px" if compact else "12px"
+    rad = "3px" if compact else f"{RAD}px"
+    if selected:
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {_rgba(c, BLOCK_FILL_CSS)};
+                border: 1px solid {_rgba(c, BLOCK_OUTLINE_CSS)};
+                border-left: 3px solid {c};
+                color: {c};
+                font-weight: bold;
+                padding: {pad};
+                border-radius: {rad};
+                font-size: {fsz};
+                text-align: left;
+            }}
+        """)
+    else:
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C_SURF2.name()};
+                border: 1px solid {C_BORDER.name()};
+                border-left: 3px solid {c};
+                color: {C_MUTED.name()};
+                padding: {pad};
+                border-radius: {rad};
+                font-size: {fsz};
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                background: {_rgba(c, BLOCK_FILL_CSS * 0.55)};
+                border-color: {_rgba(c, BLOCK_OUTLINE_CSS * 0.7)};
+                border-left: 3px solid {c};
+                color: {C_TEXT.name()};
+            }}
+        """)
+
 def paint_schedule_block(p: QPainter, rect: QRect, fill: QColor, accent: QColor,
                          radius: int = 0, accent_w: int = 3, outline: bool = False):
     """Square planner tiles (deliberately not GCal-style rounded cards): solid fill,
     1px outline, crisp left accent bar. `radius` is ignored (kept for call-site
     compatibility)."""
-    p.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), 160), 1))
+    p.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), BLOCK_OUTLINE_A), 1))
     p.setBrush(fill)
     p.drawRect(rect.adjusted(0, 0, -1, -1))
     if accent_w > 0:
@@ -691,13 +749,16 @@ DEFAULT_SETTINGS = {
     "model":            DEFAULT_MODEL,
     "notify_on":        True,
     "notify_lead_min":  0,        # alert this many minutes before a block starts (0 = at start)
-    "notify_end_chime": True,     # v4.0: short chime when a block ends
+    "notify_end_chime": False,    # off by default — start alerts only
     "dnd_override":     True,
     "plan_day_start":   "08:00",  # default waking window the planner schedules within
     "plan_day_end":     "22:00",
     "ollama_autostart": False,    # keep Ollama off at launch unless the user opts in
     "update_check_on":  True,     # check GitHub for a newer release on launch + daily
     "calendar_ids":     "primary",  # v4.0: comma-separated Google calendar IDs
+    "body_split":       [],       # [calendar_px, sidebar_px, ai_px] — empty = defaults
+    "sidebar_split":    [],       # [add_activity_px, summary_px] — empty = defaults
+    "ai_panel_w":       340,      # remembered AI width when the panel is open
     "temperature":      0.3,
     "num_ctx":          16384,
     # Optional buffer: at Windows sign-in, wait this many seconds before building the
@@ -2366,8 +2427,7 @@ class TimelineWidget(QWidget):
             dur  = blk["endMin"] - blk["startMin"]
             x, y, h = rect.x(), rect.y(), rect.height()
 
-            c    = QColor(blk.get("color") or C_ACCENT.name())
-            bg   = QColor(c.red(), c.green(), c.blue(), 52)
+            c, bg = block_colors(blk.get("color") or C_ACCENT.name())
             rr   = max(4, min(RAD + 2, rect.height() // 2, 10))
             dragging = (self._preview and blk.get("_btype") == "user"
                         and blk["id"] == self._preview[0])
@@ -2671,18 +2731,7 @@ class AddActivityDialog(QDialog):
         lay.addLayout(brow)
 
     def _apply_type_style(self, btn, at, selected):
-        c = at["color"]
-        if selected:
-            btn.setStyleSheet(f"""
-                QPushButton {{ background: {c}30; border: 1.5px solid {c}; color: {C_TEXT.name()};
-                font-weight: bold; padding: 5px 4px; border-radius: {RAD}px; font-size: 11px; }}
-            """)
-        else:
-            btn.setStyleSheet(f"""
-                QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-                color: {C_MUTED.name()}; padding: 5px 4px; border-radius: {RAD}px; font-size: 11px; }}
-                QPushButton:hover {{ border-color: {C_BORDER2.name()}; color: {C_TEXT.name()}; }}
-            """)
+        style_activity_type_chip(btn, at, selected, compact=False)
 
     def _pick(self, type_id):
         self._sel = type_id
@@ -2715,15 +2764,30 @@ class AddActivityDialog(QDialog):
         self.result_deleted = True
         self.accept()
 
+def _splitter_qss() -> str:
+    """Thin, theme-aware drag handles between resizable sections."""
+    return f"""
+        QSplitter::handle {{
+            background: {C_BORDER.name()};
+        }}
+        QSplitter::handle:hover {{
+            background: {C_ACCENT.name()};
+        }}
+        QSplitter::handle:horizontal {{ width: 4px; }}
+        QSplitter::handle:vertical   {{ height: 4px; }}
+    """
+
 # ══════════════════════════════════════════════════════════════════════════
-#  SIDEBAR  (activity type picker + daily summary)
+#  SIDEBAR  (activity type picker + daily summary — vertically resizable)
 # ══════════════════════════════════════════════════════════════════════════
 class SidebarWidget(QWidget):
     type_selected = Signal(str)
+    split_changed = Signal()   # sizes dragged — MainWindow persists
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(210)
+        self.setMinimumWidth(170)
+        self.setMaximumWidth(340)
         self.setStyleSheet(f"""
             QWidget {{ background: {C_SURFACE.name()}; }}
             QLabel  {{ background: transparent; color: {C_TEXT.name()}; }}
@@ -2732,24 +2796,31 @@ class SidebarWidget(QWidget):
         self._type_btns: Dict[str, tuple] = {}
 
         lay = QVBoxLayout(self)
-        lay.setSpacing(0); lay.setContentsMargins(0,0,0,0)
+        lay.setSpacing(0); lay.setContentsMargins(0, 0, 0, 0)
 
-        # ── Add activity section (scrollable type list) ────────────────────
+        self._split = QSplitter(Qt.Vertical)
+        self._split.setChildrenCollapsible(False)
+        self._split.setHandleWidth(5)
+        self._split.setStyleSheet(_splitter_qss())
+
+        # ── Add activity (type picker scrolls; height set by splitter) ─────
         add_sec = QWidget()
-        add_sec.setStyleSheet(f"border-bottom: 1px solid {C_BORDER.name()};")
+        add_sec.setMinimumHeight(90)
         al = QVBoxLayout(add_sec)
-        al.setContentsMargins(12, 12, 12, 10); al.setSpacing(6)
+        al.setContentsMargins(12, 12, 12, 8); al.setSpacing(6)
 
         hl = QLabel("ADD ACTIVITY")
-        hl.setStyleSheet(f"font-size: 9px; font-weight: bold; letter-spacing: 1px; color: {C_MUTED.name()};")
+        hl.setStyleSheet(
+            f"font-size: 9px; font-weight: bold; letter-spacing: 1px; color: {C_MUTED.name()};")
         al.addWidget(hl)
 
         grid_host = QWidget()
-        grid = QGridLayout(grid_host); grid.setSpacing(4); grid.setContentsMargins(0,0,0,0)
+        grid = QGridLayout(grid_host); grid.setSpacing(5); grid.setContentsMargins(0, 0, 0, 0)
         for i, at in enumerate(ACTIVITY_TYPES):
             btn = QPushButton(f"{at['icon']} {at['label']}")
             btn.setCheckable(True)
             btn.setChecked(at["id"] == "study")
+            btn.setToolTip(at["label"])
             self._set_chip_style(btn, at, at["id"] == "study")
             btn.clicked.connect(lambda _, aid=at["id"]: self._select(aid))
             self._type_btns[at["id"]] = (btn, at)
@@ -2758,45 +2829,56 @@ class SidebarWidget(QWidget):
         type_scroll.setWidgetResizable(True)
         type_scroll.setFrameShape(QFrame.Shape.NoFrame)
         type_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        type_scroll.setMinimumHeight(200)
-        type_scroll.setMaximumHeight(280)
-        type_scroll.setStyleSheet(
-            f"QScrollArea {{ background: transparent; border: none; }}")
+        type_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         type_scroll.setWidget(grid_host)
         al.addWidget(type_scroll, 1)
 
-        hint = QLabel("Pick a type, then drag on the timeline\n(or click for a quick 1-hour block).")
+        hint = QLabel("Pick a type, then drag the timeline\n(or click for a quick 1-hour block).")
         hint.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 10px;")
         al.addWidget(hint)
-        lay.addWidget(add_sec, 1)
+        self._split.addWidget(add_sec)
 
-        # ── Summary section ────────────────────────────────────────────────
+        # ── Summary — tight stack like the original (no stretched gaps) ────
         sum_sec = QWidget()
+        sum_sec.setMinimumHeight(80)
         sl = QVBoxLayout(sum_sec)
-        sl.setContentsMargins(12, 14, 12, 8); sl.setSpacing(6)
+        sl.setContentsMargins(12, 12, 12, 8); sl.setSpacing(6)
 
         sh = QLabel("TODAY'S SUMMARY")
-        sh.setStyleSheet(f"font-size: 9px; font-weight: bold; letter-spacing: 1px; color: {C_MUTED.name()};")
+        sh.setStyleSheet(
+            f"font-size: 9px; font-weight: bold; letter-spacing: 1px; color: {C_MUTED.name()};")
         sl.addWidget(sh)
 
-        self._sum_area = QVBoxLayout(); self._sum_area.setSpacing(6)
-        sl.addLayout(self._sum_area)
-        lay.addWidget(sum_sec)
-        lay.addStretch()
+        sum_scroll = QScrollArea()
+        sum_scroll.setWidgetResizable(True)
+        sum_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sum_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sum_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        sum_inner = QWidget()
+        self._sum_area = QVBoxLayout(sum_inner)
+        self._sum_area.setContentsMargins(0, 0, 0, 0)
+        self._sum_area.setSpacing(6)   # same as original
+        self._sum_area.setAlignment(Qt.AlignTop)
+        self._sum_area.addStretch()
+        sum_scroll.setWidget(sum_inner)
+        sl.addWidget(sum_scroll, 1)
+        self._split.addWidget(sum_sec)
+
+        self._split.setStretchFactor(0, 1)
+        self._split.setStretchFactor(1, 1)
+        self._split.setSizes([220, 280])
+        self._split.splitterMoved.connect(lambda *_: self.split_changed.emit())
+        lay.addWidget(self._split)
+
+    def split_sizes(self) -> list:
+        return list(self._split.sizes())
+
+    def apply_split_sizes(self, sizes):
+        if isinstance(sizes, (list, tuple)) and len(sizes) >= 2 and all(int(s) > 0 for s in sizes[:2]):
+            self._split.setSizes([int(sizes[0]), int(sizes[1])])
 
     def _set_chip_style(self, btn, at, selected):
-        c = at["color"]
-        if selected:
-            btn.setStyleSheet(f"""
-                QPushButton {{ background: {c}28; border: 1.5px solid {c}; color: {C_TEXT.name()};
-                font-weight: bold; padding: 3px 4px; border-radius: 2px; font-size: 9px; }}
-            """)
-        else:
-            btn.setStyleSheet(f"""
-                QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-                color: {C_MUTED.name()}; padding: 3px 4px; border-radius: 2px; font-size: 9px; }}
-                QPushButton:hover {{ border-color: {C_BORDER2.name()}; color: {C_TEXT.name()}; }}
-            """)
+        style_activity_type_chip(btn, at, selected, compact=True)
 
     def _select(self, tid):
         self._sel = tid
@@ -2828,8 +2910,11 @@ class SidebarWidget(QWidget):
             mins = totals.get(cat["id"], 0)
             if not mins: continue
             row = QWidget()
+            # Fixed size so the VBox doesn't stretch rows apart when the
+            # section is taller than the content (matches original packing).
+            row.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             rl  = QVBoxLayout(row)
-            rl.setContentsMargins(0,0,0,0); rl.setSpacing(3)
+            rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(3)
 
             top = QHBoxLayout(); top.setSpacing(6)
             dot = QLabel("●"); dot.setStyleSheet(f"color: {cat['color']}; font-size: 9px;")
@@ -2849,6 +2934,7 @@ class SidebarWidget(QWidget):
             """)
             rl.addWidget(bar)
             self._sum_area.addWidget(row)
+        self._sum_area.addStretch()   # leftover space below the list, not between rows
 
 # ══════════════════════════════════════════════════════════════════════════
 #  WEEK VIEW  (7 columns Mon–Sun, whole day scaled per column; read-mostly v1:
@@ -2946,8 +3032,7 @@ class WeekViewWidget(QWidget):
                 bw = area_w / b["_tcols"]
                 bx = int(x0 + 3 + b["_col"] * bw)
                 rect = QRect(bx, by, int(bw - 2), bh)
-                c  = QColor(b.get("color") or C_ACCENT.name())
-                bg = QColor(c.red(), c.green(), c.blue(), 52)
+                c, bg = block_colors(b.get("color") or C_ACCENT.name())
                 rr = max(3, min(RAD, rect.height() // 2, 8))
                 paint_schedule_block(p, rect, bg, c, radius=rr, accent_w=2)
                 if b["_btype"] == "user":
@@ -3117,10 +3202,10 @@ class MonthViewWidget(QWidget):
                 for i, ev in enumerate(shown):
                     cy   = y + 27 + i * 17
                     chip = QRect(x + 4, int(cy), int(cw) - 8, 14)
-                    col  = QColor(ev.get("color") or C_ACCENT.name())
+                    col, bg = block_colors(ev.get("color") or C_ACCENT.name())
                     if not in_month:
-                        col.setAlpha(120)
-                    bg = QColor(col); bg.setAlpha(45)
+                        col = QColor(col.red(), col.green(), col.blue(), 120)
+                        bg  = QColor(col.red(), col.green(), col.blue(), max(28, BLOCK_FILL_A // 2))
                     p.setPen(Qt.NoPen); p.setBrush(bg)
                     p.drawRoundedRect(chip, 4, 4)
                     p.setPen(col)
@@ -3247,12 +3332,11 @@ class AIPanel(QWidget):
         self._loop_msgs: List[Dict] = []  # running conversation for the tool loop
         self._depth = 0                   # tool-round counter (loop guard)
 
-        # Width is animated when the panel opens/closes (MainWindow._toggle_ai).
+        # Preferred width when the body splitter shows this panel; user can drag.
         self._panel_w = 340
         self.setObjectName("aiPanel")
-        self.setMinimumWidth(0)
-        self.setMaximumWidth(self._panel_w)
-        self.setFixedWidth(self._panel_w)
+        self.setMinimumWidth(220)
+        self.setMaximumWidth(560)
         self.setStyleSheet(
             f"#aiPanel {{ background: {C_SURFACE.name()}; color: {C_TEXT.name()}; "
             f"border-left: 1px solid {C_BORDER.name()}; }}")
@@ -4198,8 +4282,9 @@ class SettingsDialog(QDialog):
         self.lead_sb.setValue(int(settings.get("notify_lead_min", 0)))
         n.addRow("Lead time", self.lead_sb)
         self.end_chime_cb = QCheckBox("Chime when a block ends")
-        self.end_chime_cb.setChecked(bool(settings.get("notify_end_chime", True)))
-        self.end_chime_cb.setToolTip("Soft end-of-block chime (same sound as start alerts)")
+        self.end_chime_cb.setChecked(bool(settings.get("notify_end_chime", False)))
+        self.end_chime_cb.setToolTip(
+            "Optional: soft sound when a block ends (off by default; start alerts stay separate)")
         n.addRow("End chime", self.end_chime_cb)
         self.dnd_cb = QCheckBox("Break through Do Not Disturb / Focus Assist")
         self.dnd_cb.setChecked(bool(settings.get("dnd_override")))
@@ -4446,7 +4531,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._build_header())
 
         body    = QWidget()
-        body_l  = QHBoxLayout(body); body_l.setSpacing(0); body_l.setContentsMargins(0,0,0,0)
+        body_l  = QHBoxLayout(body); body_l.setSpacing(0); body_l.setContentsMargins(0, 0, 0, 0)
 
         # Day view — all-day banner + timeline in a scroll area
         self._scroll = QScrollArea()
@@ -4492,11 +4577,11 @@ class MainWindow(QMainWindow):
         self._view_stack.addWidget(self._week_view)    # 1 — week
         self._view_stack.addWidget(self._month_view)   # 2 — month
         self._view_stack.addWidget(self._year_scroll)  # 3 — year
-        body_l.addWidget(self._view_stack, 1)
+        self._view_stack.setMinimumWidth(320)
 
-        # Sidebar
+        # Sidebar (Add Activity ↔ Summary sizes are their own vertical splitter)
         self._sidebar = SidebarWidget()
-        body_l.addWidget(self._sidebar)
+        self._sidebar.split_changed.connect(self._persist_layout_splits)
 
         # AI Panel (hidden by default) — wired to edit the schedule via tools
         self._ai_panel = AIPanel(self._ai_ctx)
@@ -4508,9 +4593,35 @@ class MainWindow(QMainWindow):
         self._ai_panel.on_turn_start = self._ai_turn_start
         self._ai_panel.on_turn_end = self._ai_turn_end
         self._ai_panel.on_undo = self._ai_undo_last
-        self._ai_panel.hide()
-        body_l.addWidget(self._ai_panel)
+        aw = int(self._settings.get("ai_panel_w", 340) or 340)
+        self._ai_panel._panel_w = max(220, min(560, aw))
 
+        # Horizontal splitter: calendar | sidebar | AI — drag handles to resize
+        self._body_split = QSplitter(Qt.Horizontal)
+        self._body_split.setHandleWidth(5)
+        self._body_split.setStyleSheet(_splitter_qss())
+        self._body_split.addWidget(self._view_stack)
+        self._body_split.addWidget(self._sidebar)
+        self._body_split.addWidget(self._ai_panel)
+        self._body_split.setStretchFactor(0, 1)
+        self._body_split.setStretchFactor(1, 0)
+        self._body_split.setStretchFactor(2, 0)
+        self._body_split.setCollapsible(0, False)  # calendar always visible
+        self._body_split.setCollapsible(1, False)  # sidebar always visible
+        self._body_split.setCollapsible(2, True)   # AI may collapse to 0 when closed
+        # Restore saved sizes (AI starts hidden at width 0)
+        saved = self._settings.get("body_split") or []
+        if isinstance(saved, list) and len(saved) >= 2:
+            cal_w = max(320, int(saved[0]) if int(saved[0]) > 0 else 900)
+            side_w = max(170, min(340, int(saved[1]) if int(saved[1]) > 0 else 210))
+        else:
+            cal_w, side_w = 900, 210
+        self._body_split.setSizes([cal_w, side_w, 0])
+        self._ai_panel.hide()
+        self._body_split.splitterMoved.connect(self._on_body_split_moved)
+        # Sidebar internal split (types vs summary)
+        self._sidebar.apply_split_sizes(self._settings.get("sidebar_split") or [])
+        body_l.addWidget(self._body_split)
         lay.addWidget(body, 1)
 
         # Status bar — status text on the left, a hidden "update available" pill
@@ -4944,26 +5055,53 @@ class MainWindow(QMainWindow):
         self._ai_undo_invalidate()
         self._refresh_view()
 
+    # ── Layout splitters (calendar | sidebar | AI, and types | summary) ────
+    def _on_body_split_moved(self, *_):
+        sizes = self._body_split.sizes()
+        if self._ai_visible and len(sizes) >= 3 and sizes[2] > 0:
+            self._ai_panel._panel_w = sizes[2]
+        self._persist_layout_splits()
+
+    def _persist_layout_splits(self):
+        """Remember section sizes so the next launch looks the same."""
+        try:
+            sizes = list(self._body_split.sizes())
+            # Always store AI preferred width even when the panel is closed (0)
+            if self._ai_visible and len(sizes) >= 3 and sizes[2] > 0:
+                self._settings["ai_panel_w"] = sizes[2]
+            elif not self._ai_visible:
+                # Keep last open width; body_split[2] is 0 while hidden
+                sizes = [sizes[0], sizes[1],
+                         int(self._settings.get("ai_panel_w", 340) or 340)]
+            self._settings["body_split"] = sizes
+            self._settings["sidebar_split"] = self._sidebar.split_sizes()
+            save_settings(self._settings)
+        except Exception:
+            pass
+
     # ── AI panel ───────────────────────────────────────────────────────────
     def _toggle_ai(self):
-        """Show/hide the AI panel. Width animation was removed — resizing forces a
-        full timeline relayout every frame and stutters on the day/week views."""
+        """Show/hide the AI panel inside the body splitter (drag the handle to resize)."""
         self._ai_visible = not self._ai_visible
         self._ai_btn.setChecked(self._ai_visible)
         panel = self._ai_panel
-        target = getattr(panel, "_panel_w", 340)
         if getattr(self, "_ai_slide", None) is not None:
             try:
                 self._ai_slide.stop()
             except Exception:
                 pass
             self._ai_slide = None
-        # Instant layout size (no multi-frame reflow), light opacity on the panel only
-        panel.setMinimumWidth(0)
-        panel.setMaximumWidth(target)
-        panel.setFixedWidth(target)
+        sizes = list(self._body_split.sizes())
+        cal = sizes[0] if sizes else 900
+        side = sizes[1] if len(sizes) > 1 else 210
         if self._ai_visible:
+            aw = int(self._settings.get("ai_panel_w", 340) or 340)
+            aw = max(220, min(560, aw, getattr(panel, "_panel_w", aw)))
+            panel.setMinimumWidth(220)
+            panel.setMaximumWidth(560)
             panel.show()
+            # Steal width from the calendar; keep sidebar as-is
+            self._body_split.setSizes([max(320, cal - aw), side, aw])
             eff = QGraphicsOpacityEffect(panel)
             panel.setGraphicsEffect(eff)
             eff.setOpacity(0.0)
@@ -4977,9 +5115,17 @@ class MainWindow(QMainWindow):
             anim.finished.connect(_clear)
             self._ai_slide = anim
             anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+            self._persist_layout_splits()
         else:
+            if len(sizes) >= 3 and sizes[2] > 0:
+                self._settings["ai_panel_w"] = sizes[2]
+                panel._panel_w = sizes[2]
+            panel.setMinimumWidth(0)   # allow full collapse while hidden
             panel.hide()
             panel.setGraphicsEffect(None)
+            # Return AI width to the calendar
+            self._body_split.setSizes([cal + (sizes[2] if len(sizes) > 2 else 0), side, 0])
+            self._persist_layout_splits()
 
     def _ai_ctx(self):
         now = datetime.now()
@@ -6263,8 +6409,8 @@ class MainWindow(QMainWindow):
                             f"▶ {b['title']}",
                             f"{when}{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
 
-        # End-of-block chime (v4.0) — sound-only by default, same cross-process claim
-        if self._settings.get("notify_end_chime", True):
+        # End-of-block chime — opt-in only (default off). Same cross-process claim as starts.
+        if self._settings.get("notify_end_chime", False):
             for b in self._all_acts:
                 if b.get("date") != today:
                     continue
@@ -6276,7 +6422,7 @@ class MainWindow(QMainWindow):
                     self._notified_ends.add(ekey)
                     if claim_block_alert(today, f"end_{b['id']}", em):
                         self._play_alert_sound()
-                        # Quiet tray toast if start-notify is off; still chime above
+                        # Toast only if start-notify / DND path is active; sound already played
                         if self._notify_on or self._dnd_override:
                             self._alert(
                                 f"■ {b['title']} ended",
