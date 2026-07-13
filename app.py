@@ -53,7 +53,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.7.0"
+__version__  = "3.7.1"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -2721,6 +2721,7 @@ class AIPanel(QWidget):
             "chat": [{"role": "assistant", "content": AI_GREETING}],
             "plan": [], "suggest": []}
         self._thread: Optional[OllamaThread] = None
+        self._check_thread: Optional[OllamaCheckThread] = None  # status poll (v3.7.1)
         self._cur_text  = ""
         self._ollama_up = False
         self.execute_tool = None          # set by MainWindow: fn(name, args) -> str
@@ -2920,8 +2921,17 @@ class AIPanel(QWidget):
                 f"QPushButton:hover {{ color:{C_TEXT.name()}; }}")
 
     def _poll_ollama(self):
-        t = OllamaCheckThread(self)
+        """Kick a status check. Hold the QThread ref until finished — dropping it
+        left the only Python reference dying during main-thread GC while the C++
+        thread was still mid-request (segfault in crash.log 2026-07-07). Same
+        pattern as MainWindow._check_for_update / _update_thread."""
+        if self._check_thread is not None and self._check_thread.isRunning():
+            return
+        t = OllamaCheckThread()                       # unparented; ref held below
         t.result.connect(self._on_ollama)
+        t.finished.connect(t.deleteLater)
+        t.finished.connect(lambda: setattr(self, "_check_thread", None))
+        self._check_thread = t
         t.start()
 
     def _on_ollama(self, ok: bool):
