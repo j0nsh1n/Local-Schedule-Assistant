@@ -248,6 +248,7 @@ Everything lives in `~/.daily-scheduler/` — plain JSON you can back up or insp
 |------|---------|
 | `activities.json` | your scheduled blocks |
 | `settings.json` | app settings |
+| `chat.json` | AI assistant transcript (restored after a crash; local only) |
 | `credentials.json` / `token.json` | Google OAuth (only if you connect Calendar) |
 | `startup.log` | launch diagnostics (timestamp, pid, launch flags — never schedule data) |
 

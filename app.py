@@ -28,6 +28,7 @@ import getpass
 import platform
 import subprocess
 import re
+import time
 import traceback
 import faulthandler
 import calendar as _cal
@@ -53,7 +54,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.7.1"
+__version__  = "3.8.0"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -70,6 +71,8 @@ CREDS_FILE = DATA_DIR / "credentials.json"
 TOKEN_FILE = DATA_DIR / "token.json"
 CRASH_LOG  = DATA_DIR / "crash.log"   # native fatal faults (faulthandler)
 ERROR_LOG  = DATA_DIR / "app.log"     # unhandled Python tracebacks (sys.excepthook)
+CHAT_FILE  = DATA_DIR / "chat.json"   # v3.8.0: AI panel transcript (crash-proof)
+CHAT_SAVE_MIN_SEC = 0.4               # throttle mid-stream writes
 DATA_DIR.mkdir(exist_ok=True)
 
 # ── Layout constants ───────────────────────────────────────────────────────
@@ -1002,6 +1005,168 @@ def strip_think(s: str) -> str:
     return s[:i] if i != -1 else s
 
 
+# ── AI chat transcript (v3.8.0) ────────────────────────────────────────────
+# Survives OOM / process kill so a conversation isn't lost mid-stream. Local
+# only under DATA_DIR — never log contents (may include schedule talk).
+_chat_save_last = 0.0
+
+def _default_chat_histories() -> Dict[str, List[Dict]]:
+    return {
+        "chat": [{"role": "assistant", "content": AI_GREETING}],
+        "plan": [],
+        "suggest": [],
+    }
+
+def load_chat_histories() -> Dict[str, List[Dict]]:
+    """Best-effort restore of the AI panel transcript. Falls back to a fresh
+    greeting on any error / missing / corrupt file."""
+    out = _default_chat_histories()
+    try:
+        if not CHAT_FILE.exists():
+            return out
+        raw = json.loads(CHAT_FILE.read_text(encoding="utf-8"))
+        modes = raw.get("modes") if isinstance(raw, dict) else None
+        if not isinstance(modes, dict):
+            return out
+        for key in ("chat", "plan", "suggest"):
+            msgs = modes.get(key)
+            if not isinstance(msgs, list):
+                continue
+            clean = []
+            for m in msgs:
+                if not isinstance(m, dict):
+                    continue
+                role = m.get("role")
+                content = m.get("content")
+                if role in ("user", "assistant", "tool_note", "error") and isinstance(content, str):
+                    clean.append({"role": role, "content": content})
+            if clean:
+                out[key] = clean
+    except Exception:
+        pass
+    return out
+
+def save_chat_histories(history: Dict[str, List[Dict]], *, force: bool = False) -> bool:
+    """Write the in-memory AI histories to CHAT_FILE. Throttled unless force=True
+    (turn boundaries / user send always force). Never raises."""
+    global _chat_save_last
+    try:
+        now = time.monotonic()
+        if not force and (now - _chat_save_last) < CHAT_SAVE_MIN_SEC:
+            return False
+        _chat_save_last = now
+        payload = {
+            "version": 1,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "app_version": APP_VERSION,
+            "modes": {
+                key: [{"role": m.get("role"), "content": m.get("content", "")}
+                      for m in (history.get(key) or [])
+                      if isinstance(m, dict) and m.get("role") in
+                      ("user", "assistant", "tool_note", "error")]
+                for key in ("chat", "plan", "suggest")
+            },
+        }
+        CHAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CHAT_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(CHAT_FILE)
+        return True
+    except Exception:
+        return False
+
+
+# ── Memory preflight / friendly OOM text (v3.8.0) ──────────────────────────
+def free_ram_gb() -> Optional[float]:
+    """Best-effort free/available system RAM in GiB, or None if unknown.
+    This is NOT free VRAM — only a rough signal for soft warnings."""
+    try:
+        if platform.system() == "Linux":
+            avail_kb = None
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        avail_kb = int(line.split()[1]); break
+                    if line.startswith("MemFree:") and avail_kb is None:
+                        avail_kb = int(line.split()[1])
+            if avail_kb is not None:
+                return avail_kb / (1024 * 1024)
+        elif platform.system() == "Windows":
+            import ctypes
+
+            class _MEM(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            st = _MEM()
+            st.dwLength = ctypes.sizeof(_MEM)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return st.ullAvailPhys / (1024 ** 3)
+    except Exception:
+        pass
+    return None
+
+def model_need_gb(model: str) -> Optional[float]:
+    """Rough GB need from MODEL_PROFILES.vram (takes the highest number in the
+    string, e.g. '~13–14 GB' → 14). None if unlisted / unparseable."""
+    p = model_profile(model)
+    if not p:
+        return None
+    nums = re.findall(r"(\d+(?:\.\d+)?)", p.get("vram") or "")
+    if not nums:
+        return None
+    return max(float(n) for n in nums)
+
+def memory_warning_for(model: str) -> str:
+    """Soft preflight blurb, or '' if no concern / unknown. Never hard-blocks."""
+    need = model_need_gb(model)
+    free = free_ram_gb()
+    if need is None or free is None:
+        return ""
+    # Only warn when free system RAM is clearly under the model's typical footprint.
+    # (Free RAM ≠ free VRAM — wording makes that explicit.)
+    if free >= need * 0.9:
+        return ""
+    return (
+        f"Heads-up: about {free:.0f} GB system RAM free, and '{model}' typically wants "
+        f"~{need:.0f} GB of GPU memory. Free RAM is not the same as free VRAM — if the "
+        f"GPU is busy (games, browser, another model), the model may get killed mid-reply. "
+        f"Close heavy apps or switch to a smaller model (e.g. qwen3:14b)."
+    )
+
+def friendly_stream_error(exc: BaseException, *, got_tokens: bool, model: str) -> str:
+    """Human text for mid-stream / connection failures (OOM, server death, etc.)."""
+    name = type(exc).__name__
+    low = f"{name}: {exc}".lower()
+    oomish = any(k in low for k in (
+        "connection", "reset", "broken pipe", "chunked", "remote", "aborted",
+        "eof", "protocol", "forcibly closed", "remotedisconnected",
+    ))
+    if got_tokens or oomish:
+        return (
+            f"The reply was cut off mid-stream"
+            f"{' after the model started answering' if got_tokens else ''}.\n\n"
+            f"Most often the model process was killed for memory (OOM) or Ollama "
+            f"restarted. Try:\n"
+            f"  • Unload (⏏) and send again\n"
+            f"  • A smaller model (qwen3:14b is the roomy daily driver)\n"
+            f"  • Close other GPU apps, then ▶ start Ollama again\n\n"
+            f"(Model was '{model}'. Technical: {name})"
+        )
+    return (
+        "Can't reach Ollama. Click the ▶ button to start it,\n"
+        "or run 'ollama serve' in a terminal."
+    )
+
+
 def unload_ollama_model(model):
     """Unload a model from memory but keep the Ollama server running.
     Uses keep_alive=0, the documented way to free VRAM/RAM immediately."""
@@ -1074,6 +1239,7 @@ class OllamaThread(QThread):
     def stop(self): self._stop = True
 
     def run(self):
+        got_tokens = False
         try:
             payload = {"model": self.model, "messages": self.messages, "stream": True,
                        "options": {"num_ctx": self.num_ctx,
@@ -1118,6 +1284,7 @@ class OllamaThread(QThread):
                         vis = strip_think(raw)
                         if len(vis) > sent:
                             self.token.emit(vis[sent:]); sent = len(vis)
+                            got_tokens = True
                     if msg.get("tool_calls"):
                         calls.extend(msg["tool_calls"])
                     if data.get("done"): break
@@ -1127,16 +1294,23 @@ class OllamaThread(QThread):
                 self.tool_calls.emit(calls)
             else:
                 self.done.emit()
-        except requests.exceptions.ConnectionError:
-            self.error.emit("Can't reach Ollama. Click the ▶ button to start it,\n"
-                            "or run 'ollama serve' in a terminal.")
         except requests.exceptions.Timeout:
             self.error.emit(
                 f"Ollama didn't respond in time. If '{self.model}' was cold-loading "
                 f"into VRAM it may be ready now — try sending your message again. "
                 f"A smaller model also loads (and answers) faster.")
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ContentDecodingError,
+                BrokenPipeError, ConnectionResetError) as ex:
+            self.error.emit(friendly_stream_error(ex, got_tokens=got_tokens, model=self.model))
         except Exception as ex:
-            self.error.emit(str(ex))
+            # Mid-stream death often surfaces as a generic RequestException /
+            # ProtocolError once the runner is OOM-killed.
+            if got_tokens:
+                self.error.emit(friendly_stream_error(ex, got_tokens=True, model=self.model))
+            else:
+                self.error.emit(str(ex))
 
 # ── AI tools — let the model edit the schedule directly ────────────────────
 AI_TOOLS = [
@@ -2717,13 +2891,13 @@ class AIPanel(QWidget):
         self.num_ctx     = DEFAULT_SETTINGS["num_ctx"]
         self.on_model_edited = None       # set by MainWindow to persist model changes
         self.mode       = "chat"
-        self.history: Dict[str, List[Dict]] = {
-            "chat": [{"role": "assistant", "content": AI_GREETING}],
-            "plan": [], "suggest": []}
+        # Restore last transcript (v3.8.0) so an OOM/kill doesn't eat the chat.
+        self.history: Dict[str, List[Dict]] = load_chat_histories()
         self._thread: Optional[OllamaThread] = None
         self._check_thread: Optional[OllamaCheckThread] = None  # status poll (v3.7.1)
         self._cur_text  = ""
         self._ollama_up = False
+        self._mem_warned: set = set()     # models we already soft-warned this session
         self.execute_tool = None          # set by MainWindow: fn(name, args) -> str
         self.on_turn_start = None         # set by MainWindow: snapshot schedule for undo
         self.on_turn_end = None           # set by MainWindow: unlock Undo, drop no-op snapshots
@@ -3051,6 +3225,21 @@ class AIPanel(QWidget):
         self._msgs_view.setHtml(html)
         self._msgs_view.verticalScrollBar().setValue(self._msgs_view.verticalScrollBar().maximum())
 
+    def _persist_chat(self, *, force: bool = False):
+        """Best-effort write of the transcript (throttled mid-stream)."""
+        save_chat_histories(self.history, force=force)
+
+    def _maybe_memory_warning(self):
+        """Soft, once-per-model-per-session note before a generate. Never blocks."""
+        if self.model in self._mem_warned:
+            return
+        warn = memory_warning_for(self.model)
+        if not warn:
+            return
+        self._mem_warned.add(self.model)
+        self.history[self.mode].append({"role": "error", "content": warn})
+        self._persist_chat(force=True)
+
     def _sys_prompt(self):
         ctx = self.get_ctx()
         p = (
@@ -3229,6 +3418,7 @@ class AIPanel(QWidget):
         if not txt: return
         self._inp.clear()
         self.history[self.mode].append({"role": "user", "content": txt})
+        self._persist_chat(force=True)
         self._render(); self._generate(txt)
 
     def _do_undo(self):
@@ -3242,11 +3432,13 @@ class AIPanel(QWidget):
         """Every way a turn finishes (final text, error, round limit, Stop) funnels
         here so MainWindow can unlock Undo exactly once per turn."""
         self._thinking.hide(); self._stop_btn.hide()
+        self._persist_chat(force=True)
         if callable(self.on_turn_end):
             self.on_turn_end()
 
     def _generate(self, user_msg):
         if self._thread and self._thread.isRunning(): return
+        self._maybe_memory_warning()
         if callable(self.on_turn_start):   # let MainWindow snapshot the schedule for undo
             self.on_turn_start()
         hist = [m for m in self.history[self.mode] if m["role"] in ("user","assistant")]
@@ -3258,6 +3450,7 @@ class AIPanel(QWidget):
         self._loop_msgs = msgs
         self._depth     = 0
         self._thinking.show(); self._stop_btn.show()
+        self._persist_chat(force=True)
         self._spawn_thread()
 
     def _effective_temp(self):
@@ -3295,6 +3488,7 @@ class AIPanel(QWidget):
             self._loop_msgs.append({"role": "tool", "tool_name": name,
                                     "name": name, "content": str(result)})
         self._render()
+        self._persist_chat(force=True)
         self._depth += 1
         if self._depth >= MAX_TOOL_ROUNDS:   # guard against tool-call loops
             self._turn_ended()
@@ -3313,6 +3507,8 @@ class AIPanel(QWidget):
         else:
             self.history[self.mode][-1]["content"] = self._cur_text
             self._render(); self._thinking.hide()
+        # Mid-stream crash insurance (throttled).
+        self._persist_chat(force=False)
 
     def _on_done(self):
         # Small models sometimes print the tool call as text (<|python_tag|>, ``` fences,
@@ -3345,6 +3541,7 @@ class AIPanel(QWidget):
 
     def _stop(self):
         if self._thread: self._thread.stop()
+        self._persist_chat(force=True)
 
 # ══════════════════════════════════════════════════════════════════════════
 #  SETUP SCREEN
