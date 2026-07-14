@@ -327,13 +327,21 @@ def style_activity_type_chip(btn, at: dict, selected: bool, *, compact: bool = F
     """Style a type-picker chip to match the calendar block recipe:
     solid left accent + translucent category fill + category-colored label when
     selected; unselected chips still show a thin left accent so each type’s
-    calendar color is obvious before you pick it."""
+    calendar color is obvious before you pick it.
+
+    Chips must be able to shrink with the grid (min-width: 0) so a multi-column
+    layout never forces the parent wider than the dialog/sidebar and clips."""
     c = at["color"]
     # Sidebar (compact) and dialog chips — readable type labels without
     # blowing out the grid (was 9px / 11px and felt tiny with 19 types).
-    pad = "5px 6px" if compact else "6px 8px"
+    pad = "5px 6px" if compact else "6px 7px"
     fsz = "11px" if compact else "12px"
     rad = "3px" if compact else f"{RAD}px"
+    # Expanding + min 0: QGridLayout can share width evenly; long labels elide
+    # via the button's own clipping rather than overflowing the panel.
+    btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    btn.setMinimumWidth(0)
+    btn.setToolTip(at.get("label", ""))
     if selected:
         btn.setStyleSheet(f"""
             QPushButton {{
@@ -346,6 +354,7 @@ def style_activity_type_chip(btn, at: dict, selected: bool, *, compact: bool = F
                 border-radius: {rad};
                 font-size: {fsz};
                 text-align: left;
+                min-width: 0;
             }}
         """)
     else:
@@ -359,6 +368,7 @@ def style_activity_type_chip(btn, at: dict, selected: bool, *, compact: bool = F
                 border-radius: {rad};
                 font-size: {fsz};
                 text-align: left;
+                min-width: 0;
             }}
             QPushButton:hover {{
                 background: {_rgba(c, BLOCK_FILL_CSS * 0.55)};
@@ -2768,7 +2778,9 @@ class AddActivityDialog(QDialog):
             end_min   = existing["endMin"]
             for_date  = existing.get("date", for_date)
         self.setWindowTitle("Edit Activity" if is_edit else "Add Activity")
-        self.setFixedWidth(380)
+        # Wide enough for a 2-col type grid with full labels; height scrolls.
+        self.setMinimumWidth(400)
+        self.setFixedWidth(420)
         self.result_activity = None
         self.result_deleted  = False
         self._sel = sel_type
@@ -2782,35 +2794,49 @@ class AddActivityDialog(QDialog):
                 color: {C_TEXT.name()}; padding: 7px 10px; border-radius: {RAD}px;
             }}
             QTimeEdit:focus, QLineEdit:focus {{ border-color: {C_ACCENT.name()}; }}
+            QScrollArea {{ background: transparent; border: none; }}
         """)
 
         lay = QVBoxLayout(self)
-        lay.setSpacing(14); lay.setContentsMargins(22, 20, 22, 20)
+        lay.setSpacing(14); lay.setContentsMargins(20, 18, 20, 18)
 
         title = QLabel("Edit Activity" if is_edit else "Log Activity")
         title.setStyleSheet("font-size: 15px; font-weight: bold;")
         lay.addWidget(title)
 
-        # Type buttons grid (scrollable — many categories)
+        # Type buttons — 2 columns so long labels (Extracurriculars, Class / School)
+        # stay fully inside the dialog. Chips expand evenly; vertical scroll only.
+        COLS = 2
         grid_w = QWidget()
+        grid_w.setMinimumWidth(0)
         grid   = QGridLayout(grid_w)
-        grid.setSpacing(5); grid.setContentsMargins(0,0,0,0)
+        grid.setSpacing(6); grid.setContentsMargins(0, 0, 2, 0)
+        for c in range(COLS):
+            grid.setColumnStretch(c, 1)
+            grid.setColumnMinimumWidth(c, 0)
         self._type_btns = {}
         for i, at in enumerate(ACTIVITY_TYPES):
             btn = QPushButton(f"{at['icon']} {at['label']}")
             btn.setCheckable(True)
             btn.setChecked(at["id"] == sel_type)
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             self._apply_type_style(btn, at, at["id"] == sel_type)
             btn.clicked.connect(lambda _, aid=at["id"]: self._pick(aid))
             self._type_btns[at["id"]] = (btn, at)
-            grid.addWidget(btn, i // 3, i % 3)
+            grid.addWidget(btn, i // COLS, i % COLS)
         type_scroll = QScrollArea()
         type_scroll.setWidgetResizable(True)
         type_scroll.setFrameShape(QFrame.Shape.NoFrame)
         type_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        type_scroll.setMaximumHeight(240)
-        type_scroll.setStyleSheet("background: transparent;")
+        type_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        type_scroll.setMinimumHeight(200)
+        type_scroll.setMaximumHeight(280)
+        type_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         type_scroll.setWidget(grid_w)
+        # Keep the host from reporting a min width larger than the viewport
+        # (that was clipping the old 3rd column with H-scroll off).
+        grid_w.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lay.addWidget(type_scroll)
 
         # Times — respect the exact range the user dragged/clicked (24-hour display).
