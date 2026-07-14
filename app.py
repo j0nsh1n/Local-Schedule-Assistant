@@ -43,18 +43,20 @@ from PySide6.QtWidgets import (
     QDialog, QFileDialog, QTimeEdit, QStackedWidget, QSizePolicy,
     QMessageBox, QMenu, QGridLayout, QProgressBar, QSystemTrayIcon,
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox, QFormLayout,
+    QGraphicsOpacityEffect, QSplitter,
 )
 from PySide6.QtCore import (
     Qt, QTimer, QThread, Signal, QRect, QTime, QSharedMemory, QUrl,
+    QPropertyAnimation, QEasingCurve, QAbstractAnimation,
 )
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QFont, QFontMetrics,
-    QPalette, QPixmap, QIcon, QDesktopServices,
+    QPalette, QPixmap, QIcon, QDesktopServices, QKeySequence, QShortcut,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "3.9.1"
+__version__  = "4.0.0"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -158,34 +160,31 @@ MODEL_PROFILES = {
 }
 RECOMMENDED_MODELS = list(MODEL_PROFILES.keys())
 
-# ── Theme system ───────────────────────────────────────────────────────────
-# Two built-in themes, chosen in Settings and applied at startup. Every piece of
-# chrome reads its colour from the C_* globals below, so re-pointing them with
-# apply_theme() re-themes the whole app. Category colours (ACTIVITY_TYPES) are
-# deliberately theme-independent. Corners are driven by RAD / RAD_LG (sharp by
-# design — a small radius, or 0 for fully square).
+# ── Theme system (v4.0) ────────────────────────────────────────────────────
+# Planner-first look (not Google Calendar cards): square schedule blocks, crisp
+# grid, modest chrome radii only on buttons/dialogs. Amber dark / ink light.
 THEMES = {
-    "nocturne": {   # high-contrast dark, fully square corners
+    "nocturne": {   # high-contrast dark planner
         "label": "Nocturne — dark",
-        "bg": "#0a0a0b", "surface": "#141416", "surf2": "#1c1c20",
-        "border": "#2b2b2f", "border2": "#3a3a40",
-        "text": "#f5f5f6", "muted": "#8a8a92",
-        "accent": "#e0a93b", "accent2": "#b9852a", "on_accent": "#0a0a0b",
-        "now": "#e5564b", "grid": "#1e1e22", "ghost": "#3a3a40",
-        "ok": "#5fb87a", "ok_txt": "#8fd9a3", "err": "#e5564b", "err_txt": "#f0938c",
-        "warn": "#e0a93b", "info": "#6f9bd9",
-        "rad": 0, "rad_lg": 0, "mono": True,
+        "bg": "#0b0b0d", "surface": "#141418", "surf2": "#1c1c22",
+        "border": "#2c2c34", "border2": "#40404c",
+        "text": "#f2f2f4", "muted": "#8e8e98",
+        "accent": "#e8b84a", "accent2": "#c9962e", "on_accent": "#0b0b0d",
+        "now": "#f07167", "grid": "#1a1a20", "ghost": "#3a3a44",
+        "ok": "#5fbf85", "ok_txt": "#8fd9a8", "err": "#f07167", "err_txt": "#f5a8a2",
+        "warn": "#e8b84a", "info": "#6b8cae",   # muted steel, not GCal blue
+        "rad": 4, "rad_lg": 6, "mono": True,
     },
-    "slate": {      # cool enterprise light, crisp corners
+    "slate": {      # paper-light planner
         "label": "Slate — light",
-        "bg": "#f6f7f9", "surface": "#ffffff", "surf2": "#f0f2f5",
-        "border": "#e3e6eb", "border2": "#d2d7de",
-        "text": "#1a2430", "muted": "#6a737d",
-        "accent": "#2563eb", "accent2": "#1d4fd0", "on_accent": "#ffffff",
-        "now": "#e2574c", "grid": "#eceef2", "ghost": "#c4cbd4",
-        "ok": "#2ba37e", "ok_txt": "#1e7a5e", "err": "#dc2626", "err_txt": "#b91c1c",
-        "warn": "#d97706", "info": "#2563eb",
-        "rad": 3, "rad_lg": 4, "mono": False,
+        "bg": "#f0f0ee", "surface": "#fafaf8", "surf2": "#e8e8e4",
+        "border": "#d4d4ce", "border2": "#b8b8b0",
+        "text": "#1a1a18", "muted": "#5c5c56",
+        "accent": "#b45309", "accent2": "#92400e", "on_accent": "#fffbeb",
+        "now": "#c2410c", "grid": "#e4e4de", "ghost": "#c4c4bc",
+        "ok": "#2ba37e", "ok_txt": "#1e7a5e", "err": "#b91c1c", "err_txt": "#991b1b",
+        "warn": "#b45309", "info": "#57534e",
+        "rad": 4, "rad_lg": 6, "mono": False,
     },
 }
 DEFAULT_THEME = "nocturne"
@@ -225,24 +224,84 @@ def apply_theme(name: str):
     RAD         = t["rad"];               RAD_LG      = t["rad_lg"]
     THEME_MONO  = t["mono"]
 
+def app_chrome_stylesheet() -> str:
+    """Global widget chrome for a more modern, cohesive look (applied once at launch)."""
+    return f"""
+        QToolTip {{
+            background: {C_SURFACE.name()}; color: {C_TEXT.name()};
+            border: 1px solid {C_BORDER2.name()}; border-radius: {RAD}px;
+            padding: 6px 8px; font-size: 11px;
+        }}
+        QScrollBar:vertical {{
+            background: transparent; width: 10px; margin: 2px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {_rgba(C_MUTED, .35)}; border-radius: 5px; min-height: 32px;
+        }}
+        QScrollBar::handle:vertical:hover {{ background: {_rgba(C_MUTED, .55)}; }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        QScrollBar:horizontal {{
+            background: transparent; height: 10px; margin: 2px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {_rgba(C_MUTED, .35)}; border-radius: 5px; min-width: 32px;
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+    """
+
 apply_theme(DEFAULT_THEME)
 
 # ── Activity types ─────────────────────────────────────────────────────────
+# Expanded set for high-school life. Tool schemas + AI prompt are generated from
+# this list, so adding a type here is enough for pickers and the model.
 ACTIVITY_TYPES = [
     {"id": "assignments", "label": "Assignments",      "icon": "📝", "color": "#ef4444"},
     {"id": "project",     "label": "Projects",         "icon": "🛠",  "color": "#f59e0b"},
     {"id": "study",       "label": "Study",            "icon": "📚", "color": "#8b5cf6"},
+    {"id": "class",       "label": "Class / School",   "icon": "🏫", "color": "#3b82f6"},
+    {"id": "reading",     "label": "Reading",          "icon": "📖", "color": "#a78bfa"},
     {"id": "extra",       "label": "Extracurriculars", "icon": "🎯", "color": "#ec4899"},
+    {"id": "club",        "label": "Clubs",            "icon": "🏛", "color": "#d946ef"},
+    {"id": "music",       "label": "Music / Practice", "icon": "🎵", "color": "#14b8a6"},
+    {"id": "creative",    "label": "Creative / Art",   "icon": "🎨", "color": "#f472b6"},
     {"id": "gaming",      "label": "Anime/Gaming",     "icon": "🎮", "color": "#06b6d4"},
+    {"id": "social",      "label": "Social",           "icon": "👥", "color": "#22d3ee"},
     {"id": "exercise",    "label": "Exercise",         "icon": "💪", "color": "#10b981"},
     {"id": "meals",       "label": "Meals",            "icon": "🍽", "color": "#f97316"},
+    {"id": "chores",      "label": "Chores",           "icon": "🏠", "color": "#a3a3a3"},
+    {"id": "work",        "label": "Work / Job",       "icon": "💼", "color": "#64748b"},
+    {"id": "commute",     "label": "Commute",          "icon": "🚌", "color": "#78716c"},
+    {"id": "health",      "label": "Health",           "icon": "🏥", "color": "#fb7185"},
+    {"id": "free",        "label": "Free / Rest",      "icon": "☕", "color": "#94a3b8"},
     {"id": "sleep",       "label": "Sleep",            "icon": "🌙", "color": "#6366f1"},
 ]
 
 # Map legacy type ids (from older data) onto the current set, so existing blocks
 # keep a sensible category/color after this change.
-_OLD_TYPE_MAP = {"anime": "gaming", "friends": "extra",
-                 "gym": "exercise", "workout": "exercise"}
+_OLD_TYPE_MAP = {"anime": "gaming", "friends": "extra", "social": "social",
+                 "gym": "exercise", "workout": "exercise", "rest": "free",
+                 "break": "free", "school": "class", "lesson": "class"}
+
+def activity_type_prompt_block() -> str:
+    """Human lines for the AI system prompt — always stays in sync with ACTIVITY_TYPES."""
+    lines = [
+        "ACTIVITY TYPES — set each block's \"type\" to what the user will actually be "
+        "DOING (judge by the activity itself, not the blocks around it):"
+    ]
+    for t in ACTIVITY_TYPES:
+        lines.append(f"  {t['id']:<12} – {t['label']}")
+    lines += [
+        "TYPE RULES (the model often gets these wrong — follow them):",
+        "  - A BREAK or REST between work → use \"free\" (or \"gaming\" for entertainment,",
+        "    \"exercise\" for a physical break, \"meals\" for a snack). NEVER label a break",
+        "    as \"study\", \"assignments\", \"project\", or \"class\".",
+        "  - A break between two study blocks is still a break — don't copy the surrounding type.",
+        "  - split_block focus chunks keep the task type; breaks default to \"free\"",
+        "    (override with break_type).",
+        "  - School lessons / periods → \"class\". Homework due soon → \"assignments\".",
+        "  - Hangouts → \"social\". Band/orchestra practice → \"music\".",
+    ]
+    return "\n".join(lines)
 
 # ── Pure helper functions ──────────────────────────────────────────────────
 def min_to_y(minutes: int) -> int:
@@ -250,6 +309,89 @@ def min_to_y(minutes: int) -> int:
 
 def y_to_min(y: int) -> int:
     return int(DAY_START + y / HOUR_PX * 60)
+
+# Calendar-block color recipe — chips / pickers must use the same alphas so a
+# selected activity type looks like the box that will land on the timeline.
+BLOCK_FILL_A = 52          # translucent body fill (0–255)
+BLOCK_OUTLINE_A = 160      # 1px outline around the tile
+BLOCK_FILL_CSS = BLOCK_FILL_A / 255.0
+BLOCK_OUTLINE_CSS = BLOCK_OUTLINE_A / 255.0
+
+def block_colors(hex_color: str) -> tuple:
+    """(accent solid QColor, translucent fill QColor) for a category hex."""
+    c = QColor(hex_color or C_ACCENT.name())
+    fill = QColor(c.red(), c.green(), c.blue(), BLOCK_FILL_A)
+    return c, fill
+
+def style_activity_type_chip(btn, at: dict, selected: bool, *, compact: bool = False):
+    """Style a type-picker chip to match the calendar block recipe:
+    solid left accent + translucent category fill + category-colored label when
+    selected; unselected chips still show a thin left accent so each type’s
+    calendar color is obvious before you pick it.
+
+    Chips must be able to shrink with the grid (min-width: 0) so a multi-column
+    layout never forces the parent wider than the dialog/sidebar and clips."""
+    c = at["color"]
+    # Sidebar (compact) and dialog chips — readable type labels without
+    # blowing out the grid (was 9px / 11px and felt tiny with 19 types).
+    pad = "5px 6px" if compact else "6px 7px"
+    fsz = "11px" if compact else "12px"
+    rad = "3px" if compact else f"{RAD}px"
+    # Expanding + min 0: QGridLayout can share width evenly; long labels elide
+    # via the button's own clipping rather than overflowing the panel.
+    btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    btn.setMinimumWidth(0)
+    btn.setToolTip(at.get("label", ""))
+    if selected:
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {_rgba(c, BLOCK_FILL_CSS)};
+                border: 1px solid {_rgba(c, BLOCK_OUTLINE_CSS)};
+                border-left: 3px solid {c};
+                color: {c};
+                font-weight: bold;
+                padding: {pad};
+                border-radius: {rad};
+                font-size: {fsz};
+                text-align: left;
+                min-width: 0;
+            }}
+        """)
+    else:
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C_SURF2.name()};
+                border: 1px solid {C_BORDER.name()};
+                border-left: 3px solid {c};
+                color: {C_MUTED.name()};
+                padding: {pad};
+                border-radius: {rad};
+                font-size: {fsz};
+                text-align: left;
+                min-width: 0;
+            }}
+            QPushButton:hover {{
+                background: {_rgba(c, BLOCK_FILL_CSS * 0.55)};
+                border-color: {_rgba(c, BLOCK_OUTLINE_CSS * 0.7)};
+                border-left: 3px solid {c};
+                color: {C_TEXT.name()};
+            }}
+        """)
+
+def paint_schedule_block(p: QPainter, rect: QRect, fill: QColor, accent: QColor,
+                         radius: int = 0, accent_w: int = 3, outline: bool = False):
+    """Square planner tiles (deliberately not GCal-style rounded cards): solid fill,
+    1px outline, crisp left accent bar. `radius` is ignored (kept for call-site
+    compatibility)."""
+    p.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), BLOCK_OUTLINE_A), 1))
+    p.setBrush(fill)
+    p.drawRect(rect.adjusted(0, 0, -1, -1))
+    if accent_w > 0:
+        p.fillRect(QRect(rect.x(), rect.y(), accent_w, rect.height()), accent)
+    if outline:
+        p.setPen(QPen(accent, 2))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(rect.adjusted(1, 1, -2, -2))
 
 def fmt_time(minutes: int) -> str:
     h, m = divmod(int(minutes), 60)   # 24-hour HH:MM (e.g. 09:00, 14:30, 24:00)
@@ -351,15 +493,32 @@ def normalize_google_event(ev: dict) -> List[Dict]:
             en = datetime.fromisoformat(e_raw.replace("Z", "+00:00")).astimezone()
         except Exception:
             return []
-        sm = max(s.hour * 60 + s.minute, DAY_START)
-        em = min(en.hour * 60 + en.minute, DAY_END)
-        if em <= sm:
+        if en <= s:
             return []
-        ds = s.date().isoformat()
-        return [{
-            "id": eid, "title": title, "startMin": sm, "endMin": em,
-            "type": "calendar", "color": color, "date": ds, "allDay": False,
-        }]
+        # Split across local midnights so overnight meetings (23:00→01:00) and
+        # multi-day timed events still occupy free-slot / conflict checks.
+        out: List[Dict] = []
+        day = s.date()
+        end_day = en.date()
+        multi = end_day > day
+        while day <= end_day:
+            if day == s.date():
+                sm = max(s.hour * 60 + s.minute, DAY_START)
+            else:
+                sm = DAY_START
+            if day == en.date():
+                em = min(en.hour * 60 + en.minute, DAY_END)
+            else:
+                em = DAY_END
+            if em > sm:
+                out.append({
+                    "id": f"{eid}:{day.isoformat()}" if multi else eid,
+                    "title": title, "startMin": sm, "endMin": em,
+                    "type": "calendar", "color": color,
+                    "date": day.isoformat(), "allDay": False,
+                })
+            day += timedelta(days=1)
+        return out
 
     # All-day: start.date / end.date (end exclusive). Multi-day holidays expand.
     d0s = start.get("date")
@@ -502,6 +661,8 @@ def save_all_activities(acts: List[Dict]) -> None:
 #                                        kept (recovers across days)
 BACKUP_DIR  = DATA_DIR / "backups"
 BACKUP_KEEP = 14
+BAK_FILE    = DATA_DIR / "activities.json.bak"
+MANUAL_UNDO_KEEP = 24   # v4.0: Ctrl+Z for manual edits
 
 def _write_daily_backup(acts: List[Dict]) -> None:
     """Best-effort: one snapshot per day (latest state of that day); prune to the
@@ -517,6 +678,52 @@ def _write_daily_backup(acts: List[Dict]) -> None:
                 pass
     except Exception:
         pass
+
+def list_schedule_backups() -> List[Dict]:
+    """Discover restore points: .bak + dated dailies. Pure filesystem; no schedule
+    contents loaded. Each item: {path, label, mtime, kind}."""
+    out: List[Dict] = []
+    try:
+        if BAK_FILE.exists():
+            st = BAK_FILE.stat()
+            out.append({
+                "path": BAK_FILE, "kind": "previous",
+                "label": f"Previous save  ·  {datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M')}",
+                "mtime": st.st_mtime,
+            })
+    except OSError:
+        pass
+    try:
+        for p in sorted(BACKUP_DIR.glob("activities-*.json"), reverse=True):
+            try:
+                st = p.stat()
+                day = p.stem.replace("activities-", "", 1)
+                out.append({
+                    "path": p, "kind": "daily",
+                    "label": f"Daily snapshot  ·  {day}  ·  {datetime.fromtimestamp(st.st_mtime).strftime('%H:%M')}",
+                    "mtime": st.st_mtime,
+                })
+            except OSError:
+                continue
+    except OSError:
+        pass
+    out.sort(key=lambda x: -x["mtime"])
+    return out
+
+def load_activities_from_path(path: Path) -> Optional[List[Dict]]:
+    """Load + migrate activities from a backup file. None if unreadable/invalid."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return None
+        return _migrate_types(data)
+    except Exception:
+        return None
+
+def parse_calendar_ids(s: str) -> List[str]:
+    """Comma-separated Google calendar IDs → non-empty list (default primary)."""
+    ids = [x.strip() for x in str(s or "").split(",") if x.strip()]
+    return ids or ["primary"]
 
 # ── AI undo ──────────────────────────────────────────────────────────────────
 # The assistant can rewrite or clear whole days, so snapshot the schedule before
@@ -569,11 +776,20 @@ DEFAULT_SETTINGS = {
     "model":            DEFAULT_MODEL,
     "notify_on":        True,
     "notify_lead_min":  0,        # alert this many minutes before a block starts (0 = at start)
+    "notify_end_chime": False,    # off by default — start alerts only
+    "notify_sound":     True,     # play a tone with alerts (visual still shows)
+    "notify_tone":      "chime",  # chime | soft | bright | low | glass
+    "notify_volume":    80,       # 0–100
     "dnd_override":     True,
     "plan_day_start":   "08:00",  # default waking window the planner schedules within
     "plan_day_end":     "22:00",
     "ollama_autostart": False,    # keep Ollama off at launch unless the user opts in
+    "ollama_models_dir": "",      # empty = Ollama default (~/.ollama/models); used when app starts Ollama
     "update_check_on":  True,     # check GitHub for a newer release on launch + daily
+    "calendar_ids":     "primary",  # v4.0: comma-separated Google calendar IDs
+    "body_split":       [],       # [calendar_px, sidebar_px, ai_px] — empty = defaults
+    "sidebar_split":    [],       # [add_activity_px, summary_px] — empty = defaults
+    "ai_panel_w":       340,      # remembered AI width when the panel is open
     "temperature":      0.3,
     "num_ctx":          16384,
     # Optional buffer: at Windows sign-in, wait this many seconds before building the
@@ -615,13 +831,33 @@ def parse_hhmm(s: str) -> int:
             continue
     raise ValueError(f"can't parse time '{s}' — use 24h HH:MM (or 24:00 for end of day)")
 
-def coerce_end_min(sm: int, em: int) -> int:
+def coerce_end_min(sm: int, em: int, *, original_end: Optional[int] = None) -> int:
     """Map end-of-day conventions onto DAY_END (1440).
     QTime only holds 00:00–23:59, so End=00:00 with Start later the same day means
-    through midnight (e.g. sleep 22:00–24:00). Start=End=00:00 stays zero-length."""
+    through midnight (e.g. sleep 22:00–24:00). Start=End=00:00 stays zero-length
+    unless this is a re-save of an existing full-day block (original_end was 1440)."""
     if em == 0 and sm > 0:
         return DAY_END
+    # Re-edit of 00:00–24:00: both fields display as 00:00 — keep end-of-day.
+    if em == 0 and sm == 0 and original_end is not None and int(original_end) >= DAY_END:
+        return DAY_END
     return em
+
+def end_alert_due(em: int, now_min: int, window: int = 2) -> bool:
+    """True if a block ending at `em` should fire its end-alert at wall-clock `now_min`.
+    `now_min` never reaches 1440 (max 23:59 = 1439), so endMin=DAY_END fires in the
+    last `window` minutes of the day."""
+    em = int(em); now_min = int(now_min); window = max(0, int(window))
+    if em >= DAY_END:
+        return now_min >= DAY_END - window
+    return now_min - window <= em <= now_min
+
+def start_alert_due(sm: int, now_min: int, lead: int = 0, window: int = 2) -> bool:
+    """True if a block starting at `sm` should fire (optionally `lead` min early).
+    Clamps fire time to ≥ 0 so early-morning blocks with lead still alert."""
+    fire_at = max(0, int(sm) - max(0, int(lead)))
+    now_min = int(now_min); window = max(0, int(window))
+    return now_min - window <= fire_at <= now_min
 
 
 _WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
@@ -821,11 +1057,13 @@ class CalFetchThread(QThread):
     done  = Signal(dict)   # {iso_date: [events]}
     error = Signal(str)
 
-    def __init__(self, creds, start: date, end: date):
+    def __init__(self, creds, start: date, end: date, calendar_ids: Optional[List[str]] = None):
         super().__init__()
         self.creds  = creds
         self._start = start     # NB: not 'self.start' — that is QThread.start()
         self._end   = end       # exclusive
+        self._cals  = parse_calendar_ids(
+            ",".join(calendar_ids) if calendar_ids else "primary")
 
     def run(self):
         try:
@@ -834,20 +1072,25 @@ class CalFetchThread(QThread):
             t0  = datetime.combine(self._start, datetime.min.time()).astimezone()
             t1  = datetime.combine(self._end,   datetime.min.time()).astimezone()
             by_date: Dict[str, List[Dict]] = {}
-            page = None
-            while True:
-                res = svc.events().list(
-                    calendarId="primary",
-                    timeMin=t0.isoformat(), timeMax=t1.isoformat(),
-                    singleEvents=True, orderBy="startTime",
-                    maxResults=2500, pageToken=page,
-                ).execute()
-                for ev in res.get("items", []):
-                    for entry in normalize_google_event(ev):
-                        by_date.setdefault(entry["date"], []).append(entry)
-                page = res.get("nextPageToken")
-                if not page:
-                    break
+            for cal_id in self._cals:
+                page = None
+                while True:
+                    res = svc.events().list(
+                        calendarId=cal_id,
+                        timeMin=t0.isoformat(), timeMax=t1.isoformat(),
+                        singleEvents=True, orderBy="startTime",
+                        maxResults=2500, pageToken=page,
+                    ).execute()
+                    for ev in res.get("items", []):
+                        for entry in normalize_google_event(ev):
+                            # Namespace id by calendar so two cals can't collide
+                            entry = dict(entry)
+                            entry["id"] = f"{cal_id}:{entry['id']}"
+                            entry["calendarId"] = cal_id
+                            by_date.setdefault(entry["date"], []).append(entry)
+                    page = res.get("nextPageToken")
+                    if not page:
+                        break
             self.done.emit(by_date)
         except Exception as ex:
             self.error.emit(str(ex))
@@ -883,14 +1126,63 @@ def stop_ollama():
         return False, str(ex)
 
 
-def start_ollama():
-    """Launch the local Ollama server (detached). Returns (ok, message)."""
+def default_ollama_models_dir() -> Path:
+    """Ollama's usual models root when OLLAMA_MODELS is unset."""
+    # OLLAMA_MODELS overrides; else models live under OLLAMA_HOME or ~/.ollama
+    env = (os.environ.get("OLLAMA_MODELS") or "").strip()
+    if env:
+        return Path(env).expanduser()
+    home = (os.environ.get("OLLAMA_HOME") or "").strip()
+    base = Path(home).expanduser() if home else (Path.home() / ".ollama")
+    return base / "models"
+
+def resolve_ollama_models_dir(settings: Optional[Dict] = None) -> Path:
+    """Configured models folder, or Ollama's default path."""
+    raw = ""
+    if settings is not None:
+        raw = str(settings.get("ollama_models_dir") or "").strip()
+    if not raw:
+        try:
+            raw = str(load_settings().get("ollama_models_dir") or "").strip()
+        except Exception:
+            raw = ""
+    if raw:
+        return Path(raw).expanduser()
+    return default_ollama_models_dir()
+
+def ollama_env(settings: Optional[Dict] = None) -> Dict[str, str]:
+    """Environment for `ollama serve` / pull: optional OLLAMA_MODELS override."""
+    env = os.environ.copy()
+    raw = ""
+    if settings is not None:
+        raw = str(settings.get("ollama_models_dir") or "").strip()
+    else:
+        try:
+            raw = str(load_settings().get("ollama_models_dir") or "").strip()
+        except Exception:
+            pass
+    if raw:
+        p = Path(raw).expanduser()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        env["OLLAMA_MODELS"] = str(p)
+    return env
+
+def start_ollama(settings: Optional[Dict] = None):
+    """Launch the local Ollama server (detached). Returns (ok, message).
+    If settings include ollama_models_dir, set OLLAMA_MODELS so pulls land there.
+    Only applies when *this app* starts the server — a tray/service Ollama already
+    running keeps its own path until restarted."""
     try:
+        env = ollama_env(settings)
         if platform.system() == "Windows":
             DETACHED = 0x00000008  # DETACHED_PROCESS
             NO_WIN   = 0x08000000  # CREATE_NO_WINDOW
             subprocess.Popen(
                 ["ollama", "serve"],
+                env=env,
                 creationflags=DETACHED | NO_WIN,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 close_fds=True,
@@ -898,10 +1190,15 @@ def start_ollama():
         else:
             subprocess.Popen(
                 ["ollama", "serve"],
+                env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-        return True, "Starting Ollama…"
+        msg = "Starting Ollama…"
+        mid = str((settings or {}).get("ollama_models_dir") or "").strip()
+        if mid:
+            msg += f"\nModels → {Path(mid).expanduser()}"
+        return True, msg
     except FileNotFoundError:
         return False, "Ollama not found on PATH.\nInstall it from https://ollama.com/download"
     except Exception as ex:
@@ -1022,30 +1319,116 @@ def set_startup(enabled: bool) -> bool:
         return False
 
 
-def _ensure_alert_wav() -> Optional[Path]:
-    """Write a small chime wav (stdlib only — keeps app.py self-contained) for alert
-    sounds on non-Windows systems, where QApplication.beep() is often silent (PipeWire
-    ignores the X11 bell; Wayland has none). Written once, reused after."""
+# Built-in alert tones (id → label). Synthesized to ~/.daily-scheduler/tones/.
+NOTIFY_TONES = [
+    ("chime",  "Chime (default)"),
+    ("soft",   "Soft ping"),
+    ("bright", "Bright ping"),
+    ("low",    "Low thump"),
+    ("glass",  "Glass tap"),
+]
+
+def _synth_tone_wav(path: Path, tone_id: str) -> bool:
+    """Write a short mono WAV for `tone_id`. Returns True on success."""
     try:
-        p = DATA_DIR / "alert.wav"
-        if p.exists():
-            return p
         import wave, math, struct
         rate = 44100
         frames = bytearray()
-        def tone(freq, secs, vol=0.5):
-            n = int(rate * secs)
+
+        def blip(freq, secs, vol=0.45):
+            n = max(1, int(rate * secs))
             for i in range(n):
-                env = min(1.0, i / 300, (n - i) / 1200)   # attack/decay so it can't click
-                frames.extend(struct.pack(
-                    "<h", int(32767 * vol * env * math.sin(2 * math.pi * freq * i / rate))))
-        tone(660, 0.14); tone(0, 0.06); tone(880, 0.22)
-        with wave.open(str(p), "wb") as w:
+                # Attack / decay envelope so samples never click
+                env = min(1.0, i / 280.0, (n - i) / 900.0)
+                if freq <= 0:
+                    sample = 0.0
+                else:
+                    t = i / rate
+                    # Slight 2nd harmonic for a less sterile beep
+                    sample = math.sin(2 * math.pi * freq * t)
+                    sample += 0.18 * math.sin(4 * math.pi * freq * t)
+                frames.extend(struct.pack("<h", int(32767 * vol * env * sample)))
+
+        tid = (tone_id or "chime").lower()
+        if tid == "soft":
+            blip(520, 0.12, 0.35); blip(0, 0.04); blip(620, 0.18, 0.28)
+        elif tid == "bright":
+            blip(880, 0.08, 0.4); blip(0, 0.03); blip(1175, 0.1, 0.38); blip(0, 0.02); blip(1397, 0.14, 0.32)
+        elif tid == "low":
+            blip(180, 0.22, 0.55); blip(0, 0.04); blip(140, 0.28, 0.4)
+        elif tid == "glass":
+            blip(1480, 0.06, 0.32); blip(0, 0.02); blip(1760, 0.2, 0.22)
+        else:  # chime
+            blip(660, 0.14, 0.45); blip(0, 0.06); blip(880, 0.22, 0.4)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(path), "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
             w.writeframes(bytes(frames))
+        return True
+    except Exception:
+        return False
+
+def ensure_alert_wav(tone_id: str = "chime") -> Optional[Path]:
+    """Return a reusable WAV path for the given tone (stdlib synthesis)."""
+    tid = (tone_id or "chime").lower()
+    if tid not in {t[0] for t in NOTIFY_TONES}:
+        tid = "chime"
+    try:
+        p = DATA_DIR / "tones" / f"alert_{tid}.wav"
+        # Re-synth if missing or empty (allows tone set to grow without stale files)
+        if not p.exists() or p.stat().st_size < 64:
+            if not _synth_tone_wav(p, tid):
+                return None
         return p
     except Exception:
         return None
+
+# Back-compat alias used by older call sites / tests
+def _ensure_alert_wav() -> Optional[Path]:
+    return ensure_alert_wav("chime")
+
+def play_alert_sound(parent=None, *, tone: str = "chime", volume: float = 0.8) -> None:
+    """Play a short alert tone. `volume` is 0..1. Uses Qt multimedia when available;
+    falls back to Windows MessageBeep or QApplication.beep()."""
+    vol = max(0.0, min(1.0, float(volume)))
+    if vol <= 0.001:
+        return
+    # Prefer synthesized WAV so the chosen tone is audible on all platforms
+    try:
+        wav = ensure_alert_wav(tone)
+        if wav:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtMultimedia import QSoundEffect
+            # Reuse one QSoundEffect on the parent when possible so rapid previews
+            # don't pile up player objects.
+            fx = None
+            if parent is not None:
+                fx = getattr(parent, "_alert_fx", None)
+            if fx is None:
+                fx = QSoundEffect(parent)
+                if parent is not None:
+                    parent._alert_fx = fx
+            path = str(wav)
+            if getattr(fx, "_tone_path", None) != path:
+                fx.setSource(QUrl.fromLocalFile(path))
+                fx._tone_path = path  # type: ignore[attr-defined]
+            fx.setVolume(vol)
+            fx.play()
+            return
+    except Exception:
+        pass
+    try:
+        if platform.system() == "Windows":
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            return
+    except Exception:
+        pass
+    try:
+        QApplication.beep()
+    except Exception:
+        pass
 
 
 def list_ollama_models() -> List[str]:
@@ -1066,6 +1449,87 @@ def list_ollama_models() -> List[str]:
         return [m["name"] for m in r.json().get("models", []) if m.get("name")]
     except Exception:
         return []
+
+def _model_tag_key(tag: str) -> str:
+    """Normalize for install checks: 'qwen3:14b' and 'qwen3:14b:latest' match."""
+    t = (tag or "").strip().lower()
+    if t.endswith(":latest"):
+        t = t[:-7]
+    return t
+
+def model_is_installed(tag: str, installed: Optional[List[str]] = None) -> bool:
+    """True if `tag` appears in the local Ollama library (best-effort)."""
+    if not tag or not str(tag).strip():
+        return False
+    have = installed if installed is not None else list_ollama_models()
+    want = _model_tag_key(tag)
+    keys = {_model_tag_key(m) for m in have}
+    if want in keys:
+        return True
+    # Installed name may carry a quant/digest suffix after the curated tag
+    for k in keys:
+        if k.startswith(want + "-") or k.startswith(want + ":"):
+            return True
+    return False
+
+class OllamaPullThread(QThread):
+    """Stream POST /api/pull for one model tag. Progress is a short status string."""
+    progress = Signal(str)
+    finished_ok = Signal(str)   # model tag
+    failed = Signal(str)
+
+    def __init__(self, model: str, parent=None):
+        super().__init__(parent)
+        self.model = (model or "").strip()
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        if not self.model:
+            self.failed.emit("No model name."); return
+        try:
+            self.progress.emit(f"Pulling {self.model}…")
+            # Long read timeout: large models take many minutes; Stop cancels via _stop.
+            resp = requests.post(
+                f"{OLLAMA_URL}/api/pull",
+                json={"name": self.model, "stream": True},
+                stream=True, timeout=(10, 3600),
+            )
+            if resp.status_code == 404:
+                self.failed.emit(f"Model '{self.model}' not found on the Ollama library.")
+                return
+            resp.raise_for_status()
+            last = ""
+            for line in resp.iter_lines():
+                if self._stop:
+                    self.failed.emit("Pull cancelled."); return
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except Exception:
+                    continue
+                st = data.get("status") or ""
+                completed = data.get("completed")
+                total = data.get("total")
+                if total and completed is not None and total > 0:
+                    pct = min(100, int(100 * completed / total))
+                    mb_c = completed / (1024 * 1024)
+                    mb_t = total / (1024 * 1024)
+                    msg = f"{st or 'downloading'}  {pct}%  ({mb_c:.0f}/{mb_t:.0f} MB)"
+                else:
+                    msg = st or "working…"
+                if msg != last:
+                    self.progress.emit(msg); last = msg
+                if data.get("error"):
+                    self.failed.emit(str(data["error"])); return
+            self.finished_ok.emit(self.model)
+        except requests.exceptions.ConnectionError:
+            self.failed.emit("Can't reach Ollama. Press ▶ to start it, then try again.")
+        except Exception as ex:
+            self.failed.emit(str(ex))
 
 
 def strip_think(s: str) -> str:
@@ -1515,7 +1979,7 @@ AI_TOOLS = [
             "chunk":  {"type": "integer", "description": "Length of each focus chunk in minutes (default 30)."},
             "break":  {"type": "integer", "description": "Length of each break in minutes (default 5; 0 for none)."},
             "break_type": {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES],
-                            "description": "Category for the breaks (default 'gaming' = downtime). A break is rest, not study — don't reuse the work block's type."},
+                            "description": "Category for the breaks (default 'free' = rest). A break is rest, not study — don't reuse the work block's type."},
         }}}},
     {"type": "function", "function": {
         "name": "schedule_tasks",
@@ -2079,11 +2543,15 @@ class TimelineWidget(QWidget):
             x = GUTTER_W + 4
             w = self.width() - GUTTER_W - 8
             rect = QRect(x, y, w, h)
-            p.fillRect(rect, QColor(124, 111, 247, 14))
-            p.setPen(QPen(QColor(124, 111, 247, 70), 1, Qt.DashLine))
+            fill = QColor(C_ACCENT); fill.setAlpha(18)
+            p.setPen(Qt.NoPen); p.setBrush(fill)
             p.drawRect(rect)
+            pen = QPen(C_ACCENT, 1, Qt.DashLine)
+            pen.setColor(QColor(C_ACCENT.red(), C_ACCENT.green(), C_ACCENT.blue(), 100))
+            p.setPen(pen); p.setBrush(Qt.NoBrush)
+            p.drawRect(rect.adjusted(0, 0, -1, -1))
             if dur >= 20:
-                p.setPen(QColor(124, 111, 247, 170))
+                p.setPen(QColor(C_ACCENT.red(), C_ACCENT.green(), C_ACCENT.blue(), 180))
                 p.setFont(QFont("Segoe UI", 9))
                 p.drawText(rect.adjusted(10, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft,
                            "＋ drag to create, or click")
@@ -2100,11 +2568,11 @@ class TimelineWidget(QWidget):
         x = GUTTER_W + 4
         w = self.width() - GUTTER_W - 8
         rect = QRect(x, y, w, h)
-        fill = QColor(C_ACCENT); fill.setAlpha(60)
-        p.fillRect(rect, fill)
-        p.setPen(QPen(C_ACCENT, 1.5))
-        p.setBrush(Qt.NoBrush)
+        fill = QColor(C_ACCENT); fill.setAlpha(70)
+        p.setPen(Qt.NoPen); p.setBrush(fill)
         p.drawRect(rect)
+        p.setPen(QPen(C_ACCENT, 1.5)); p.setBrush(Qt.NoBrush)
+        p.drawRect(rect.adjusted(0, 0, -1, -1))
         p.setPen(C_TEXT)
         p.setFont(QFont("Segoe UI", 9, QFont.Bold))
         p.drawText(rect.adjusted(10, 4, -8, -4), Qt.AlignTop | Qt.AlignLeft,
@@ -2150,16 +2618,14 @@ class TimelineWidget(QWidget):
             dur  = blk["endMin"] - blk["startMin"]
             x, y, h = rect.x(), rect.y(), rect.height()
 
-            c    = QColor(blk.get("color") or C_ACCENT.name())
-            bg   = QColor(c.red(), c.green(), c.blue(), 45)
+            c, bg = block_colors(blk.get("color") or C_ACCENT.name())
+            rr   = max(4, min(RAD + 2, rect.height() // 2, 10))
+            dragging = (self._preview and blk.get("_btype") == "user"
+                        and blk["id"] == self._preview[0])
+            paint_schedule_block(p, rect, bg, c, radius=rr, accent_w=3,
+                                 outline=bool(dragging))
 
-            p.fillRect(rect, bg)
-            p.fillRect(QRect(x, y, 3, h), c)
-            # highlight the block currently being dragged
-            if self._preview and blk.get("_btype") == "user" and blk["id"] == self._preview[0]:
-                p.setPen(QPen(c, 1.5)); p.setBrush(Qt.NoBrush); p.drawRect(rect)
-
-            tr = rect.adjusted(8, 4, -4, -4)
+            tr = rect.adjusted(10, 4, -6, -4)
             if dur >= 25:
                 p.setFont(fn_bold); p.setPen(c)
                 p.drawText(tr, Qt.AlignTop | Qt.AlignLeft | Qt.TextWordWrap, blk["title"])
@@ -2349,7 +2815,9 @@ class AddActivityDialog(QDialog):
             end_min   = existing["endMin"]
             for_date  = existing.get("date", for_date)
         self.setWindowTitle("Edit Activity" if is_edit else "Add Activity")
-        self.setFixedWidth(380)
+        # Wide enough for a 2-col type grid with full labels; height scrolls.
+        self.setMinimumWidth(400)
+        self.setFixedWidth(420)
         self.result_activity = None
         self.result_deleted  = False
         self._sel = sel_type
@@ -2363,29 +2831,50 @@ class AddActivityDialog(QDialog):
                 color: {C_TEXT.name()}; padding: 7px 10px; border-radius: {RAD}px;
             }}
             QTimeEdit:focus, QLineEdit:focus {{ border-color: {C_ACCENT.name()}; }}
+            QScrollArea {{ background: transparent; border: none; }}
         """)
 
         lay = QVBoxLayout(self)
-        lay.setSpacing(14); lay.setContentsMargins(22, 20, 22, 20)
+        lay.setSpacing(14); lay.setContentsMargins(20, 18, 20, 18)
 
         title = QLabel("Edit Activity" if is_edit else "Log Activity")
         title.setStyleSheet("font-size: 15px; font-weight: bold;")
         lay.addWidget(title)
 
-        # Type buttons grid
+        # Type buttons — 2 columns so long labels (Extracurriculars, Class / School)
+        # stay fully inside the dialog. Chips expand evenly; vertical scroll only.
+        COLS = 2
         grid_w = QWidget()
+        grid_w.setMinimumWidth(0)
         grid   = QGridLayout(grid_w)
-        grid.setSpacing(5); grid.setContentsMargins(0,0,0,0)
+        grid.setSpacing(6); grid.setContentsMargins(0, 0, 2, 0)
+        for c in range(COLS):
+            grid.setColumnStretch(c, 1)
+            grid.setColumnMinimumWidth(c, 0)
         self._type_btns = {}
         for i, at in enumerate(ACTIVITY_TYPES):
             btn = QPushButton(f"{at['icon']} {at['label']}")
             btn.setCheckable(True)
             btn.setChecked(at["id"] == sel_type)
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             self._apply_type_style(btn, at, at["id"] == sel_type)
             btn.clicked.connect(lambda _, aid=at["id"]: self._pick(aid))
             self._type_btns[at["id"]] = (btn, at)
-            grid.addWidget(btn, i // 3, i % 3)
-        lay.addWidget(grid_w)
+            grid.addWidget(btn, i // COLS, i % COLS)
+        type_scroll = QScrollArea()
+        type_scroll.setWidgetResizable(True)
+        type_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        type_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        type_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        type_scroll.setMinimumHeight(200)
+        type_scroll.setMaximumHeight(280)
+        type_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        type_scroll.setWidget(grid_w)
+        # Keep the host from reporting a min width larger than the viewport
+        # (that was clipping the old 3rd column with H-scroll off).
+        grid_w.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        lay.addWidget(type_scroll)
 
         # Times — respect the exact range the user dragged/clicked (24-hour display).
         # QTime only goes 00:00–23:59, so end-of-day (1440 / "24:00") is shown as
@@ -2449,18 +2938,7 @@ class AddActivityDialog(QDialog):
         lay.addLayout(brow)
 
     def _apply_type_style(self, btn, at, selected):
-        c = at["color"]
-        if selected:
-            btn.setStyleSheet(f"""
-                QPushButton {{ background: {c}30; border: 1.5px solid {c}; color: {C_TEXT.name()};
-                font-weight: bold; padding: 5px 4px; border-radius: {RAD}px; font-size: 11px; }}
-            """)
-        else:
-            btn.setStyleSheet(f"""
-                QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-                color: {C_MUTED.name()}; padding: 5px 4px; border-radius: {RAD}px; font-size: 11px; }}
-                QPushButton:hover {{ border-color: {C_BORDER2.name()}; color: {C_TEXT.name()}; }}
-            """)
+        style_activity_type_chip(btn, at, selected, compact=False)
 
     def _pick(self, type_id):
         self._sel = type_id
@@ -2471,7 +2949,10 @@ class AddActivityDialog(QDialog):
     def _save(self):
         st = self.t_start.time(); en = self.t_end.time()
         sm = st.hour() * 60 + st.minute()
-        em = coerce_end_min(sm, en.hour() * 60 + en.minute())
+        # Pass original end so a full-day 00:00–24:00 block can be re-saved
+        # (both QTime fields show 00:00).
+        orig_em = self._existing.get("endMin") if self._existing else None
+        em = coerce_end_min(sm, en.hour() * 60 + en.minute(), original_end=orig_em)
         if em <= sm:
             QMessageBox.warning(
                 self, "Invalid",
@@ -2493,15 +2974,30 @@ class AddActivityDialog(QDialog):
         self.result_deleted = True
         self.accept()
 
+def _splitter_qss() -> str:
+    """Thin, theme-aware drag handles between resizable sections."""
+    return f"""
+        QSplitter::handle {{
+            background: {C_BORDER.name()};
+        }}
+        QSplitter::handle:hover {{
+            background: {C_ACCENT.name()};
+        }}
+        QSplitter::handle:horizontal {{ width: 4px; }}
+        QSplitter::handle:vertical   {{ height: 4px; }}
+    """
+
 # ══════════════════════════════════════════════════════════════════════════
-#  SIDEBAR  (activity type picker + daily summary)
+#  SIDEBAR  (activity type picker + daily summary — vertically resizable)
 # ══════════════════════════════════════════════════════════════════════════
 class SidebarWidget(QWidget):
     type_selected = Signal(str)
+    split_changed = Signal()   # sizes dragged — MainWindow persists
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(210)
+        self.setMinimumWidth(170)
+        self.setMaximumWidth(340)
         self.setStyleSheet(f"""
             QWidget {{ background: {C_SURFACE.name()}; }}
             QLabel  {{ background: transparent; color: {C_TEXT.name()}; }}
@@ -2510,61 +3006,89 @@ class SidebarWidget(QWidget):
         self._type_btns: Dict[str, tuple] = {}
 
         lay = QVBoxLayout(self)
-        lay.setSpacing(0); lay.setContentsMargins(0,0,0,0)
+        lay.setSpacing(0); lay.setContentsMargins(0, 0, 0, 0)
 
-        # ── Add activity section ───────────────────────────────────────────
+        self._split = QSplitter(Qt.Vertical)
+        self._split.setChildrenCollapsible(False)
+        self._split.setHandleWidth(5)
+        self._split.setStyleSheet(_splitter_qss())
+
+        # ── Add activity (type picker scrolls; height set by splitter) ─────
         add_sec = QWidget()
-        add_sec.setStyleSheet(f"border-bottom: 1px solid {C_BORDER.name()};")
+        add_sec.setMinimumHeight(90)
         al = QVBoxLayout(add_sec)
-        al.setContentsMargins(12, 14, 12, 14); al.setSpacing(8)
+        al.setContentsMargins(12, 12, 12, 8); al.setSpacing(6)
 
         hl = QLabel("ADD ACTIVITY")
-        hl.setStyleSheet(f"font-size: 9px; font-weight: bold; letter-spacing: 1px; color: {C_MUTED.name()};")
+        hl.setStyleSheet(
+            f"font-size: 9px; font-weight: bold; letter-spacing: 1px; color: {C_MUTED.name()};")
         al.addWidget(hl)
 
-        grid = QGridLayout(); grid.setSpacing(5); grid.setContentsMargins(0,0,0,0)
+        grid_host = QWidget()
+        grid = QGridLayout(grid_host); grid.setSpacing(5); grid.setContentsMargins(0, 0, 0, 0)
         for i, at in enumerate(ACTIVITY_TYPES):
             btn = QPushButton(f"{at['icon']} {at['label']}")
             btn.setCheckable(True)
             btn.setChecked(at["id"] == "study")
+            btn.setToolTip(at["label"])
             self._set_chip_style(btn, at, at["id"] == "study")
             btn.clicked.connect(lambda _, aid=at["id"]: self._select(aid))
             self._type_btns[at["id"]] = (btn, at)
             grid.addWidget(btn, i // 2, i % 2)
-        al.addLayout(grid)
+        type_scroll = QScrollArea()
+        type_scroll.setWidgetResizable(True)
+        type_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        type_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        type_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        type_scroll.setWidget(grid_host)
+        al.addWidget(type_scroll, 1)
 
-        hint = QLabel("Pick a type, then drag on the\ntimeline to create a block\n(or click for a quick 1-hour block).")
+        hint = QLabel("Pick a type, then drag the timeline\n(or click for a quick 1-hour block).")
         hint.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 10px;")
         al.addWidget(hint)
-        lay.addWidget(add_sec)
+        self._split.addWidget(add_sec)
 
-        # ── Summary section ────────────────────────────────────────────────
+        # ── Summary — tight stack like the original (no stretched gaps) ────
         sum_sec = QWidget()
+        sum_sec.setMinimumHeight(80)
         sl = QVBoxLayout(sum_sec)
-        sl.setContentsMargins(12, 14, 12, 8); sl.setSpacing(6)
+        sl.setContentsMargins(12, 12, 12, 8); sl.setSpacing(6)
 
         sh = QLabel("TODAY'S SUMMARY")
-        sh.setStyleSheet(f"font-size: 9px; font-weight: bold; letter-spacing: 1px; color: {C_MUTED.name()};")
+        sh.setStyleSheet(
+            f"font-size: 9px; font-weight: bold; letter-spacing: 1px; color: {C_MUTED.name()};")
         sl.addWidget(sh)
 
-        self._sum_area = QVBoxLayout(); self._sum_area.setSpacing(6)
-        sl.addLayout(self._sum_area)
-        lay.addWidget(sum_sec)
-        lay.addStretch()
+        sum_scroll = QScrollArea()
+        sum_scroll.setWidgetResizable(True)
+        sum_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sum_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sum_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        sum_inner = QWidget()
+        self._sum_area = QVBoxLayout(sum_inner)
+        self._sum_area.setContentsMargins(0, 0, 0, 0)
+        self._sum_area.setSpacing(6)   # same as original
+        self._sum_area.setAlignment(Qt.AlignTop)
+        self._sum_area.addStretch()
+        sum_scroll.setWidget(sum_inner)
+        sl.addWidget(sum_scroll, 1)
+        self._split.addWidget(sum_sec)
+
+        self._split.setStretchFactor(0, 1)
+        self._split.setStretchFactor(1, 1)
+        self._split.setSizes([220, 280])
+        self._split.splitterMoved.connect(lambda *_: self.split_changed.emit())
+        lay.addWidget(self._split)
+
+    def split_sizes(self) -> list:
+        return list(self._split.sizes())
+
+    def apply_split_sizes(self, sizes):
+        if isinstance(sizes, (list, tuple)) and len(sizes) >= 2 and all(int(s) > 0 for s in sizes[:2]):
+            self._split.setSizes([int(sizes[0]), int(sizes[1])])
 
     def _set_chip_style(self, btn, at, selected):
-        c = at["color"]
-        if selected:
-            btn.setStyleSheet(f"""
-                QPushButton {{ background: {c}28; border: 1.5px solid {c}; color: {C_TEXT.name()};
-                font-weight: bold; padding: 4px 5px; border-radius: {RAD}px; font-size: 10px; }}
-            """)
-        else:
-            btn.setStyleSheet(f"""
-                QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
-                color: {C_MUTED.name()}; padding: 4px 5px; border-radius: {RAD}px; font-size: 10px; }}
-                QPushButton:hover {{ border-color: {C_BORDER2.name()}; color: {C_TEXT.name()}; }}
-            """)
+        style_activity_type_chip(btn, at, selected, compact=True)
 
     def _select(self, tid):
         self._sel = tid
@@ -2596,8 +3120,11 @@ class SidebarWidget(QWidget):
             mins = totals.get(cat["id"], 0)
             if not mins: continue
             row = QWidget()
+            # Fixed size so the VBox doesn't stretch rows apart when the
+            # section is taller than the content (matches original packing).
+            row.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             rl  = QVBoxLayout(row)
-            rl.setContentsMargins(0,0,0,0); rl.setSpacing(3)
+            rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(3)
 
             top = QHBoxLayout(); top.setSpacing(6)
             dot = QLabel("●"); dot.setStyleSheet(f"color: {cat['color']}; font-size: 9px;")
@@ -2617,6 +3144,7 @@ class SidebarWidget(QWidget):
             """)
             rl.addWidget(bar)
             self._sum_area.addWidget(row)
+        self._sum_area.addStretch()   # leftover space below the list, not between rows
 
 # ══════════════════════════════════════════════════════════════════════════
 #  WEEK VIEW  (7 columns Mon–Sun, whole day scaled per column; read-mostly v1:
@@ -2714,11 +3242,9 @@ class WeekViewWidget(QWidget):
                 bw = area_w / b["_tcols"]
                 bx = int(x0 + 3 + b["_col"] * bw)
                 rect = QRect(bx, by, int(bw - 2), bh)
-                c  = QColor(b.get("color") or C_ACCENT.name())
-                bg = QColor(c.red(), c.green(), c.blue(), 45)
-                p.setPen(Qt.NoPen)
-                p.fillRect(rect, bg)
-                p.fillRect(QRect(rect.x(), by, 2, bh), c)
+                c, bg = block_colors(b.get("color") or C_ACCENT.name())
+                rr = max(3, min(RAD, rect.height() // 2, 8))
+                paint_schedule_block(p, rect, bg, c, radius=rr, accent_w=2)
                 if b["_btype"] == "user":
                     self._block_hits.append((rect, b["id"]))
                 if bh >= 26:
@@ -2886,10 +3412,10 @@ class MonthViewWidget(QWidget):
                 for i, ev in enumerate(shown):
                     cy   = y + 27 + i * 17
                     chip = QRect(x + 4, int(cy), int(cw) - 8, 14)
-                    col  = QColor(ev.get("color") or C_ACCENT.name())
+                    col, bg = block_colors(ev.get("color") or C_ACCENT.name())
                     if not in_month:
-                        col.setAlpha(120)
-                    bg = QColor(col); bg.setAlpha(45)
+                        col = QColor(col.red(), col.green(), col.blue(), 120)
+                        bg  = QColor(col.red(), col.green(), col.blue(), max(28, BLOCK_FILL_A // 2))
                     p.setPen(Qt.NoPen); p.setBrush(bg)
                     p.drawRoundedRect(chip, 4, 4)
                     p.setPen(col)
@@ -3015,9 +3541,16 @@ class AIPanel(QWidget):
         self.on_undo = None               # set by MainWindow: restore the last snapshot
         self._loop_msgs: List[Dict] = []  # running conversation for the tool loop
         self._depth = 0                   # tool-round counter (loop guard)
+        self._user_stopped = False        # Stop must not apply tools after cancel
 
-        self.setFixedWidth(320)
-        self.setStyleSheet(f"background: {C_SURFACE.name()}; color: {C_TEXT.name()};")
+        # Preferred width when the body splitter shows this panel; user can drag.
+        self._panel_w = 340
+        self.setObjectName("aiPanel")
+        self.setMinimumWidth(220)
+        self.setMaximumWidth(560)
+        self.setStyleSheet(
+            f"#aiPanel {{ background: {C_SURFACE.name()}; color: {C_TEXT.name()}; "
+            f"border-left: 1px solid {C_BORDER.name()}; }}")
 
         lay = QVBoxLayout(self); lay.setSpacing(0); lay.setContentsMargins(0,0,0,0)
 
@@ -3081,12 +3614,32 @@ class AIPanel(QWidget):
         """)
         self._model_info_btn.clicked.connect(self._show_model_guide)
         mr.addWidget(self._model_info_btn)
+        self._pull_btn = QPushButton("⬇")
+        self._pull_btn.setFixedSize(22, 24)
+        self._pull_btn.setCursor(Qt.PointingHandCursor)
+        self._pull_btn.setToolTip("Download this model with Ollama")
+        self._pull_btn.setStyleSheet(f"""
+            QPushButton {{ background: {C_SURF2.name()}; border: 1px solid {C_BORDER.name()};
+            color: {C_MUTED.name()}; border-radius: {RAD}px; font-size: 11px; }}
+            QPushButton:hover {{ background: {_rgba(C_OK, .18)}; border-color: {C_OK.name()};
+            color: {C_OK_TXT.name()}; }}
+            QPushButton:disabled {{ color: {C_BORDER2.name()}; }}
+        """)
+        self._pull_btn.clicked.connect(self._pull_selected_model)
+        mr.addWidget(self._pull_btn)
         hl.addLayout(mr)
         self._model_hint = QLabel()
         self._model_hint.setWordWrap(True)
         self._model_hint.setStyleSheet(
             f"color:{C_MUTED.name()}; font-size:10px; padding:0 2px;")
         hl.addWidget(self._model_hint)
+        self._pull_prog = QLabel()
+        self._pull_prog.setWordWrap(True)
+        self._pull_prog.setStyleSheet(
+            f"color:{C_ACCENT.name()}; font-size:10px; padding:0 2px 2px 2px;")
+        self._pull_prog.hide()
+        hl.addWidget(self._pull_prog)
+        self._pull_thread: Optional[OllamaPullThread] = None
         self._refresh_model_hint()
         lay.addWidget(hdr)
 
@@ -3104,7 +3657,8 @@ class AIPanel(QWidget):
         self._undo_btn = QPushButton("↶ Undo")
         self._undo_btn.setEnabled(False)
         self._undo_btn.setCursor(Qt.PointingHandCursor)
-        self._undo_btn.setToolTip("Undo the assistant's last change to your schedule")
+        self._undo_btn.setToolTip(
+            "Undo the assistant's last change (Ctrl+Z undoes your own edits)")
         self._undo_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {C_MUTED.name()}; border: none;"
             f" padding: 4px 12px; font-size: 11px; }}"
@@ -3163,10 +3717,22 @@ class AIPanel(QWidget):
 
     def _model_choices(self):
         seen, out = set(), []
-        for m in list_ollama_models() + RECOMMENDED_MODELS:
+        # Installed first, then curated recommendations not yet present
+        installed = list_ollama_models()
+        for m in installed + RECOMMENDED_MODELS:
             if m and m not in seen:
                 seen.add(m); out.append(m)
         return out
+
+    def _refresh_model_list(self):
+        """Rebuild the picker after a pull / Ollama reconnect."""
+        cur = self.model
+        self._model_in.blockSignals(True)
+        self._model_in.clear()
+        self._model_in.addItems(self._model_choices())
+        self._model_in.setCurrentText(cur)
+        self._model_in.blockSignals(False)
+        self._refresh_model_hint()
 
     def _on_model_changed(self, text):
         self.model = text.strip() or DEFAULT_MODEL
@@ -3175,21 +3741,72 @@ class AIPanel(QWidget):
             self.on_model_edited(self.model)
 
     def _refresh_model_hint(self):
-        """Show a one-line badge + full 'when to use' as the combo tooltip."""
+        """Show badge / install state + when-to-use tooltip; enable ⬇ if missing."""
+        installed = list_ollama_models() if self._ollama_up else []
+        have = model_is_installed(self.model, installed) if self._ollama_up else False
         p = model_profile(self.model)
-        if p:
-            self._model_hint.setText(f"{p['badge']}  ·  {p['vram']} VRAM")
+        if not self._ollama_up:
+            status = "Ollama not running"
+        elif have:
+            status = "Installed"
         else:
-            self._model_hint.setText("Custom model — verify tool-calling before trusting")
+            status = "Not installed — click ⬇ to download"
+        if p:
+            self._model_hint.setText(f"{p['badge']}  ·  {p['vram']} VRAM  ·  {status}")
+        else:
+            self._model_hint.setText(f"Custom model  ·  {status}")
         tip = model_when_text(self.model)
+        if not have and self._ollama_up:
+            tip += f"\n\nNot installed. Pull with:  ollama pull {self.model}"
         self._model_in.setToolTip(tip)
         self._model_hint.setToolTip(tip)
+        pulling = self._pull_thread is not None and self._pull_thread.isRunning()
+        self._pull_btn.setEnabled(self._ollama_up and bool(self.model) and not have and not pulling)
+        self._pull_btn.setToolTip(
+            "Download this model with Ollama" if not have else "Already installed")
+
+    def _pull_selected_model(self):
+        tag = (self._model_in.currentText() or self.model or "").strip()
+        if not tag:
+            return
+        if not self._ollama_up:
+            QMessageBox.information(self, "Ollama", "Start Ollama (▶) before pulling a model.")
+            return
+        if model_is_installed(tag):
+            self._refresh_model_hint(); return
+        if self._pull_thread is not None and self._pull_thread.isRunning():
+            return
+        self._pull_prog.setText(f"Pulling {tag}…"); self._pull_prog.show()
+        self._pull_btn.setEnabled(False)
+        t = OllamaPullThread(tag)
+        t.progress.connect(self._on_pull_progress)
+        t.finished_ok.connect(self._on_pull_ok)
+        t.failed.connect(self._on_pull_fail)
+        t.finished.connect(t.deleteLater)
+        t.finished.connect(lambda: setattr(self, "_pull_thread", None))
+        self._pull_thread = t
+        t.start()
+
+    def _on_pull_progress(self, msg: str):
+        self._pull_prog.setText(msg); self._pull_prog.show()
+
+    def _on_pull_ok(self, tag: str):
+        self._pull_prog.setText(f"✓  {tag} ready"); self._pull_prog.show()
+        self._refresh_model_list()
+        QTimer.singleShot(4000, lambda: self._pull_prog.hide()
+                          if not (self._pull_thread and self._pull_thread.isRunning()) else None)
+
+    def _on_pull_fail(self, msg: str):
+        self._pull_prog.setText(f"Pull failed: {msg}"); self._pull_prog.show()
+        self._refresh_model_hint()
+        QMessageBox.warning(self, "Model pull", msg)
 
     def _show_model_guide(self):
         show_model_guide(self)
 
     def apply_settings(self, s):
         """Apply persisted AI settings — on launch and after the Settings dialog."""
+        self._settings   = dict(s or {})
         self.model       = s.get("model", DEFAULT_MODEL)
         self.temperature = float(s.get("temperature", 0.3))
         self.num_ctx     = int(s.get("num_ctx", 16384))
@@ -3220,12 +3837,18 @@ class AIPanel(QWidget):
         t.start()
 
     def _on_ollama(self, ok: bool):
+        was = self._ollama_up
         self._ollama_up = ok
         self._dot.setStyleSheet(f"color: {(C_OK if ok else C_ERR).name()};")
         if not self._stxt.text().startswith("Starting"):
             self._stxt.setText("Connected" if ok else "Not running")
         self._set_power_state(ok)
         self._unload_btn.setEnabled(ok)
+        # Refresh install-state labels when Ollama comes up (or drops).
+        if ok != was or ok:
+            self._refresh_model_hint()
+            if ok and not was:
+                self._refresh_model_list()
 
     def _set_power_state(self, up: bool):
         """Power button is a toggle: ▶ Start when down, ⏻ Stop when up."""
@@ -3253,7 +3876,7 @@ class AIPanel(QWidget):
             self._start_ollama()
 
     def _start_ollama(self):
-        ok, msg = start_ollama()
+        ok, msg = start_ollama(getattr(self, "_settings", None))
         if not ok:
             QMessageBox.information(self, "Ollama", msg)
             return
@@ -3374,24 +3997,7 @@ class AIPanel(QWidget):
             "date arithmetic is unreliable, and the app does it correctly. So for \"copy to "
             "Thursday\" pass to_date=\"Thursday\", NOT a date you counted out. "
             "Omit the date for the day on screen.\n\n"
-            "ACTIVITY TYPES — set each block's \"type\" to what the user will actually be "
-            "DOING during it (judge by the activity itself, not the blocks around it):\n"
-            "  assignments – homework/tasks that are due (worksheets, problem sets)\n"
-            "  project     – longer-term project or build work\n"
-            "  study       – focused studying / revision / reading. ONLY for real studying.\n"
-            "  extra       – extracurriculars, clubs, lessons, social or other commitments\n"
-            "  gaming      – Anime/Gaming and general downtime/relaxation — USE THIS FOR BREAKS\n"
-            "  exercise    – workouts, sports, walks (also fine for an active break)\n"
-            "  meals       – eating: breakfast / lunch / dinner / snacks\n"
-            "  sleep       – sleeping or naps\n"
-            "TYPE RULES (the model often gets these wrong — follow them):\n"
-            "  - A BREAK or REST between work is downtime → use \"gaming\" (or \"exercise\" "
-            "for a physical break, \"meals\" for a snack). NEVER label a break as \"study\", "
-            "\"assignments\", or \"project\".\n"
-            "  - A break between two study blocks is still a break, NOT study — don't copy the "
-            "surrounding block's type onto it.\n"
-            "  - When you split a study block into chunks with breaks, the focus chunks are "
-            "\"study\" and the breaks are \"gaming\" (pass break_type to split_block).\n\n"
+            + activity_type_prompt_block() + "\n\n"
             "SCHEDULE (day on screen)\n"
             "Google Calendar (READ-ONLY — you cannot move or delete these). Timed events are "
             "FIXED obstacles — schedule around them. All-day events (holidays, due dates, "
@@ -3560,6 +4166,7 @@ class AIPanel(QWidget):
 
     def _generate(self, user_msg):
         if self._thread and self._thread.isRunning(): return
+        self._user_stopped = False
         self._maybe_memory_warning()
         if callable(self.on_turn_start):   # let MainWindow snapshot the schedule for undo
             self.on_turn_start()
@@ -3582,15 +4189,31 @@ class AIPanel(QWidget):
                 else self.temperature)
 
     def _spawn_thread(self):
-        self._thread = OllamaThread(self._loop_msgs, self.model, tools=AI_TOOLS,
-                                    num_ctx=self.num_ctx, temperature=self._effective_temp())
-        self._thread.token.connect(self._on_token)
-        self._thread.done.connect(self._on_done)
-        self._thread.tool_calls.connect(self._on_tool_calls)
-        self._thread.error.connect(self._on_error)
-        self._thread.start()
+        # Hold the QThread ref until finished + deleteLater (same lifecycle as
+        # OllamaCheckThread / pull). Replacing an unparented running thread used to
+        # let GC destroy the wrapper mid-teardown → segfault.
+        if self._thread is not None and self._thread.isRunning():
+            return
+        t = OllamaThread(self._loop_msgs, self.model, tools=AI_TOOLS,
+                         num_ctx=self.num_ctx, temperature=self._effective_temp())
+        t.token.connect(self._on_token)
+        t.done.connect(self._on_done)
+        t.tool_calls.connect(self._on_tool_calls)
+        t.error.connect(self._on_error)
+        t.finished.connect(t.deleteLater)
+        def _clear(th=t):
+            if self._thread is th:
+                self._thread = None
+        t.finished.connect(_clear)
+        self._thread = t
+        t.start()
 
     def _on_tool_calls(self, calls):
+        # Stop must cancel schedule mutations (native tool_calls path).
+        if getattr(self, "_user_stopped", False):
+            self._user_stopped = False
+            self._turn_ended()
+            return
         h = self.history[self.mode]
         # drop the empty streaming bubble; tool notes take its place
         if h and h[-1]["role"] == "assistant" and not h[-1]["content"].strip():
@@ -3620,6 +4243,8 @@ class AIPanel(QWidget):
         self._spawn_thread()
 
     def _on_token(self, tok):
+        if getattr(self, "_user_stopped", False):
+            return
         self._cur_text += tok
         if looks_like_tool_text(self._cur_text):
             # Model is printing a tool call as text — don't show raw JSON; keep the
@@ -3633,6 +4258,16 @@ class AIPanel(QWidget):
         self._persist_chat(force=False)
 
     def _on_done(self):
+        # User hit Stop — never recover/execute tools from partial text.
+        if getattr(self, "_user_stopped", False):
+            self._user_stopped = False
+            h = self.history[self.mode]
+            if h and h[-1]["role"] == "assistant":
+                if not (h[-1].get("content") or "").strip():
+                    h[-1]["content"] = "(Stopped.)"
+                self._render()
+            self._turn_ended()
+            return
         # Small models sometimes print the tool call as text (<|python_tag|>, ``` fences,
         # bare JSON, arrays…) instead of using the native tool_calls channel. Recover it.
         extracted = extract_tool_calls(self._cur_text) if self._depth < MAX_TOOL_ROUNDS else []
@@ -3657,12 +4292,18 @@ class AIPanel(QWidget):
         self._turn_ended()
 
     def _on_error(self, msg):
+        if getattr(self, "_user_stopped", False):
+            self._user_stopped = False
+            self._turn_ended()
+            return
         self.history[self.mode].pop()
         self.history[self.mode].append({"role":"error","content":msg})
         self._render(); self._turn_ended()
 
     def _stop(self):
-        if self._thread: self._thread.stop()
+        self._user_stopped = True
+        if self._thread:
+            self._thread.stop()
         self._persist_chat(force=True)
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -3763,9 +4404,10 @@ class SetupWidget(QWidget):
 # ══════════════════════════════════════════════════════════════════════════
 #  ALERT POPUP — app-drawn, always-on-top. Bypasses the Windows notification
 #  pipeline, so it shows even with Do Not Disturb / Focus Assist on.
+#  Planner-style card (square tiles + left accent), not OS balloon chrome.
 # ══════════════════════════════════════════════════════════════════════════
 class AlertPopup(QWidget):
-    def __init__(self, title, body, icon: QIcon):
+    def __init__(self, title, body, icon: QIcon, kind: str = "start"):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         # Stable title so compositor window rules can target the popup — on Wayland
         # apps can't place their own windows, but e.g. a KWin rule matching this
@@ -3774,41 +4416,66 @@ class AlertPopup(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)   # don't steal focus
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)           # free itself when dismissed
-        self.setFixedWidth(360)
+        self.setFixedWidth(380)
 
-        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
+        # kind: start | end | test — accent + badge text
+        is_end = kind == "end"
+        accent = C_MUTED if is_end else C_ACCENT
+        badge  = "BLOCK ENDED" if is_end else ("TEST" if kind == "test" else "STARTING NOW")
+
+        # Soft outer margin so a faux shadow rim stays inside the translucent window
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+
+        shell = QFrame(); shell.setObjectName("alertShell")
+        shell.setStyleSheet(
+            f"#alertShell {{ background: {_rgba(C_BG, 0.55)}; border-radius: 6px; }}")
+        outer.addWidget(shell)
+        shell_l = QVBoxLayout(shell); shell_l.setContentsMargins(3, 3, 3, 3)
+
         card = QFrame(); card.setObjectName("alertCard")
-        # Scope to #alertCard so the border/background don't cascade onto child labels
-        # (QLabel subclasses QFrame, so a bare `QFrame {…}` rule boxes every label).
+        # Scope to #alertCard so rules don't cascade onto child QLabels (also QFrame).
         card.setStyleSheet(
-            f"#alertCard {{ background: {C_SURFACE.name()}; border: 1px solid {C_ACCENT.name()};"
-            f" border-radius: {RAD_LG}px; }}")
-        outer.addWidget(card)
+            f"#alertCard {{ background: {C_SURFACE.name()}; "
+            f"border: 1px solid {_rgba(accent, 0.55)}; border-radius: 4px; }}")
+        shell_l.addWidget(card)
+
         cl = QHBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
 
-        bar = QFrame(); bar.setFixedWidth(5)
-        bar.setStyleSheet(f"background: {C_ACCENT.name()}; border-top-left-radius: {RAD_LG}px;"
-                          f" border-bottom-left-radius: {RAD_LG}px;")
+        # Crisp left accent — same language as schedule blocks
+        bar = QFrame(); bar.setFixedWidth(4)
+        bar.setStyleSheet(f"background: {accent.name()}; border: none;")
         cl.addWidget(bar)
 
-        col = QVBoxLayout(); col.setContentsMargins(14, 11, 14, 12); col.setSpacing(5)
+        col = QVBoxLayout(); col.setContentsMargins(14, 12, 14, 12); col.setSpacing(6)
+
         head = QHBoxLayout(); head.setSpacing(8)
-        ic = QLabel(); ic.setPixmap(icon.pixmap(18, 18))
-        app_lbl = QLabel("Daily Scheduler")
-        app_lbl.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 10px; font-weight: bold;"
-                              " letter-spacing: 1px;")
-        head.addWidget(ic); head.addWidget(app_lbl); head.addStretch()
-        x = QLabel("✕"); x.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 11px;")
-        head.addWidget(x)
+        ic = QLabel(); ic.setPixmap(icon.pixmap(20, 20))
+        app_lbl = QLabel("DAILY SCHEDULER")
+        app_lbl.setStyleSheet(
+            f"color: {C_MUTED.name()}; font-size: 10px; font-weight: 700;"
+            " letter-spacing: 1.2px;")
+        badge_lbl = QLabel(badge)
+        badge_lbl.setStyleSheet(
+            f"color: {accent.name()}; background: {_rgba(accent, 0.14)}; "
+            f"border: 1px solid {_rgba(accent, 0.35)}; border-radius: 3px; "
+            f"padding: 2px 7px; font-size: 9px; font-weight: 700; letter-spacing: 0.6px;")
+        head.addWidget(ic); head.addWidget(app_lbl); head.addStretch(); head.addWidget(badge_lbl)
         col.addLayout(head)
 
         t = QLabel(title); t.setWordWrap(True)
-        t.setStyleSheet(f"color: {C_TEXT.name()}; font-size: 14px; font-weight: bold;")
+        t.setStyleSheet(
+            f"color: {C_TEXT.name()}; font-size: 15px; font-weight: 700; padding-top: 2px;")
         col.addWidget(t)
+
         b = QLabel(body); b.setWordWrap(True)
-        b.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 12px;")
+        b.setStyleSheet(f"color: {C_MUTED.name()}; font-size: 12px; line-height: 1.3;")
         col.addWidget(b)
-        cl.addLayout(col)
+
+        foot = QLabel("Click to dismiss")
+        foot.setStyleSheet(f"color: {_rgba(C_MUTED, 0.75)}; font-size: 10px; padding-top: 2px;")
+        col.addWidget(foot)
+        cl.addLayout(col, 1)
 
         self._timer = QTimer(self); self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.close)
@@ -3817,7 +4484,7 @@ class AlertPopup(QWidget):
     def show_at(self, x, y):
         self.adjustSize()
         self.move(x, y - self.height())
-        self.show()
+        self.show()  # no opacity effect — keeps the alert snappy under DND
 
     def mousePressEvent(self, _ev):
         self.close()
@@ -3832,9 +4499,12 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: Dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(460)
+        self.setMinimumHeight(520)
+        self.resize(480, 640)
         self.values = dict(settings)
         self.startup_requested = is_startup_enabled()
+        self.restored_acts: Optional[List[Dict]] = None
         self.setStyleSheet(f"""
             QDialog {{ background: {C_SURFACE.name()}; color: {C_TEXT.name()}; }}
             QLabel  {{ background: transparent; color: {C_TEXT.name()}; }}
@@ -3848,7 +4518,16 @@ class SettingsDialog(QDialog):
                 color: {C_TEXT.name()}; padding: 6px 12px; border-radius: {RAD}px; }}
             QPushButton:hover {{ border-color: {C_BORDER2.name()}; }}
         """)
-        lay = QVBoxLayout(self); lay.setSpacing(8); lay.setContentsMargins(22, 18, 22, 18)
+        # Scrollable body so added notify/AI rows still fit on short displays
+        root = QVBoxLayout(self); root.setSpacing(0); root.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        body = QWidget()
+        lay = QVBoxLayout(body); lay.setSpacing(8); lay.setContentsMargins(22, 18, 22, 12)
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
 
         def section(text, top=True):
             lbl = QLabel(text)
@@ -3886,9 +4565,38 @@ class SettingsDialog(QDialog):
         self.lead_sb = QSpinBox(); self.lead_sb.setRange(0, 60); self.lead_sb.setSuffix(" min before")
         self.lead_sb.setValue(int(settings.get("notify_lead_min", 0)))
         n.addRow("Lead time", self.lead_sb)
+        self.end_chime_cb = QCheckBox("Chime when a block ends")
+        self.end_chime_cb.setChecked(bool(settings.get("notify_end_chime", False)))
+        self.end_chime_cb.setToolTip(
+            "Optional: soft sound when a block ends (off by default; start alerts stay separate)")
+        n.addRow("End chime", self.end_chime_cb)
+        self.sound_cb = QCheckBox("Play a sound with alerts")
+        self.sound_cb.setChecked(bool(settings.get("notify_sound", True)))
+        n.addRow("Sound", self.sound_cb)
+        self.tone_cb = QComboBox()
+        for tid, label in NOTIFY_TONES:
+            self.tone_cb.addItem(label, tid)
+        cur_tone = str(settings.get("notify_tone", "chime") or "chime")
+        ti = self.tone_cb.findData(cur_tone)
+        self.tone_cb.setCurrentIndex(ti if ti >= 0 else 0)
+        n.addRow("Tone", self.tone_cb)
+        self.vol_sb = QSpinBox()
+        self.vol_sb.setRange(0, 100)
+        self.vol_sb.setSuffix("%")
+        self.vol_sb.setValue(int(settings.get("notify_volume", 80) or 80))
+        n.addRow("Volume", self.vol_sb)
         self.dnd_cb = QCheckBox("Break through Do Not Disturb / Focus Assist")
         self.dnd_cb.setChecked(bool(settings.get("dnd_override")))
+        self.dnd_cb.setToolTip(
+            "Uses an in-app popup (planner-style card) instead of the OS tray balloon, "
+            "so alerts still show under Focus Assist / DND.")
         n.addRow("Priority alert", self.dnd_cb)
+        preview_row = QHBoxLayout()
+        prev_btn = QPushButton("Preview alert…")
+        prev_btn.setToolTip("Show a sample popup and play the selected tone")
+        prev_btn.clicked.connect(self._preview_alert)
+        preview_row.addWidget(prev_btn); preview_row.addStretch()
+        n.addRow("", preview_row)
         lay.addLayout(n)
 
         section("AI ASSISTANT")
@@ -3933,31 +4641,124 @@ class SettingsDialog(QDialog):
         wrow.addWidget(self.pend); wrow.addStretch()
         ww = QWidget(); ww.setLayout(wrow)
         a.addRow("Planning hours", ww)
+
+        # Where Ollama stores pulled models (OLLAMA_MODELS when this app starts Ollama)
+        models_row = QHBoxLayout(); models_row.setContentsMargins(0, 0, 0, 0)
+        self.models_dir = QLineEdit(str(settings.get("ollama_models_dir") or ""))
+        self.models_dir.setPlaceholderText(str(default_ollama_models_dir()))
+        self.models_dir.setToolTip(
+            "Folder where Ollama saves downloaded models (sets OLLAMA_MODELS).\n"
+            "Applies when Daily Scheduler starts Ollama. If Ollama is already "
+            "running from the tray/service, restart it from this app (or quit "
+            "the system Ollama first) so pulls use the new folder.\n"
+            "Leave blank for Ollama’s default (~/.ollama/models).")
+        browse_m = QPushButton("Browse…")
+        browse_m.clicked.connect(self._browse_models_dir)
+        open_m = QPushButton("Open")
+        open_m.setToolTip("Open the effective models folder in your file manager")
+        open_m.clicked.connect(self._open_models_dir)
+        models_row.addWidget(self.models_dir, 1)
+        models_row.addWidget(browse_m)
+        models_row.addWidget(open_m)
+        mw = QWidget(); mw.setLayout(models_row)
+        a.addRow("Models folder", mw)
+        models_hint = QLabel(
+            "Custom path only takes effect when this app starts Ollama (▶ in the AI panel).")
+        models_hint.setWordWrap(True)
+        models_hint.setStyleSheet(f"color:{C_MUTED.name()}; font-size:10px;")
+        a.addRow("", models_hint)
         lay.addLayout(a)
+
+        section("CALENDAR")
+        c = QFormLayout(); c.setSpacing(8)
+        self.cal_ids = QLineEdit(str(settings.get("calendar_ids", "primary")))
+        self.cal_ids.setPlaceholderText("primary, or other calendar IDs, comma-separated")
+        self.cal_ids.setToolTip(
+            "Google Calendar IDs to overlay (read-only). Default is primary. "
+            "Find IDs in Google Calendar → Settings → Integrate calendar. "
+            "Example: primary,school@group.calendar.google.com")
+        c.addRow("Calendar IDs", self.cal_ids)
+        lay.addLayout(c)
 
         section("DATA")
         drow = QHBoxLayout()
         openf = QPushButton("Open data folder"); openf.clicked.connect(self._open_folder)
         expt  = QPushButton("Export schedule…"); expt.clicked.connect(self._export)
-        drow.addWidget(openf); drow.addWidget(expt); drow.addStretch()
+        rest  = QPushButton("Restore from backup…"); rest.clicked.connect(self._restore_backup)
+        drow.addWidget(openf); drow.addWidget(expt); drow.addWidget(rest); drow.addStretch()
         lay.addLayout(drow)
 
-        br = QHBoxLayout(); br.addStretch()
+        # Footer buttons stay outside the scroll area so Save is always reachable
+        foot = QWidget()
+        foot.setStyleSheet(f"background:{C_SURFACE.name()}; border-top:1px solid {C_BORDER.name()};")
+        br = QHBoxLayout(foot); br.setContentsMargins(22, 10, 22, 14); br.addStretch()
         cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
         save = QPushButton("Save")
         save.setStyleSheet(f"QPushButton {{ background:{C_ACCENT.name()}; color:{C_ON_ACCENT.name()}; "
                            f"border:none; padding:7px 18px; border-radius:{RAD}px; font-weight:bold; }}")
         save.clicked.connect(self._save)
         br.addWidget(cancel); br.addWidget(save)
-        lay.addSpacing(4); lay.addLayout(br)
+        root.addWidget(foot)
 
     def _on_settings_model_changed(self, text):
         tip = model_when_text(text)
-        self.model_hint.setText(tip)
+        have = model_is_installed(text)
+        status = "Installed" if have else "Not installed (use ⬇ in the AI panel to pull)"
+        self.model_hint.setText(f"{status}\n{tip}")
         self.model_cb.setToolTip(tip)
 
     def _show_model_guide(self):
         show_model_guide(self)
+
+    def _browse_models_dir(self):
+        start = self.models_dir.text().strip() or str(default_ollama_models_dir())
+        path = QFileDialog.getExistingDirectory(self, "Ollama models folder", start)
+        if path:
+            self.models_dir.setText(path)
+
+    def _open_models_dir(self):
+        raw = self.models_dir.text().strip()
+        p = Path(raw).expanduser() if raw else default_ollama_models_dir()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            if platform.system() == "Windows":
+                os.startfile(str(p))  # type: ignore[attr-defined]
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", str(p)])
+            else:
+                subprocess.run(["xdg-open", str(p)])
+        except Exception:
+            pass
+
+    def _preview_alert(self):
+        """Live sample of the current tone/volume/DND choices (does not Save)."""
+        # Stash preview settings so MainWindow helpers can read them if parent is MainWindow
+        tone = self.tone_cb.currentData() or "chime"
+        vol  = self.vol_sb.value()
+        sound = self.sound_cb.isChecked()
+        parent = self.parent()
+        # Play sound using the same synthesis path as production
+        if sound and vol > 0:
+            try:
+                play_alert_sound(parent if isinstance(parent, QWidget) else self,
+                                 tone=tone, volume=vol / 100.0)
+            except Exception:
+                pass
+        icon = parent._make_app_icon() if parent is not None and hasattr(parent, "_make_app_icon") else QIcon()
+        # Always show our planner-style card for preview (appearance is the point)
+        popup = AlertPopup("▶ Study session", "14:00 – 15:00  ·  preview",
+                           icon, kind="test")
+        if not hasattr(self, "_preview_popups"):
+            self._preview_popups = []
+        self._preview_popups.append(popup)
+        popup.destroyed.connect(
+            lambda *_: self._preview_popups.remove(popup)
+            if popup in getattr(self, "_preview_popups", []) else None)
+        geo = QApplication.primaryScreen().availableGeometry()
+        popup.show_at(geo.right() - popup.width() - 16, geo.bottom() - 16)
 
     def _open_folder(self):
         try:
@@ -3980,20 +4781,74 @@ class SettingsDialog(QDialog):
             except Exception:
                 pass
 
+    def _restore_backup(self):
+        """Pick a .bak or dated daily snapshot and stage it for MainWindow to apply."""
+        items = list_schedule_backups()
+        if not items:
+            QMessageBox.information(
+                self, "No backups",
+                "No backup files found yet. Backups appear after you save schedule "
+                "changes (previous-save .bak and daily snapshots under backups/).")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Restore from backup")
+        dlg.setMinimumWidth(420)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            "Choose a restore point. Your current schedule will be replaced "
+            "(a new .bak is written first if possible)."))
+        lb = QComboBox()
+        for it in items:
+            lb.addItem(it["label"], str(it["path"]))
+        lay.addWidget(lb)
+        row = QHBoxLayout(); row.addStretch()
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(dlg.reject)
+        ok = QPushButton("Restore")
+        ok.setStyleSheet(
+            f"QPushButton {{ background:{C_ACCENT.name()}; color:{C_ON_ACCENT.name()}; "
+            f"border:none; padding:7px 18px; border-radius:{RAD}px; font-weight:bold; }}")
+        ok.clicked.connect(dlg.accept)
+        row.addWidget(cancel); row.addWidget(ok)
+        lay.addLayout(row)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        path = Path(lb.currentData())
+        acts = load_activities_from_path(path)
+        if acts is None:
+            QMessageBox.warning(self, "Restore failed",
+                                f"Could not read a valid schedule from:\n{path}")
+            return
+        confirm = QMessageBox.question(
+            self, "Confirm restore",
+            f"Replace your current schedule with:\n\n{lb.currentText()}\n\n"
+            f"({len(acts)} block(s))",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+        self.restored_acts = acts
+        # Close settings with Accept so MainWindow applies the restore + saves settings
+        self._save()
+
     def _save(self):
         self.startup_requested = self.startup_cb.isChecked()
         self.values.update({
             "theme":            self.theme_cb.currentData(),
             "ollama_autostart": self.autostart_cb.isChecked(),
+            "ollama_models_dir": self.models_dir.text().strip(),
             "update_check_on":  self.updates_cb.isChecked(),
             "notify_on":        self.notify_cb.isChecked(),
             "notify_lead_min":  self.lead_sb.value(),
+            "notify_end_chime": self.end_chime_cb.isChecked(),
+            "notify_sound":     self.sound_cb.isChecked(),
+            "notify_tone":      self.tone_cb.currentData() or "chime",
+            "notify_volume":    int(self.vol_sb.value()),
             "dnd_override":     self.dnd_cb.isChecked(),
             "model":            self.model_cb.currentText().strip() or DEFAULT_MODEL,
             "temperature":      round(self.temp_sb.value(), 2),
             "num_ctx":          self.ctx_cb.currentData(),
             "plan_day_start":   self.pstart.time().toString("HH:mm"),
             "plan_day_end":     self.pend.time().toString("HH:mm"),
+            "calendar_ids":     self.cal_ids.text().strip() or "primary",
         })
         self.accept()
 
@@ -4012,6 +4867,7 @@ class MainWindow(QMainWindow):
         self._cal_threads: List[QThread] = []
         self._all_acts:    List[Dict] = load_all_activities()
         self._ai_undo:     List[List[Dict]] = []   # schedule snapshots for AI undo
+        self._manual_undo: List[List[Dict]] = []   # v4.0: Ctrl+Z for manual edits
         self._ai_turn_snapshotted = False
         self._ai_turn_active = False   # a turn is streaming — Undo is locked meanwhile
         self._cur_date:    date = date.today()
@@ -4028,12 +4884,17 @@ class MainWindow(QMainWindow):
         self._dnd_override = self._settings["dnd_override"]   # break through DND via app-drawn popup
         self._popups:      List[QWidget] = []
         self._notified:    set = set()     # (block_id, startMin) already announced today
+        self._notified_ends: set = set()   # (block_id, endMin) end-chimes already fired
         self._notified_day = date.today().isoformat()
         self._really_quit  = False
         self._tray_hinted  = False
 
         self.setStyleSheet(f"QMainWindow {{ background: {C_BG.name()}; }}")
         self.setWindowIcon(self._make_app_icon())
+        # Ctrl+Z — undo the last MANUAL edit (AI has its own ↶ Undo button)
+        sc = QShortcut(QKeySequence("Ctrl+Z"), self)
+        sc.setContext(Qt.WindowShortcut)
+        sc.activated.connect(self._manual_undo_last)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -4061,7 +4922,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._build_header())
 
         body    = QWidget()
-        body_l  = QHBoxLayout(body); body_l.setSpacing(0); body_l.setContentsMargins(0,0,0,0)
+        body_l  = QHBoxLayout(body); body_l.setSpacing(0); body_l.setContentsMargins(0, 0, 0, 0)
 
         # Day view — all-day banner + timeline in a scroll area
         self._scroll = QScrollArea()
@@ -4080,9 +4941,9 @@ class MainWindow(QMainWindow):
         self._allday_banner.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._allday_banner.hide()
         self._allday_banner.setStyleSheet(
-            f"QLabel {{ background: {_rgba(C_INFO, .12)}; color: {C_INFO.name()}; "
-            f"border-bottom: 1px solid {_rgba(C_INFO, .35)}; padding: 6px 12px; "
-            f"font-size: 12px; }}")
+            f"QLabel {{ background: {_rgba(C_INFO, .14)}; color: {C_INFO.name()}; "
+            f"border-bottom: 1px solid {_rgba(C_INFO, .32)}; padding: 8px 14px; "
+            f"font-size: 12px; font-weight: 500; }}")
         self._day_page = QWidget()
         day_l = QVBoxLayout(self._day_page)
         day_l.setContentsMargins(0, 0, 0, 0); day_l.setSpacing(0)
@@ -4107,11 +4968,11 @@ class MainWindow(QMainWindow):
         self._view_stack.addWidget(self._week_view)    # 1 — week
         self._view_stack.addWidget(self._month_view)   # 2 — month
         self._view_stack.addWidget(self._year_scroll)  # 3 — year
-        body_l.addWidget(self._view_stack, 1)
+        self._view_stack.setMinimumWidth(320)
 
-        # Sidebar
+        # Sidebar (Add Activity ↔ Summary sizes are their own vertical splitter)
         self._sidebar = SidebarWidget()
-        body_l.addWidget(self._sidebar)
+        self._sidebar.split_changed.connect(self._persist_layout_splits)
 
         # AI Panel (hidden by default) — wired to edit the schedule via tools
         self._ai_panel = AIPanel(self._ai_ctx)
@@ -4123,9 +4984,37 @@ class MainWindow(QMainWindow):
         self._ai_panel.on_turn_start = self._ai_turn_start
         self._ai_panel.on_turn_end = self._ai_turn_end
         self._ai_panel.on_undo = self._ai_undo_last
-        self._ai_panel.hide()
-        body_l.addWidget(self._ai_panel)
+        aw = int(self._settings.get("ai_panel_w", 340) or 340)
+        self._ai_panel._panel_w = max(220, min(560, aw))
 
+        # Horizontal splitter: calendar | sidebar | AI — drag handles to resize
+        self._body_split = QSplitter(Qt.Horizontal)
+        self._body_split.setHandleWidth(5)
+        self._body_split.setStyleSheet(_splitter_qss())
+        self._body_split.addWidget(self._view_stack)
+        self._body_split.addWidget(self._sidebar)
+        self._body_split.addWidget(self._ai_panel)
+        self._body_split.setStretchFactor(0, 1)
+        self._body_split.setStretchFactor(1, 0)
+        self._body_split.setStretchFactor(2, 0)
+        self._body_split.setCollapsible(0, False)  # calendar always visible
+        self._body_split.setCollapsible(1, False)  # sidebar always visible
+        self._body_split.setCollapsible(2, True)   # AI may collapse to 0 when closed
+        # Restore saved sizes (AI starts hidden at width 0)
+        saved = self._settings.get("body_split") or []
+        if isinstance(saved, list) and len(saved) >= 2:
+            cal_w = max(320, int(saved[0]) if int(saved[0]) > 0 else 900)
+            side_w = max(170, min(340, int(saved[1]) if int(saved[1]) > 0 else 210))
+        else:
+            cal_w, side_w = 900, 210
+        self._body_split.setSizes([cal_w, side_w, 0])
+        self._ai_panel.setMinimumWidth(0)
+        self._ai_panel.setMaximumWidth(0)   # no dead pane while closed
+        self._ai_panel.hide()
+        self._body_split.splitterMoved.connect(self._on_body_split_moved)
+        # Sidebar internal split (types vs summary)
+        self._sidebar.apply_split_sizes(self._settings.get("sidebar_split") or [])
+        body_l.addWidget(self._body_split)
         lay.addWidget(body, 1)
 
         # Status bar — status text on the left, a hidden "update available" pill
@@ -4178,34 +5067,54 @@ class MainWindow(QMainWindow):
         self._refresh_view()
 
     def _build_header(self) -> QWidget:
-        hdr = QWidget(); hdr.setFixedHeight(52)
-        hdr.setStyleSheet(f"background:{C_SURFACE.name()}; border-bottom:1px solid {C_BORDER.name()};")
-        hl  = QHBoxLayout(hdr); hl.setContentsMargins(16,0,16,0); hl.setSpacing(8)
+        hdr = QWidget(); hdr.setFixedHeight(56)
+        hdr.setStyleSheet(
+            f"background:{C_SURFACE.name()}; border-bottom:1px solid {C_BORDER.name()};")
+        hl  = QHBoxLayout(hdr); hl.setContentsMargins(18, 0, 14, 0); hl.setSpacing(8)
 
         def hbtn(text, checked=False):
             b = QPushButton(text)
             b.setCheckable(checked)
+            b.setCursor(Qt.PointingHandCursor)
             b.setStyleSheet(f"""
                 QPushButton {{ background:{C_SURF2.name()}; border:1px solid {C_BORDER.name()};
-                color:{C_MUTED.name()}; padding:5px 13px; border-radius:{RAD}px; font-size:12px; }}
-                QPushButton:hover {{ color:{C_TEXT.name()}; border-color:{C_BORDER2.name()}; }}
-                QPushButton:checked {{ background:{_rgba(C_ACCENT, .15)};
-                border-color:{_rgba(C_ACCENT, .5)}; color:{C_ACCENT.name()}; }}
+                color:{C_MUTED.name()}; padding:6px 14px; border-radius:{RAD}px; font-size:12px; }}
+                QPushButton:hover {{ color:{C_TEXT.name()}; border-color:{C_BORDER2.name()};
+                background:{_rgba(C_TEXT, .04)}; }}
+                QPushButton:checked {{ background:{_rgba(C_ACCENT, .16)};
+                border-color:{_rgba(C_ACCENT, .55)}; color:{C_ACCENT.name()}; font-weight:600; }}
             """)
             return b
 
-        logo = QLabel("◈ Daily Scheduler")
-        logo.setStyleSheet(f"font-size:15px; font-weight:bold; color:{C_ACCENT.name()};")
+        def icon_btn(text, tip, font_px=16):
+            # Fixed-width + large padding clips emoji/glyphs (‹ › ⚙) to invisibility.
+            b = QPushButton(text)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedSize(36, 32)
+            b.setToolTip(tip)
+            b.setStyleSheet(f"""
+                QPushButton {{ background:{C_SURF2.name()}; border:1px solid {C_BORDER.name()};
+                color:{C_TEXT.name()}; padding:0; border-radius:{RAD}px;
+                font-size:{font_px}px; font-weight:600; }}
+                QPushButton:hover {{ color:{C_ACCENT.name()}; border-color:{C_ACCENT.name()};
+                background:{_rgba(C_ACCENT, .12)}; }}
+                QPushButton:pressed {{ background:{_rgba(C_ACCENT, .22)}; }}
+            """)
+            return b
+
+        logo = QLabel("◈  Daily Scheduler")
+        logo.setStyleSheet(
+            f"font-size:15px; font-weight:700; color:{C_ACCENT.name()}; letter-spacing:0.2px;")
         hl.addWidget(logo)
         ver = QLabel(f"v{APP_VERSION}")
         ver.setStyleSheet(f"color:{C_MUTED.name()}; font-size:10px; padding-top:4px;")
         hl.addWidget(ver)
 
-        prev_b = hbtn("‹"); prev_b.setFixedWidth(30)
+        prev_b = icon_btn("‹", "Previous", font_px=18)
         prev_b.clicked.connect(lambda: self._nav(-1))
         today_b = hbtn("Today")
         today_b.clicked.connect(lambda: self._goto_date(date.today()))
-        next_b = hbtn("›"); next_b.setFixedWidth(30)
+        next_b = icon_btn("›", "Next", font_px=18)
         next_b.clicked.connect(lambda: self._nav(1))
         hl.addWidget(prev_b); hl.addWidget(today_b); hl.addWidget(next_b)
 
@@ -4230,8 +5139,7 @@ class MainWindow(QMainWindow):
         self._refresh_btn.clicked.connect(self._refresh_cal)
         hl.addWidget(self._refresh_btn)
 
-        settings_b = hbtn("⚙"); settings_b.setFixedWidth(34)
-        settings_b.setToolTip("Settings")
+        settings_b = icon_btn("⚙", "Settings", font_px=15)
         settings_b.clicked.connect(self._open_settings)
         hl.addWidget(settings_b)
 
@@ -4289,7 +5197,9 @@ class MainWindow(QMainWindow):
                 continue
             self._fetched_keys.add(key)
             self._set_status("Fetching calendar…")
-            t = CalFetchThread(self._creds, start, end)
+            t = CalFetchThread(
+                self._creds, start, end,
+                calendar_ids=parse_calendar_ids(self._settings.get("calendar_ids", "primary")))
             t.done.connect(self._on_cal)
             t.error.connect(lambda e, k=key: (self._fetched_keys.discard(k),
                                               self._set_status(e, True)))
@@ -4384,6 +5294,8 @@ class MainWindow(QMainWindow):
         self._view_stack.setCurrentIndex({"day": 0, "week": 1, "month": 2, "year": 3}[v])
         self._ensure_cal_for_view()
         self._refresh_view()
+        # No opacity fade on painted views — QGraphicsOpacityEffect re-rasterizes the
+        # full timeline/week grid every frame and stutters badly.
 
     def _goto_date(self, d: date):
         self._cur_date = d
@@ -4473,10 +5385,27 @@ class MainWindow(QMainWindow):
             self._year_view.set_year(d.year, busy)
 
     # ── Activity actions ───────────────────────────────────────────────────
+    def _manual_snapshot(self):
+        """Push current schedule so Ctrl+Z can restore it after a manual edit."""
+        self._manual_undo.append([dict(a) for a in self._all_acts])
+        del self._manual_undo[:-MANUAL_UNDO_KEEP]
+
+    def _manual_undo_last(self):
+        """Ctrl+Z: restore the schedule to before the last create/edit/drag/delete."""
+        if not self._manual_undo:
+            self._set_status("Nothing to undo.")
+            return
+        self._all_acts = self._manual_undo.pop()
+        save_all_activities(self._all_acts)
+        self._ai_undo_invalidate()
+        self._refresh_view()
+        self._set_status("Undid last edit. (Ctrl+Z)")
+
     def _on_block_create(self, s, e):
         dlg = AddActivityDialog(s, e, self._sidebar.selected_type,
                                 self._cur_date.isoformat(), parent=self)
         if dlg.exec() == QDialog.Accepted and dlg.result_activity:
+            self._manual_snapshot()
             self._all_acts.append(dlg.result_activity)
             save_all_activities(self._all_acts)
             self._ai_undo_invalidate()
@@ -4490,6 +5419,7 @@ class MainWindow(QMainWindow):
                                 existing=act, parent=self)
         if dlg.exec() != QDialog.Accepted:
             return
+        self._manual_snapshot()
         if dlg.result_deleted:
             self._all_acts = [a for a in self._all_acts if a["id"] != aid]
         elif dlg.result_activity:
@@ -4501,6 +5431,7 @@ class MainWindow(QMainWindow):
 
     def _commit_activity_change(self, aid, start, end):
         """Apply a drag move/resize to an existing block."""
+        self._manual_snapshot()
         for a in self._all_acts:
             if a["id"] == aid:
                 a["startMin"] = max(DAY_START, int(start))
@@ -4511,16 +5442,87 @@ class MainWindow(QMainWindow):
         self._refresh_view()
 
     def _delete_activity(self, aid):
+        self._manual_snapshot()
         self._all_acts = [a for a in self._all_acts if a["id"] != aid]
         save_all_activities(self._all_acts)
         self._ai_undo_invalidate()
         self._refresh_view()
 
+    # ── Layout splitters (calendar | sidebar | AI, and types | summary) ────
+    def _on_body_split_moved(self, *_):
+        sizes = self._body_split.sizes()
+        if self._ai_visible and len(sizes) >= 3 and sizes[2] > 0:
+            self._ai_panel._panel_w = sizes[2]
+        self._persist_layout_splits()
+
+    def _persist_layout_splits(self):
+        """Remember section sizes so the next launch looks the same."""
+        try:
+            sizes = list(self._body_split.sizes())
+            # Always store AI preferred width even when the panel is closed (0)
+            if self._ai_visible and len(sizes) >= 3 and sizes[2] > 0:
+                self._settings["ai_panel_w"] = sizes[2]
+            elif not self._ai_visible:
+                # Keep last open width; body_split[2] is 0 while hidden
+                sizes = [sizes[0], sizes[1],
+                         int(self._settings.get("ai_panel_w", 340) or 340)]
+            self._settings["body_split"] = sizes
+            self._settings["sidebar_split"] = self._sidebar.split_sizes()
+            save_settings(self._settings)
+        except Exception:
+            pass
+
     # ── AI panel ───────────────────────────────────────────────────────────
     def _toggle_ai(self):
+        """Show/hide the AI panel inside the body splitter (drag the handle to resize)."""
         self._ai_visible = not self._ai_visible
-        self._ai_panel.setVisible(self._ai_visible)
         self._ai_btn.setChecked(self._ai_visible)
+        panel = self._ai_panel
+        if getattr(self, "_ai_slide", None) is not None:
+            try:
+                self._ai_slide.stop()
+            except Exception:
+                pass
+            self._ai_slide = None
+        sizes = list(self._body_split.sizes())
+        cal = sizes[0] if sizes else 900
+        side = sizes[1] if len(sizes) > 1 else 210
+        if self._ai_visible:
+            aw = int(self._settings.get("ai_panel_w", 340) or 340)
+            aw = max(220, min(560, aw, getattr(panel, "_panel_w", aw)))
+            panel.setMinimumWidth(220)
+            panel.setMaximumWidth(560)
+            self._body_split.setCollapsible(2, True)
+            panel.show()
+            # Steal width from the calendar; keep sidebar as-is
+            self._body_split.setSizes([max(320, cal - aw), side, aw])
+            eff = QGraphicsOpacityEffect(panel)
+            panel.setGraphicsEffect(eff)
+            eff.setOpacity(0.0)
+            anim = QPropertyAnimation(eff, b"opacity", self)
+            anim.setDuration(140)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+            def _clear():
+                panel.setGraphicsEffect(None)
+            anim.finished.connect(_clear)
+            self._ai_slide = anim
+            anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+            self._persist_layout_splits()
+        else:
+            if len(sizes) >= 3 and sizes[2] > 0:
+                self._settings["ai_panel_w"] = sizes[2]
+                panel._panel_w = sizes[2]
+            # Collapse fully so dragging the right handle can't open a dead pane
+            panel.setMinimumWidth(0)
+            panel.setMaximumWidth(0)
+            self._body_split.setCollapsible(2, True)
+            panel.hide()
+            panel.setGraphicsEffect(None)
+            # Return AI width to the calendar
+            self._body_split.setSizes([cal + (sizes[2] if len(sizes) > 2 else 0), side, 0])
+            self._persist_layout_splits()
 
     def _ai_ctx(self):
         now = datetime.now()
@@ -4946,11 +5948,11 @@ class MainWindow(QMainWindow):
                 except (TypeError, ValueError):
                     brk = 5
                 # Breaks are downtime, not a continuation of the work block — give them their
-                # own category (default gaming = Anime/Gaming) instead of inheriting the type.
-                btid = str(args.get("break_type") or "gaming")
+                # own category (default free = rest) instead of inheriting the type.
+                btid = str(args.get("break_type") or "free")
                 b_at = next((t for t in ACTIVITY_TYPES if t["id"] == btid), None)
                 if b_at is None:
-                    b_at = next((t for t in ACTIVITY_TYPES if t["id"] == "gaming"), ACTIVITY_TYPES[0])
+                    b_at = next((t for t in ACTIVITY_TYPES if t["id"] == "free"), ACTIVITY_TYPES[0])
                 s0, e0 = a["startMin"], a["endMin"]
                 segs, cur = [], s0
                 while cur < e0:
@@ -5131,7 +6133,7 @@ class MainWindow(QMainWindow):
 
                 # Ordered tasks: each gets its full focus time, split into chunks with breaks,
                 # flowing past anchors/meetings. Breaks do NOT count toward a task's minutes.
-                brk_t = _atype("gaming", "gaming")
+                brk_t = _atype("free", "free")
                 cursor, unplaced = ws, []
                 for t in raw_tasks[:12]:
                     if not isinstance(t, dict):
@@ -5196,7 +6198,7 @@ class MainWindow(QMainWindow):
                 tid  = str(args.get("type", "extra"))
                 at_e = next((x for x in ACTIVITY_TYPES if x["id"] == tid),
                             next(x for x in ACTIVITY_TYPES if x["id"] == "extra"))
-                brk_t = next((x for x in ACTIVITY_TYPES if x["id"] == "gaming"), ACTIVITY_TYPES[0])
+                brk_t = next((x for x in ACTIVITY_TYPES if x["id"] == "free"), ACTIVITY_TYPES[0])
                 # Resolve any pinned blocks (kept exactly where they are).
                 pin_args = args.get("pin") or []
                 if isinstance(pin_args, str):
@@ -5648,6 +6650,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.Accepted:
             return
         old_theme = self._settings.get("theme")
+        old_cals  = self._settings.get("calendar_ids", "primary")
         self._settings = dlg.values
         save_settings(self._settings)
         # Startup shortcut (a filesystem .lnk, so it persists on its own)
@@ -5662,6 +6665,21 @@ class MainWindow(QMainWindow):
             if act:
                 act.blockSignals(True); act.setChecked(val); act.blockSignals(False)
         self._ai_panel.apply_settings(self._settings)
+        # Backup restore (staged in the dialog)
+        if getattr(dlg, "restored_acts", None) is not None:
+            self._manual_snapshot()
+            self._all_acts = dlg.restored_acts
+            save_all_activities(self._all_acts)
+            self._ai_undo_invalidate()
+            self._manual_undo.clear()   # stack after restore is meaningless
+            self._refresh_view()
+            self._set_status(f"Restored schedule ({len(self._all_acts)} blocks).")
+        # Calendar ID change → re-fetch
+        if self._settings.get("calendar_ids", "primary") != old_cals:
+            self._cal_by_date.clear()
+            self._fetched_keys.clear()
+            self._ensure_cal_for_view()
+            self._prefetch_ai_months()
         if self._settings.get("theme") != old_theme:
             QMessageBox.information(
                 self, "Theme changed",
@@ -5680,53 +6698,41 @@ class MainWindow(QMainWindow):
     def _test_notification(self):
         self._alert("✓ Notifications are working",
                     "This is how you'll be alerted when a block starts."
-                    + (" (Do Not Disturb override is ON.)" if self._dnd_override else ""))
+                    + (" (Do Not Disturb override is ON.)" if self._dnd_override else ""),
+                    kind="test")
 
     # ── Alerting ─────────────────────────────────────────────────────────────
-    def _alert(self, title, body):
+    def _alert(self, title, body, *, kind: str = "start"):
         """Fire a block alert. With DND override on, draw our own always-on-top popup
-        (+ sound) so it shows even under Do Not Disturb; otherwise a normal tray toast."""
-        if self._dnd_override:
-            self._show_alert_popup(title, body)
-        elif self._tray:
+        (+ sound) so it shows even under Do Not Disturb; otherwise a normal tray toast.
+        If the tray icon is not ready yet, fall back to the in-app popup so the alert
+        is never silently dropped. `kind` is start | end | test — drives badge/color."""
+        if self._settings.get("notify_sound", True):
+            self._play_alert_sound()
+        if self._dnd_override or not self._tray:
+            self._show_alert_popup(title, body, kind=kind, play_sound=False)
+        else:
             self._tray.showMessage(title, body, self._make_app_icon(), 12000)
 
     def _play_alert_sound(self):
-        try:
-            if platform.system() == "Windows":
-                import winsound
-                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-                return
-        except Exception:
-            pass
-        try:
-            wav = _ensure_alert_wav()
-            if wav:
-                from PySide6.QtCore import QUrl
-                from PySide6.QtMultimedia import QSoundEffect
-                if getattr(self, "_alert_fx", None) is None:
-                    self._alert_fx = QSoundEffect(self)
-                    self._alert_fx.setSource(QUrl.fromLocalFile(str(wav)))
-                    self._alert_fx.setVolume(0.9)
-                self._alert_fx.play()
-                return
-        except Exception:
-            pass
-        try:
-            QApplication.beep()
-        except Exception:
-            pass
+        if not self._settings.get("notify_sound", True):
+            return
+        tone = str(self._settings.get("notify_tone", "chime") or "chime")
+        vol  = int(self._settings.get("notify_volume", 80) or 80) / 100.0
+        play_alert_sound(self, tone=tone, volume=vol)
 
-    def _show_alert_popup(self, title, body):
-        self._play_alert_sound()
-        popup = AlertPopup(title, body, self._make_app_icon())
+    def _show_alert_popup(self, title, body, *, kind: str = "start", play_sound: bool = True):
+        if play_sound and self._settings.get("notify_sound", True):
+            self._play_alert_sound()
+        popup = AlertPopup(title, body, self._make_app_icon(), kind=kind)
         popup.destroyed.connect(lambda *_: self._popups.remove(popup)
                                 if popup in self._popups else None)
         self._popups.append(popup)
         geo = QApplication.primaryScreen().availableGeometry()
         idx = max(0, len(self._popups) - 1)
+        # Stack newer popups upward; taller card (~110px) than the old toast
         popup.show_at(geo.right() - popup.width() - 16,
-                      geo.bottom() - 16 - idx * 92)
+                      geo.bottom() - 16 - idx * 118)
 
     def _toggle_startup(self, enabled):
         ok = set_startup(enabled)
@@ -5755,37 +6761,59 @@ class MainWindow(QMainWindow):
     NOTIFY_WINDOW = 2   # minutes — only notify a block starting right around now
 
     def _check_block_starts(self):
-        """Notify only for blocks on TODAY that are starting right now (within a small
-        window). Using a tight window — rather than 'anything since the last check' —
-        means a forward clock jump (waking from sleep, manual time change) can't replay
-        a backlog of notifications all at once; only a genuinely-now block fires."""
-        if not self._notify_on:
-            return
+        """Notify only for blocks on TODAY that are starting (or ending) right now
+        within a small window. A tight window — rather than 'anything since the last
+        check' — means a forward clock jump can't replay a backlog of notifications."""
         now = datetime.now()
         now_min = now.hour * 60 + now.minute
         today = date.today().isoformat()
         if today != self._notified_day:       # new day → forget yesterday's notifications
             self._notified.clear()
+            self._notified_ends.clear()
             self._notified_day = today
             purge_old_alert_marks(today)
-        for b in self._all_acts:
-            if b.get("date") != today:
-                continue
-            sm = b["startMin"]
-            key = (b["id"], sm)
-            if key in self._notified:
-                continue
-            lead = int(self._settings.get("notify_lead_min", 0) or 0)
-            fire_at = sm - lead          # alert this many minutes before the block starts
-            if now_min - self.NOTIFY_WINDOW <= fire_at <= now_min:
-                self._notified.add(key)   # this process won't re-check this block
-                # Fire exactly once even if another instance is also running: only
-                # the process that wins the atomic claim shows the alert.
-                if claim_block_alert(today, b["id"], sm):
-                    when = f"Starting in {lead} min · " if lead else "Starting now · "
-                    self._alert(
-                        f"▶ {b['title']}",
-                        f"{when}{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
+
+        # Start alerts
+        if self._notify_on:
+            for b in self._all_acts:
+                if b.get("date") != today:
+                    continue
+                sm = b["startMin"]
+                key = (b["id"], sm)
+                if key in self._notified:
+                    continue
+                lead = int(self._settings.get("notify_lead_min", 0) or 0)
+                if start_alert_due(sm, now_min, lead=lead, window=self.NOTIFY_WINDOW):
+                    self._notified.add(key)   # this process won't re-check this block
+                    # Fire exactly once even if another instance is also running: only
+                    # the process that wins the atomic claim shows the alert.
+                    if claim_block_alert(today, b["id"], sm):
+                        when = f"Starting in {lead} min · " if lead else "Starting now · "
+                        self._alert(
+                            f"▶ {b['title']}",
+                            f"{when}{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
+
+        # End-of-block chime — opt-in only (default off). Same cross-process claim as starts.
+        # endMin=1440 (24:00) is handled by end_alert_due (wall clock max is 23:59).
+        if self._settings.get("notify_end_chime", False):
+            for b in self._all_acts:
+                if b.get("date") != today:
+                    continue
+                em = b["endMin"]
+                ekey = (b["id"], em)
+                if ekey in self._notified_ends:
+                    continue
+                if end_alert_due(em, now_min, window=self.NOTIFY_WINDOW):
+                    self._notified_ends.add(ekey)
+                    if claim_block_alert(today, f"end_{b['id']}", em):
+                        # Visual card when start-notify or DND popup is on; else sound only
+                        if self._notify_on or self._dnd_override:
+                            self._alert(
+                                f"■ {b['title']} ended",
+                                f"{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}",
+                                kind="end")
+                        else:
+                            self._play_alert_sound()
 
     def closeEvent(self, ev):
         # Closing the window keeps the app alive in the tray so reminders still fire.
@@ -5846,6 +6874,7 @@ def main():
     pal.setColor(QPalette.ToolTipBase,     C_SURF2)
     pal.setColor(QPalette.ToolTipText,     C_TEXT)
     app.setPalette(pal)
+    app.setStyleSheet(app_chrome_stylesheet())
 
     # ── Single instance ──────────────────────────────────────────────────────
     # Detect a running copy with an ATOMIC shared-memory create — race-safe at boot,
@@ -5862,20 +6891,45 @@ def main():
     _guard, _server = None, None
     try:
         _guard = QSharedMemory(_key)
-        if _guard.create(1):
+        got_lock = _guard.create(1)
+        if not got_lock:
+            # Linux (and some crash paths): a dead process can leave the segment.
+            # Attach+detach clears an orphan; only exit if a live server answers.
+            try:
+                if _guard.attach():
+                    _guard.detach()
+            except Exception:
+                pass
+            got_lock = _guard.create(1)
+        if got_lock:
             QLocalServer.removeServer(_key)
             _server = QLocalServer()
             _server.listen(_key)
         else:
-            # Another copy already holds the lock (or just won the race) — surface it, exit.
+            # Another live copy holds the lock — surface its window, then exit.
             _ping = QLocalSocket()
             _ping.connectToServer(_key)
             if _ping.waitForConnected(400):
                 _ping.write(b"show"); _ping.flush(); _ping.waitForBytesWritten(400)
                 _ping.disconnectFromServer()
-            try: _guard.detach()      # release the failed-create handle right away
-            except Exception: pass
-            return
+                try: _guard.detach()
+                except Exception: pass
+                return
+            # No live server: try one more orphan clear, then start anyway.
+            try:
+                if _guard.attach():
+                    _guard.detach()
+                if _guard.create(1):
+                    QLocalServer.removeServer(_key)
+                    _server = QLocalServer()
+                    _server.listen(_key)
+                else:
+                    try: _guard.detach()
+                    except Exception: pass
+                    # Fall through without lock rather than refusing to launch.
+                    _guard, _server = None, None
+            except Exception:
+                _guard, _server = None, None
     except Exception:
         _guard, _server = None, None   # never let the guard stop the app from launching
 

@@ -44,6 +44,9 @@ jobs:
           # Zip the whole folder (exe + _internal)
           Compress-Archive -Path dist\DailyScheduler `
             -DestinationPath dist\DailyScheduler-win64.zip -Force
+          $hash = (Get-FileHash dist\DailyScheduler-win64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  DailyScheduler-win64.zip" | Set-Content -NoNewline dist\DailyScheduler-win64.zip.sha256
+          Write-Host "SHA256: $hash"
 
       - name: Smoke-test --version
         # --windowed freezes have no console; still accept a non-zero exit if
@@ -61,4 +64,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          gh release upload "$env:TAG" dist\DailyScheduler-win64.zip --clobber
+          gh release upload "$env:TAG" `
+            dist\DailyScheduler-win64.zip `
+            dist\DailyScheduler-win64.zip.sha256 `
+            --clobber
