@@ -65,5 +65,31 @@ with patch.object(app.QMessageBox, "warning", return_value=app.QMessageBox.Ok):
     dlg3._save()
 check("00:00–00:00 rejected", dlg3.result_activity is None)
 
+# Re-save of full-day 00:00–24:00 (both QTime fields show 00:00)
+dlg4 = app.AddActivityDialog(
+    0, 1440, "sleep",
+    existing={"id": "full", "date": "2026-07-14", "startMin": 0, "endMin": 1440,
+              "type": "sleep", "color": "#888", "title": "All day"},
+    for_date="2026-07-14",
+)
+dlg4._save()
+check("re-save 00:00–24:00 keeps end 1440",
+      dlg4.result_activity is not None and dlg4.result_activity["endMin"] == 1440)
+check("coerce original_end full day",
+      app.coerce_end_min(0, 0, original_end=1440) == 1440)
+
+# End / start alert window helpers (wall clock never reaches 1440)
+check("end alert at 24:00 fires near midnight",
+      app.end_alert_due(1440, 1439, window=2)
+      and app.end_alert_due(1440, 1438, window=2)
+      and not app.end_alert_due(1440, 1430, window=2))
+check("end alert normal time",
+      app.end_alert_due(600, 600) and not app.end_alert_due(600, 610))
+check("start alert lead clamps to 0",
+      app.start_alert_due(30, 0, lead=60)  # fire_at=max(0,-30)=0 → fires at midnight
+      and app.start_alert_due(30, 30, lead=0)
+      and not app.start_alert_due(30, 100, lead=0)
+      and not app.start_alert_due(30, 0, lead=5))  # fire_at=25, not yet
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

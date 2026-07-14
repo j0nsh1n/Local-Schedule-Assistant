@@ -83,6 +83,27 @@ check("end<=start still one day", len(one) == 1 and one[0]["date"] == "2026-07-1
 
 check("empty start → []", app.normalize_google_event({"id": "z", "summary": "x"}) == [])
 
+# Overnight timed (local): must split across midnights, not drop (em <= sm)
+# Use fixed offset timestamps; convert expectations via astimezone like the helper.
+ov_start = "2026-07-14T23:00:00-07:00"
+ov_end   = "2026-07-15T01:00:00-07:00"
+overnight = app.normalize_google_event({
+    "id": "ov1", "summary": "Late flight",
+    "start": {"dateTime": ov_start},
+    "end":   {"dateTime": ov_end},
+})
+check("overnight timed → 2 day segments", len(overnight) == 2)
+if len(overnight) == 2:
+    d0 = datetime.fromisoformat(ov_start.replace("Z", "+00:00")).astimezone().date()
+    d1 = d0 + timedelta(days=1)
+    check("overnight first day ends at 24:00",
+          overnight[0]["date"] == d0.isoformat()
+          and overnight[0]["endMin"] == app.DAY_END)
+    check("overnight second day starts at 00:00",
+          overnight[1]["date"] == d1.isoformat()
+          and overnight[1]["startMin"] == 0)
+    check("overnight not allDay", all(not e["allDay"] for e in overnight))
+
 # ── filters ──────────────────────────────────────────────────────────────────
 mix = timed + ad
 check("timed_cal filters out all-day",

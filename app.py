@@ -493,15 +493,32 @@ def normalize_google_event(ev: dict) -> List[Dict]:
             en = datetime.fromisoformat(e_raw.replace("Z", "+00:00")).astimezone()
         except Exception:
             return []
-        sm = max(s.hour * 60 + s.minute, DAY_START)
-        em = min(en.hour * 60 + en.minute, DAY_END)
-        if em <= sm:
+        if en <= s:
             return []
-        ds = s.date().isoformat()
-        return [{
-            "id": eid, "title": title, "startMin": sm, "endMin": em,
-            "type": "calendar", "color": color, "date": ds, "allDay": False,
-        }]
+        # Split across local midnights so overnight meetings (23:00→01:00) and
+        # multi-day timed events still occupy free-slot / conflict checks.
+        out: List[Dict] = []
+        day = s.date()
+        end_day = en.date()
+        multi = end_day > day
+        while day <= end_day:
+            if day == s.date():
+                sm = max(s.hour * 60 + s.minute, DAY_START)
+            else:
+                sm = DAY_START
+            if day == en.date():
+                em = min(en.hour * 60 + en.minute, DAY_END)
+            else:
+                em = DAY_END
+            if em > sm:
+                out.append({
+                    "id": f"{eid}:{day.isoformat()}" if multi else eid,
+                    "title": title, "startMin": sm, "endMin": em,
+                    "type": "calendar", "color": color,
+                    "date": day.isoformat(), "allDay": False,
+                })
+            day += timedelta(days=1)
+        return out
 
     # All-day: start.date / end.date (end exclusive). Multi-day holidays expand.
     d0s = start.get("date")
@@ -814,13 +831,33 @@ def parse_hhmm(s: str) -> int:
             continue
     raise ValueError(f"can't parse time '{s}' — use 24h HH:MM (or 24:00 for end of day)")
 
-def coerce_end_min(sm: int, em: int) -> int:
+def coerce_end_min(sm: int, em: int, *, original_end: Optional[int] = None) -> int:
     """Map end-of-day conventions onto DAY_END (1440).
     QTime only holds 00:00–23:59, so End=00:00 with Start later the same day means
-    through midnight (e.g. sleep 22:00–24:00). Start=End=00:00 stays zero-length."""
+    through midnight (e.g. sleep 22:00–24:00). Start=End=00:00 stays zero-length
+    unless this is a re-save of an existing full-day block (original_end was 1440)."""
     if em == 0 and sm > 0:
         return DAY_END
+    # Re-edit of 00:00–24:00: both fields display as 00:00 — keep end-of-day.
+    if em == 0 and sm == 0 and original_end is not None and int(original_end) >= DAY_END:
+        return DAY_END
     return em
+
+def end_alert_due(em: int, now_min: int, window: int = 2) -> bool:
+    """True if a block ending at `em` should fire its end-alert at wall-clock `now_min`.
+    `now_min` never reaches 1440 (max 23:59 = 1439), so endMin=DAY_END fires in the
+    last `window` minutes of the day."""
+    em = int(em); now_min = int(now_min); window = max(0, int(window))
+    if em >= DAY_END:
+        return now_min >= DAY_END - window
+    return now_min - window <= em <= now_min
+
+def start_alert_due(sm: int, now_min: int, lead: int = 0, window: int = 2) -> bool:
+    """True if a block starting at `sm` should fire (optionally `lead` min early).
+    Clamps fire time to ≥ 0 so early-morning blocks with lead still alert."""
+    fire_at = max(0, int(sm) - max(0, int(lead)))
+    now_min = int(now_min); window = max(0, int(window))
+    return now_min - window <= fire_at <= now_min
 
 
 _WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
@@ -2912,7 +2949,10 @@ class AddActivityDialog(QDialog):
     def _save(self):
         st = self.t_start.time(); en = self.t_end.time()
         sm = st.hour() * 60 + st.minute()
-        em = coerce_end_min(sm, en.hour() * 60 + en.minute())
+        # Pass original end so a full-day 00:00–24:00 block can be re-saved
+        # (both QTime fields show 00:00).
+        orig_em = self._existing.get("endMin") if self._existing else None
+        em = coerce_end_min(sm, en.hour() * 60 + en.minute(), original_end=orig_em)
         if em <= sm:
             QMessageBox.warning(
                 self, "Invalid",
@@ -3501,6 +3541,7 @@ class AIPanel(QWidget):
         self.on_undo = None               # set by MainWindow: restore the last snapshot
         self._loop_msgs: List[Dict] = []  # running conversation for the tool loop
         self._depth = 0                   # tool-round counter (loop guard)
+        self._user_stopped = False        # Stop must not apply tools after cancel
 
         # Preferred width when the body splitter shows this panel; user can drag.
         self._panel_w = 340
@@ -4125,6 +4166,7 @@ class AIPanel(QWidget):
 
     def _generate(self, user_msg):
         if self._thread and self._thread.isRunning(): return
+        self._user_stopped = False
         self._maybe_memory_warning()
         if callable(self.on_turn_start):   # let MainWindow snapshot the schedule for undo
             self.on_turn_start()
@@ -4147,15 +4189,31 @@ class AIPanel(QWidget):
                 else self.temperature)
 
     def _spawn_thread(self):
-        self._thread = OllamaThread(self._loop_msgs, self.model, tools=AI_TOOLS,
-                                    num_ctx=self.num_ctx, temperature=self._effective_temp())
-        self._thread.token.connect(self._on_token)
-        self._thread.done.connect(self._on_done)
-        self._thread.tool_calls.connect(self._on_tool_calls)
-        self._thread.error.connect(self._on_error)
-        self._thread.start()
+        # Hold the QThread ref until finished + deleteLater (same lifecycle as
+        # OllamaCheckThread / pull). Replacing an unparented running thread used to
+        # let GC destroy the wrapper mid-teardown → segfault.
+        if self._thread is not None and self._thread.isRunning():
+            return
+        t = OllamaThread(self._loop_msgs, self.model, tools=AI_TOOLS,
+                         num_ctx=self.num_ctx, temperature=self._effective_temp())
+        t.token.connect(self._on_token)
+        t.done.connect(self._on_done)
+        t.tool_calls.connect(self._on_tool_calls)
+        t.error.connect(self._on_error)
+        t.finished.connect(t.deleteLater)
+        def _clear(th=t):
+            if self._thread is th:
+                self._thread = None
+        t.finished.connect(_clear)
+        self._thread = t
+        t.start()
 
     def _on_tool_calls(self, calls):
+        # Stop must cancel schedule mutations (native tool_calls path).
+        if getattr(self, "_user_stopped", False):
+            self._user_stopped = False
+            self._turn_ended()
+            return
         h = self.history[self.mode]
         # drop the empty streaming bubble; tool notes take its place
         if h and h[-1]["role"] == "assistant" and not h[-1]["content"].strip():
@@ -4185,6 +4243,8 @@ class AIPanel(QWidget):
         self._spawn_thread()
 
     def _on_token(self, tok):
+        if getattr(self, "_user_stopped", False):
+            return
         self._cur_text += tok
         if looks_like_tool_text(self._cur_text):
             # Model is printing a tool call as text — don't show raw JSON; keep the
@@ -4198,6 +4258,16 @@ class AIPanel(QWidget):
         self._persist_chat(force=False)
 
     def _on_done(self):
+        # User hit Stop — never recover/execute tools from partial text.
+        if getattr(self, "_user_stopped", False):
+            self._user_stopped = False
+            h = self.history[self.mode]
+            if h and h[-1]["role"] == "assistant":
+                if not (h[-1].get("content") or "").strip():
+                    h[-1]["content"] = "(Stopped.)"
+                self._render()
+            self._turn_ended()
+            return
         # Small models sometimes print the tool call as text (<|python_tag|>, ``` fences,
         # bare JSON, arrays…) instead of using the native tool_calls channel. Recover it.
         extracted = extract_tool_calls(self._cur_text) if self._depth < MAX_TOOL_ROUNDS else []
@@ -4222,12 +4292,18 @@ class AIPanel(QWidget):
         self._turn_ended()
 
     def _on_error(self, msg):
+        if getattr(self, "_user_stopped", False):
+            self._user_stopped = False
+            self._turn_ended()
+            return
         self.history[self.mode].pop()
         self.history[self.mode].append({"role":"error","content":msg})
         self._render(); self._turn_ended()
 
     def _stop(self):
-        if self._thread: self._thread.stop()
+        self._user_stopped = True
+        if self._thread:
+            self._thread.stop()
         self._persist_chat(force=True)
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -4932,6 +5008,8 @@ class MainWindow(QMainWindow):
         else:
             cal_w, side_w = 900, 210
         self._body_split.setSizes([cal_w, side_w, 0])
+        self._ai_panel.setMinimumWidth(0)
+        self._ai_panel.setMaximumWidth(0)   # no dead pane while closed
         self._ai_panel.hide()
         self._body_split.splitterMoved.connect(self._on_body_split_moved)
         # Sidebar internal split (types vs summary)
@@ -5414,6 +5492,7 @@ class MainWindow(QMainWindow):
             aw = max(220, min(560, aw, getattr(panel, "_panel_w", aw)))
             panel.setMinimumWidth(220)
             panel.setMaximumWidth(560)
+            self._body_split.setCollapsible(2, True)
             panel.show()
             # Steal width from the calendar; keep sidebar as-is
             self._body_split.setSizes([max(320, cal - aw), side, aw])
@@ -5435,7 +5514,10 @@ class MainWindow(QMainWindow):
             if len(sizes) >= 3 and sizes[2] > 0:
                 self._settings["ai_panel_w"] = sizes[2]
                 panel._panel_w = sizes[2]
-            panel.setMinimumWidth(0)   # allow full collapse while hidden
+            # Collapse fully so dragging the right handle can't open a dead pane
+            panel.setMinimumWidth(0)
+            panel.setMaximumWidth(0)
+            self._body_split.setCollapsible(2, True)
             panel.hide()
             panel.setGraphicsEffect(None)
             # Return AI width to the calendar
@@ -6623,12 +6705,13 @@ class MainWindow(QMainWindow):
     def _alert(self, title, body, *, kind: str = "start"):
         """Fire a block alert. With DND override on, draw our own always-on-top popup
         (+ sound) so it shows even under Do Not Disturb; otherwise a normal tray toast.
-        `kind` is start | end | test — drives popup badge/color."""
+        If the tray icon is not ready yet, fall back to the in-app popup so the alert
+        is never silently dropped. `kind` is start | end | test — drives badge/color."""
         if self._settings.get("notify_sound", True):
             self._play_alert_sound()
-        if self._dnd_override:
+        if self._dnd_override or not self._tray:
             self._show_alert_popup(title, body, kind=kind, play_sound=False)
-        elif self._tray:
+        else:
             self._tray.showMessage(title, body, self._make_app_icon(), 12000)
 
     def _play_alert_sound(self):
@@ -6700,8 +6783,7 @@ class MainWindow(QMainWindow):
                 if key in self._notified:
                     continue
                 lead = int(self._settings.get("notify_lead_min", 0) or 0)
-                fire_at = sm - lead          # alert this many minutes before the block starts
-                if now_min - self.NOTIFY_WINDOW <= fire_at <= now_min:
+                if start_alert_due(sm, now_min, lead=lead, window=self.NOTIFY_WINDOW):
                     self._notified.add(key)   # this process won't re-check this block
                     # Fire exactly once even if another instance is also running: only
                     # the process that wins the atomic claim shows the alert.
@@ -6712,6 +6794,7 @@ class MainWindow(QMainWindow):
                             f"{when}{fmt_time(b['startMin'])} – {fmt_time(b['endMin'])}")
 
         # End-of-block chime — opt-in only (default off). Same cross-process claim as starts.
+        # endMin=1440 (24:00) is handled by end_alert_due (wall clock max is 23:59).
         if self._settings.get("notify_end_chime", False):
             for b in self._all_acts:
                 if b.get("date") != today:
@@ -6720,7 +6803,7 @@ class MainWindow(QMainWindow):
                 ekey = (b["id"], em)
                 if ekey in self._notified_ends:
                     continue
-                if now_min - self.NOTIFY_WINDOW <= em <= now_min:
+                if end_alert_due(em, now_min, window=self.NOTIFY_WINDOW):
                     self._notified_ends.add(ekey)
                     if claim_block_alert(today, f"end_{b['id']}", em):
                         # Visual card when start-notify or DND popup is on; else sound only
@@ -6808,20 +6891,45 @@ def main():
     _guard, _server = None, None
     try:
         _guard = QSharedMemory(_key)
-        if _guard.create(1):
+        got_lock = _guard.create(1)
+        if not got_lock:
+            # Linux (and some crash paths): a dead process can leave the segment.
+            # Attach+detach clears an orphan; only exit if a live server answers.
+            try:
+                if _guard.attach():
+                    _guard.detach()
+            except Exception:
+                pass
+            got_lock = _guard.create(1)
+        if got_lock:
             QLocalServer.removeServer(_key)
             _server = QLocalServer()
             _server.listen(_key)
         else:
-            # Another copy already holds the lock (or just won the race) — surface it, exit.
+            # Another live copy holds the lock — surface its window, then exit.
             _ping = QLocalSocket()
             _ping.connectToServer(_key)
             if _ping.waitForConnected(400):
                 _ping.write(b"show"); _ping.flush(); _ping.waitForBytesWritten(400)
                 _ping.disconnectFromServer()
-            try: _guard.detach()      # release the failed-create handle right away
-            except Exception: pass
-            return
+                try: _guard.detach()
+                except Exception: pass
+                return
+            # No live server: try one more orphan clear, then start anyway.
+            try:
+                if _guard.attach():
+                    _guard.detach()
+                if _guard.create(1):
+                    QLocalServer.removeServer(_key)
+                    _server = QLocalServer()
+                    _server.listen(_key)
+                else:
+                    try: _guard.detach()
+                    except Exception: pass
+                    # Fall through without lock rather than refusing to launch.
+                    _guard, _server = None, None
+            except Exception:
+                _guard, _server = None, None
     except Exception:
         _guard, _server = None, None   # never let the guard stop the app from launching
 
