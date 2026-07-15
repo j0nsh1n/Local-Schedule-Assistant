@@ -22,7 +22,7 @@ def check(name, cond):
     results.append(bool(cond))
     print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
 
-check("version 4.0.0", app.APP_VERSION == "4.0.0")
+check("version 4.1.0", app.APP_VERSION == "4.1.0")
 
 # model_is_installed
 check("exact match", app.model_is_installed("qwen3:14b", ["qwen3:14b"]))

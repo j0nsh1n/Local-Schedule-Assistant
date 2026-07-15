@@ -56,7 +56,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "4.0.0"
+__version__  = "4.1.0"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -1055,7 +1055,8 @@ class GoogleAuthThread(QThread):
 
 class CalFetchThread(QThread):
     done  = Signal(dict)   # {iso_date: [events]}
-    error = Signal(str)
+    error = Signal(str)    # total failure — nothing fetched (key is retried)
+    warn  = Signal(str)    # partial failure — some calendars synced, some didn't
 
     def __init__(self, creds, start: date, end: date, calendar_ids: Optional[List[str]] = None):
         super().__init__()
@@ -1065,14 +1066,16 @@ class CalFetchThread(QThread):
         self._cals  = parse_calendar_ids(
             ",".join(calendar_ids) if calendar_ids else "primary")
 
-    def run(self):
-        try:
-            from googleapiclient.discovery import build
-            svc = build("calendar", "v3", credentials=self.creds)
-            t0  = datetime.combine(self._start, datetime.min.time()).astimezone()
-            t1  = datetime.combine(self._end,   datetime.min.time()).astimezone()
-            by_date: Dict[str, List[Dict]] = {}
-            for cal_id in self._cals:
+    def _collect(self, svc) -> tuple:
+        """Fetch all calendars, isolating failures per calendar so one bad ID
+        (a typo in the calendar_ids setting) can't blank every calendar's events.
+        Returns (by_date, failed_ids)."""
+        t0 = datetime.combine(self._start, datetime.min.time()).astimezone()
+        t1 = datetime.combine(self._end,   datetime.min.time()).astimezone()
+        by_date: Dict[str, List[Dict]] = {}
+        failed: List[str] = []
+        for cal_id in self._cals:
+            try:
                 page = None
                 while True:
                     res = svc.events().list(
@@ -1091,7 +1094,23 @@ class CalFetchThread(QThread):
                     page = res.get("nextPageToken")
                     if not page:
                         break
+            except Exception:
+                failed.append(cal_id)
+        return by_date, failed
+
+    def run(self):
+        try:
+            from googleapiclient.discovery import build
+            svc = build("calendar", "v3", credentials=self.creds)
+            by_date, failed = self._collect(svc)
+            if failed and len(failed) == len(self._cals):
+                self.error.emit(f"Calendar fetch failed ({', '.join(failed)}).")
+                return
             self.done.emit(by_date)
+            if failed:
+                self.warn.emit(
+                    f"Couldn't fetch calendar(s): {', '.join(failed)} — check "
+                    "the calendar IDs in Settings. Other calendars synced.")
         except Exception as ex:
             self.error.emit(str(ex))
 
@@ -1463,14 +1482,11 @@ def model_is_installed(tag: str, installed: Optional[List[str]] = None) -> bool:
         return False
     have = installed if installed is not None else list_ollama_models()
     want = _model_tag_key(tag)
-    keys = {_model_tag_key(m) for m in have}
-    if want in keys:
-        return True
-    # Installed name may carry a quant/digest suffix after the curated tag
-    for k in keys:
-        if k.startswith(want + "-") or k.startswith(want + ":"):
-            return True
-    return False
+    # EXACT match only (after :latest normalization). Ollama resolves tags
+    # literally — with only 'deepseek-r1:14b' installed, running 'deepseek-r1'
+    # means ':latest' and 404s, so a prefix match here would show "Installed"
+    # for a model that fails at chat time (and disable the ⬇ pull button).
+    return want in {_model_tag_key(m) for m in have}
 
 class OllamaPullThread(QThread):
     """Stream POST /api/pull for one model tag. Progress is a short status string."""
@@ -1723,9 +1739,18 @@ def unload_ollama_model(model):
 # ── Ollama streaming thread ────────────────────────────────────────────────
 class OllamaCheckThread(QThread):
     result = Signal(bool)
+    models = Signal(list)   # installed tags from the same /api/tags response
     def run(self):
         try:
             r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=3)
+            if r.ok:
+                # Same payload list_ollama_models() parses — reuse it so the UI
+                # never needs its own (blocking) HTTP call for install state.
+                try:
+                    tags = [m.get("name", "") for m in r.json().get("models", [])]
+                    self.models.emit([t for t in tags if t])
+                except Exception:
+                    pass
             self.result.emit(r.ok)
         except Exception:
             self.result.emit(False)
@@ -2616,8 +2641,6 @@ class TimelineWidget(QWidget):
                 blk  = {**blk, "startMin": ps, "endMin": pe}
 
             dur  = blk["endMin"] - blk["startMin"]
-            x, y, h = rect.x(), rect.y(), rect.height()
-
             c, bg = block_colors(blk.get("color") or C_ACCENT.name())
             rr   = max(4, min(RAD + 2, rect.height() // 2, 10))
             dragging = (self._preview and blk.get("_btype") == "user"
@@ -2765,7 +2788,7 @@ class TimelineWidget(QWidget):
         else:
             occ = sorted((b["startMin"], b["endMin"]) for b in self._all_blocks())
             end = min(s + 60, DAY_END)
-            for os_, oe in occ:
+            for os_, _oe in occ:
                 if os_ >= e and os_ < end:
                     end = os_
                     break
@@ -3532,6 +3555,10 @@ class AIPanel(QWidget):
         self.history: Dict[str, List[Dict]] = load_chat_histories()
         self._thread: Optional[OllamaThread] = None
         self._check_thread: Optional[OllamaCheckThread] = None  # status poll (v3.7.1)
+        # Installed-model cache, refreshed by the poll thread (v4.1.0). Seeded with
+        # ONE bounded call here (the v2.5.5-vetted HTTP path) so the picker starts
+        # populated; after this, the GUI thread never blocks on HTTP for it.
+        self._installed_models: List[str] = list_ollama_models()
         self._cur_text  = ""
         self._ollama_up = False
         self._mem_warned: set = set()     # models we already soft-warned this session
@@ -3717,9 +3744,9 @@ class AIPanel(QWidget):
 
     def _model_choices(self):
         seen, out = set(), []
-        # Installed first, then curated recommendations not yet present
-        installed = list_ollama_models()
-        for m in installed + RECOMMENDED_MODELS:
+        # Installed first, then curated recommendations not yet present.
+        # Reads the poll-thread cache — never blocks the GUI thread on HTTP.
+        for m in self._installed_models + RECOMMENDED_MODELS:
             if m and m not in seen:
                 seen.add(m); out.append(m)
         return out
@@ -3741,9 +3768,10 @@ class AIPanel(QWidget):
             self.on_model_edited(self.model)
 
     def _refresh_model_hint(self):
-        """Show badge / install state + when-to-use tooltip; enable ⬇ if missing."""
-        installed = list_ollama_models() if self._ollama_up else []
-        have = model_is_installed(self.model, installed) if self._ollama_up else False
+        """Show badge / install state + when-to-use tooltip; enable ⬇ if missing.
+        Uses the cached install list (poll thread) — no HTTP on the GUI thread."""
+        have = (model_is_installed(self.model, self._installed_models)
+                if self._ollama_up else False)
         p = model_profile(self.model)
         if not self._ollama_up:
             status = "Ollama not running"
@@ -3772,7 +3800,7 @@ class AIPanel(QWidget):
         if not self._ollama_up:
             QMessageBox.information(self, "Ollama", "Start Ollama (▶) before pulling a model.")
             return
-        if model_is_installed(tag):
+        if model_is_installed(tag, self._installed_models):
             self._refresh_model_hint(); return
         if self._pull_thread is not None and self._pull_thread.isRunning():
             return
@@ -3792,6 +3820,9 @@ class AIPanel(QWidget):
 
     def _on_pull_ok(self, tag: str):
         self._pull_prog.setText(f"✓  {tag} ready"); self._pull_prog.show()
+        # One bounded fetch right after a successful pull (server is up + idle);
+        # the 30-s poll keeps it fresh afterwards.
+        self._installed_models = list_ollama_models()
         self._refresh_model_list()
         QTimer.singleShot(4000, lambda: self._pull_prog.hide()
                           if not (self._pull_thread and self._pull_thread.isRunning()) else None)
@@ -3831,10 +3862,20 @@ class AIPanel(QWidget):
             return
         t = OllamaCheckThread()                       # unparented; ref held below
         t.result.connect(self._on_ollama)
+        t.models.connect(self._on_models)
         t.finished.connect(t.deleteLater)
         t.finished.connect(lambda: setattr(self, "_check_thread", None))
         self._check_thread = t
         t.start()
+
+    def _on_models(self, tags: list):
+        """Cache the installed-model list from the poll thread. UI reads ONLY this
+        cache — calling list_ollama_models() (blocking HTTP) on the GUI thread froze
+        the app up to 2 s per 30-s poll / per keystroke while Ollama loaded a model."""
+        changed = tags != self._installed_models
+        self._installed_models = list(tags)
+        if changed:
+            self._refresh_model_list()
 
     def _on_ollama(self, ok: bool):
         was = self._ollama_up
@@ -3844,11 +3885,10 @@ class AIPanel(QWidget):
             self._stxt.setText("Connected" if ok else "Not running")
         self._set_power_state(ok)
         self._unload_btn.setEnabled(ok)
-        # Refresh install-state labels when Ollama comes up (or drops).
-        if ok != was or ok:
+        # Refresh install-state labels when the up/down state changes (cheap: label
+        # text only — the models cache arrives via the poll thread's models signal).
+        if ok != was:
             self._refresh_model_hint()
-            if ok and not was:
-                self._refresh_model_list()
 
     def _set_power_state(self, up: bool):
         """Power button is a toggle: ▶ Start when down, ⏻ Stop when up."""
@@ -4867,7 +4907,8 @@ class MainWindow(QMainWindow):
         self._cal_threads: List[QThread] = []
         self._all_acts:    List[Dict] = load_all_activities()
         self._ai_undo:     List[List[Dict]] = []   # schedule snapshots for AI undo
-        self._manual_undo: List[List[Dict]] = []   # v4.0: Ctrl+Z for manual edits
+        self._manual_undo: List[List[Dict]] = []   # v4.0: Ctrl+Z (manual edits + AI turns)
+        self._manual_redo: List[List[Dict]] = []   # v4.1: Ctrl+Y restores what Ctrl+Z undid
         self._ai_turn_snapshotted = False
         self._ai_turn_active = False   # a turn is streaming — Undo is locked meanwhile
         self._cur_date:    date = date.today()
@@ -4891,10 +4932,13 @@ class MainWindow(QMainWindow):
 
         self.setStyleSheet(f"QMainWindow {{ background: {C_BG.name()}; }}")
         self.setWindowIcon(self._make_app_icon())
-        # Ctrl+Z — undo the last MANUAL edit (AI has its own ↶ Undo button)
+        # Ctrl+Z / Ctrl+Y — undo/redo schedule edits (manual AND whole AI turns)
         sc = QShortcut(QKeySequence("Ctrl+Z"), self)
         sc.setContext(Qt.WindowShortcut)
         sc.activated.connect(self._manual_undo_last)
+        sy = QShortcut(QKeySequence("Ctrl+Y"), self)
+        sy.setContext(Qt.WindowShortcut)
+        sy.activated.connect(self._manual_redo_last)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -5203,6 +5247,8 @@ class MainWindow(QMainWindow):
             t.done.connect(self._on_cal)
             t.error.connect(lambda e, k=key: (self._fetched_keys.discard(k),
                                               self._set_status(e, True)))
+            # Partial failure: good calendars synced (key stays fetched) — just warn.
+            t.warn.connect(lambda m: self._set_status(m, True))
             t.finished.connect(lambda t=t: t in self._cal_threads and self._cal_threads.remove(t))
             self._cal_threads.append(t)
             t.start()
@@ -5386,20 +5432,47 @@ class MainWindow(QMainWindow):
 
     # ── Activity actions ───────────────────────────────────────────────────
     def _manual_snapshot(self):
-        """Push current schedule so Ctrl+Z can restore it after a manual edit."""
+        """Push current schedule so Ctrl+Z can restore it after a manual edit.
+        A new edit forks history — whatever Ctrl+Y could restore is gone."""
         self._manual_undo.append([dict(a) for a in self._all_acts])
         del self._manual_undo[:-MANUAL_UNDO_KEEP]
+        self._manual_redo.clear()
 
     def _manual_undo_last(self):
-        """Ctrl+Z: restore the schedule to before the last create/edit/drag/delete."""
+        """Ctrl+Z: restore the schedule to before the last edit — a manual
+        create/edit/drag/delete OR a whole AI turn (AI turns snapshot here too,
+        so Ctrl+Z after 'plan my day' undoes the plan, not your edit before it).
+        The undone state goes to the redo stack — Ctrl+Y brings it back."""
+        if self._ai_turn_active:
+            self._set_status("Wait for the assistant to finish before undoing.")
+            return
         if not self._manual_undo:
             self._set_status("Nothing to undo.")
             return
+        self._manual_redo.append([dict(a) for a in self._all_acts])
+        del self._manual_redo[:-MANUAL_UNDO_KEEP]
         self._all_acts = self._manual_undo.pop()
         save_all_activities(self._all_acts)
         self._ai_undo_invalidate()
         self._refresh_view()
-        self._set_status("Undid last edit. (Ctrl+Z)")
+        self._set_status("Undid last edit. (Ctrl+Y to redo)")
+
+    def _manual_redo_last(self):
+        """Ctrl+Y: restore what the last Ctrl+Z undid."""
+        if self._ai_turn_active:
+            self._set_status("Wait for the assistant to finish before redoing.")
+            return
+        if not self._manual_redo:
+            self._set_status("Nothing to redo.")
+            return
+        # Direct append (not _manual_snapshot — that would clear the redo stack)
+        self._manual_undo.append([dict(a) for a in self._all_acts])
+        del self._manual_undo[:-MANUAL_UNDO_KEEP]
+        self._all_acts = self._manual_redo.pop()
+        save_all_activities(self._all_acts)
+        self._ai_undo_invalidate()
+        self._refresh_view()
+        self._set_status("Redid. (Ctrl+Z to undo again)")
 
     def _on_block_create(self, s, e):
         dlg = AddActivityDialog(s, e, self._sidebar.selected_type,
@@ -5456,6 +5529,18 @@ class MainWindow(QMainWindow):
         self._persist_layout_splits()
 
     def _persist_layout_splits(self):
+        """Schedule a debounced save of the section sizes. splitterMoved fires per
+        pixel step during a drag — writing settings.json each time is dozens of
+        synchronous disk writes per second; one write after the drag settles is
+        enough. Flushed immediately on close/quit."""
+        if not hasattr(self, "_split_save_timer"):
+            self._split_save_timer = QTimer(self)
+            self._split_save_timer.setSingleShot(True)
+            self._split_save_timer.setInterval(400)
+            self._split_save_timer.timeout.connect(self._persist_layout_splits_now)
+        self._split_save_timer.start()   # restart → fires 400 ms after the LAST move
+
+    def _persist_layout_splits_now(self):
         """Remember section sizes so the next launch looks the same."""
         try:
             sizes = list(self._body_split.sizes())
@@ -5553,6 +5638,10 @@ class MainWindow(QMainWindow):
         if (self._ai_turn_snapshotted and self._ai_undo
                 and self._all_acts == self._ai_undo[-1]):
             self._ai_undo.pop()
+            # The turn also pushed this snapshot onto the Ctrl+Z history — drop
+            # that copy too, or a do-nothing turn leaves a no-op undo point.
+            if self._manual_undo and self._manual_undo[-1] == self._all_acts:
+                self._manual_undo.pop()
             self._ai_turn_snapshotted = False
         self._update_undo_state()
 
@@ -5563,6 +5652,10 @@ class MainWindow(QMainWindow):
             return
         self._ai_undo.append([dict(a) for a in self._all_acts])
         del self._ai_undo[:-AI_UNDO_KEEP]
+        # Also feed the Ctrl+Z history (v4.1): without this, Ctrl+Z after an AI
+        # turn jumped back to before the last MANUAL edit, silently discarding
+        # everything the AI had built since — with no way to get it back.
+        self._manual_snapshot()
         self._ai_turn_snapshotted = True
         self._update_undo_state()
 
@@ -5570,12 +5663,20 @@ class MainWindow(QMainWindow):
         """Restore the schedule to before the assistant's most recent change."""
         if self._ai_turn_active or not self._ai_undo:
             return
+        # Feed the redo stack so Ctrl+Y can bring the AI's change back, exactly
+        # like a Ctrl+Z would.
+        self._manual_redo.append([dict(a) for a in self._all_acts])
+        del self._manual_redo[:-MANUAL_UNDO_KEEP]
         self._all_acts = self._ai_undo.pop()
+        # The AI turn pushed the same snapshot onto the Ctrl+Z history; drop that
+        # duplicate or the next Ctrl+Z is a no-op "restore" to the current state.
+        if self._manual_undo and self._manual_undo[-1] == self._all_acts:
+            self._manual_undo.pop()
         self._ai_turn_snapshotted = False   # a post-undo tool round must re-snapshot
         save_all_activities(self._all_acts)
         self._refresh_view()
         self._update_undo_state()
-        self._set_status("Undid the assistant's last change.")
+        self._set_status("Undid the assistant's last change. (Ctrl+Y to redo)")
 
     def _ai_undo_invalidate(self):
         """A manual edit changed the schedule — the snapshots no longer represent
@@ -6671,7 +6772,8 @@ class MainWindow(QMainWindow):
             self._all_acts = dlg.restored_acts
             save_all_activities(self._all_acts)
             self._ai_undo_invalidate()
-            self._manual_undo.clear()   # stack after restore is meaningless
+            self._manual_undo.clear()   # history after restore is meaningless
+            self._manual_redo.clear()
             self._refresh_view()
             self._set_status(f"Restored schedule ({len(self._all_acts)} blocks).")
         # Calendar ID change → re-fetch
@@ -6754,6 +6856,7 @@ class MainWindow(QMainWindow):
 
     def _quit_app(self):
         self._really_quit = True
+        self._persist_layout_splits_now()   # flush any debounced layout save
         if self._tray:
             self._tray.hide()
         QApplication.quit()
@@ -6818,6 +6921,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, ev):
         # Closing the window keeps the app alive in the tray so reminders still fire.
         # Without a tray (or on explicit Quit), really exit.
+        self._persist_layout_splits_now()   # flush any debounced layout save
         if self._really_quit or not self._tray:
             ev.accept()
             QApplication.quit()
@@ -6924,6 +7028,27 @@ def main():
                     _server = QLocalServer()
                     _server.listen(_key)
                 else:
+                    # A LIVE process holds the segment but isn't answering yet.
+                    # At boot several copies launch at once and the winner may sit
+                    # in the µs window between create(1) and listen() — falling
+                    # through unguarded here reintroduced the 2.5.1 duplicate-
+                    # instance race. Give the winner a moment and re-ping before
+                    # the last-resort unguarded start (kept so a wedged holder
+                    # can never make the app refuse to launch — v2.5.3 lesson).
+                    surfaced = False
+                    for _ in range(3):
+                        QThread.msleep(500)
+                        _p2 = QLocalSocket()
+                        _p2.connectToServer(_key)
+                        if _p2.waitForConnected(400):
+                            _p2.write(b"show"); _p2.flush(); _p2.waitForBytesWritten(400)
+                            _p2.disconnectFromServer()
+                            surfaced = True
+                            break
+                    if surfaced:
+                        try: _guard.detach()
+                        except Exception: pass
+                        return
                     try: _guard.detach()
                     except Exception: pass
                     # Fall through without lock rather than refusing to launch.
