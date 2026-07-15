@@ -58,6 +58,8 @@ class FakePanel:
 class Fake: pass
 s = Fake()
 s._ai_undo = []
+s._manual_undo = []   # v4.1: AI snapshots also feed the Ctrl+Z history
+s._manual_redo = []
 s._ai_turn_snapshotted = False
 s._ai_turn_active = False
 s._all_acts = [_blk(1, 600)]
@@ -65,7 +67,7 @@ s._ai_panel = FakePanel()
 s._refresh_view = lambda: None
 s._set_status = lambda m: None
 for m in ("_ai_turn_start", "_ai_turn_end", "_ai_snapshot_before", "_ai_undo_last",
-          "_ai_undo_invalidate", "_update_undo_state"):
+          "_ai_undo_invalidate", "_update_undo_state", "_manual_snapshot"):
     setattr(s, m, getattr(app.MainWindow, m).__get__(s))
 
 # Turn 1: first mutating tool snapshots; Undo stays LOCKED until the turn ends.

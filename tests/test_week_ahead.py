@@ -116,7 +116,7 @@ SYNTH = {
     (nxt.year, nxt.month): {nxt.isoformat(): [ev(nxt, 540, 600, "Next-month meeting")]},
 }
 class FakeCalThread(QObject):
-    done = Signal(dict); error = Signal(str); finished = Signal()
+    done = Signal(dict); error = Signal(str); warn = Signal(str); finished = Signal()
     def __init__(self, creds, start, end, calendar_ids=None):
         super().__init__(); self._s = start; FETCHES.append(start)
     def start(self):                       # synchronous: emit synthetic events, then finish

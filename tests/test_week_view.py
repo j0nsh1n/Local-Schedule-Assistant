@@ -110,7 +110,7 @@ class FakeFetch:
     ranges = []
     def __init__(self, creds, start, end, calendar_ids=None):
         FakeFetch.ranges.append((start, end))
-        self.done = FakeSig(); self.error = FakeSig(); self.finished = FakeSig()
+        self.done = FakeSig(); self.error = FakeSig(); self.warn = FakeSig(); self.finished = FakeSig()
     def start(self): pass
 
 real_fetch, app.CalFetchThread = app.CalFetchThread, FakeFetch
