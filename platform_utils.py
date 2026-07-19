@@ -39,12 +39,17 @@ def _startup_lnk() -> Path:
     return (Path(base) / "Microsoft" / "Windows" / "Start Menu"
             / "Programs" / "Startup" / "Daily Scheduler.lnk")
 
+def _entry_script() -> Path:
+    """Path to app.py (the real entry point). After the v4.2 module split this
+    file is platform_utils.py — never point Startup/XDG shortcuts here."""
+    return Path(__file__).resolve().parent / "app.py"
+
 def _startup_target():
     """(target, arguments, working_dir) the shortcut should launch — the APP only,
     never Ollama, with --startup so it opens quietly into the tray."""
     if getattr(sys, "frozen", False):                  # packaged .exe
         return sys.executable, "--startup", str(Path(sys.executable).parent)
-    script = Path(__file__).resolve()                  # running from source
+    script = _entry_script()                           # running from source
     return sys.executable, f'"{script}" --startup', str(script.parent)
 
 def _ps_quote(s: str) -> str:
@@ -72,7 +77,7 @@ def _desktop_exec_line() -> str:
     target, args, _ = _startup_target()
     if getattr(sys, "frozen", False):
         return f"{q(target)} {args}"
-    script = Path(__file__).resolve()
+    script = _entry_script()
     return f"{q(target)} {q(str(script))} --startup"
 
 def _set_startup_linux(enabled: bool) -> bool:
@@ -127,6 +132,7 @@ def set_startup(enabled: bool) -> bool:
             subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
                 capture_output=True, text=True, creationflags=0x08000000,
+                timeout=15,
             )
             ok = lnk.exists()
         else:
@@ -211,7 +217,10 @@ def _ensure_alert_wav() -> Optional[Path]:
 def play_alert_sound(parent=None, *, tone: str = "chime", volume: float = 0.8) -> None:
     """Play a short alert tone. `volume` is 0..1. Uses Qt multimedia when available;
     falls back to Windows MessageBeep or QApplication.beep()."""
-    vol = max(0.0, min(1.0, float(volume)))
+    try:
+        vol = max(0.0, min(1.0, float(volume)))
+    except (TypeError, ValueError):
+        vol = 0.8
     if vol <= 0.001:
         return
     # Prefer synthesized WAV so the chosen tone is audible on all platforms

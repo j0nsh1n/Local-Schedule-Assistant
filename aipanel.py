@@ -59,6 +59,9 @@ class AIPanel(QWidget):
         self.num_ctx     = DEFAULT_SETTINGS["num_ctx"]
         self.on_model_edited = None       # set by MainWindow to persist model changes
         self.mode       = "chat"
+        # Mode frozen for the in-flight turn so tab switches mid-stream can't
+        # misroute tokens/tools into another transcript (or IndexError).
+        self._turn_mode: Optional[str] = None
         # Restore last transcript (v3.8.0) so an OOM/kill doesn't eat the chat.
         self.history: Dict[str, List[Dict]] = ai.load_chat_histories()
         self._thread: Optional[OllamaThread] = None
@@ -704,10 +707,15 @@ class AIPanel(QWidget):
     def set_undo_enabled(self, on: bool):
         self._undo_btn.setEnabled(bool(on))
 
+    def _hist_mode(self) -> str:
+        """Transcript key for the active turn (frozen) or the current UI tab."""
+        return self._turn_mode if self._turn_mode is not None else self.mode
+
     def _turn_ended(self):
         """Every way a turn finishes (final text, error, round limit, Stop) funnels
         here so MainWindow can unlock Undo exactly once per turn."""
         self._thinking.hide(); self._stop_btn.hide()
+        self._turn_mode = None
         self._persist_chat(force=True)
         if callable(self.on_turn_end):
             self.on_turn_end()
@@ -715,14 +723,16 @@ class AIPanel(QWidget):
     def _generate(self, user_msg):
         if self._thread and self._thread.isRunning(): return
         self._user_stopped = False
+        self._turn_mode = self.mode       # freeze for the whole turn (incl. tool rounds)
         self._maybe_memory_warning()
         if callable(self.on_turn_start):   # let MainWindow snapshot the schedule for undo
             self.on_turn_start()
-        hist = [m for m in self.history[self.mode] if m["role"] in ("user","assistant")]
+        mode = self._hist_mode()
+        hist = [m for m in self.history[mode] if m["role"] in ("user","assistant")]
         msgs = [{"role":"system","content":self._sys_prompt()}] + \
                [{"role":m["role"],"content":m["content"]} for m in hist if m["content"]]
 
-        self.history[self.mode].append({"role":"assistant","content":""})
+        self.history[mode].append({"role":"assistant","content":""})
         self._cur_text  = ""
         self._loop_msgs = msgs
         self._depth     = 0
@@ -733,7 +743,8 @@ class AIPanel(QWidget):
     def _effective_temp(self):
         # Analyze/suggest mode runs a touch warmer for more varied ideas; editing modes
         # (chat/plan) stay precise for reliable tool-calling.
-        return (min(1.2, self.temperature + 0.3) if self.mode == "suggest"
+        mode = self._hist_mode()
+        return (min(1.2, self.temperature + 0.3) if mode == "suggest"
                 else self.temperature)
 
     def _spawn_thread(self):
@@ -762,7 +773,7 @@ class AIPanel(QWidget):
             self._user_stopped = False
             self._turn_ended()
             return
-        h = self.history[self.mode]
+        h = self.history[self._hist_mode()]
         # drop the empty streaming bubble; tool notes take its place
         if h and h[-1]["role"] == "assistant" and not h[-1]["content"].strip():
             h.pop()
@@ -794,13 +805,16 @@ class AIPanel(QWidget):
         if getattr(self, "_user_stopped", False):
             return
         self._cur_text += tok
+        h = self.history[self._hist_mode()]
         if looks_like_tool_text(self._cur_text):
             # Model is printing a tool call as text — don't show raw JSON; keep the
             # "Thinking…" indicator up. _on_done will execute it.
-            self.history[self.mode][-1]["content"] = ""
+            if h:
+                h[-1]["content"] = ""
             self._render()
         else:
-            self.history[self.mode][-1]["content"] = self._cur_text
+            if h:
+                h[-1]["content"] = self._cur_text
             self._render(); self._thinking.hide()
         # Mid-stream crash insurance (throttled).
         self._persist_chat(force=False)
@@ -809,7 +823,7 @@ class AIPanel(QWidget):
         # User hit Stop — never recover/execute tools from partial text.
         if getattr(self, "_user_stopped", False):
             self._user_stopped = False
-            h = self.history[self.mode]
+            h = self.history[self._hist_mode()]
             if h and h[-1]["role"] == "assistant":
                 if not (h[-1].get("content") or "").strip():
                     h[-1]["content"] = "(Stopped.)"
@@ -820,7 +834,7 @@ class AIPanel(QWidget):
         # bare JSON, arrays…) instead of using the native tool_calls channel. Recover it.
         extracted = extract_tool_calls(self._cur_text) if self._depth < MAX_TOOL_ROUNDS else []
         if extracted:
-            h = self.history[self.mode]
+            h = self.history[self._hist_mode()]
             if h and h[-1]["role"] == "assistant":
                 h.pop()   # drop the (hidden) raw-text bubble
             self._cur_text = ""
@@ -829,7 +843,7 @@ class AIPanel(QWidget):
             return
         # Not a tool call. Restore the real text (it may have been hidden mid-stream
         # because it looked tool-like), or show a fallback if it was unparseable JSON.
-        h = self.history[self.mode]
+        h = self.history[self._hist_mode()]
         if h and h[-1]["role"] == "assistant":
             if self._cur_text and not looks_like_tool_text(self._cur_text):
                 h[-1]["content"] = self._cur_text
@@ -844,8 +858,10 @@ class AIPanel(QWidget):
             self._user_stopped = False
             self._turn_ended()
             return
-        self.history[self.mode].pop()
-        self.history[self.mode].append({"role":"error","content":msg})
+        h = self.history[self._hist_mode()]
+        if h:
+            h.pop()
+        h.append({"role":"error","content":msg})
         self._render(); self._turn_ended()
 
     def _stop(self):

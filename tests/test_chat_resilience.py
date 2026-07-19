@@ -124,8 +124,8 @@ ai.save_chat_histories({
 # silence network for status poll
 real_get = requests.get
 requests.get = lambda *a, **k: type("R", (), {"ok": False})()
+real_free2 = ai.free_ram_gb
 try:
-    real_free2 = ai.free_ram_gb
     ai.free_ram_gb = lambda: 2.0
     panel = aipanel.AIPanel(lambda: {})
     panel._timer.stop()
@@ -140,8 +140,8 @@ try:
     check("warning injected once", len(panel.history[panel.mode]) == before + 1)
     panel._maybe_memory_warning()
     check("warning not repeated", len(panel.history[panel.mode]) == before + 1)
-    ai.free_ram_gb = real_free2
 finally:
+    ai.free_ram_gb = real_free2
     requests.get = real_get
 
 print(f"\n{sum(results)}/{len(results)} passed")

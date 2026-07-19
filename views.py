@@ -825,7 +825,7 @@ class MonthViewWidget(QWidget):
                     col, bg = block_colors(ev.get("color") or theme.C_ACCENT.name())
                     if not in_month:
                         col = QColor(col.red(), col.green(), col.blue(), 120)
-                        bg  = QColor(col.red(), col.green(), col.blue(), max(28, BLOCK_FILL_A // 2))
+                        bg  = QColor(bg.red(), bg.green(), bg.blue(), max(28, BLOCK_FILL_A // 2))
                     p.setPen(Qt.NoPen); p.setBrush(bg)
                     p.drawRoundedRect(chip, 4, 4)
                     p.setPen(col)

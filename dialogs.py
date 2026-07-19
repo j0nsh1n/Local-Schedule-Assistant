@@ -458,7 +458,7 @@ class SettingsDialog(QDialog):
             self.theme_cb.addItem(t["label"], key)
         self.theme_cb.setCurrentIndex(max(0, self.theme_cb.findData(settings.get("theme", DEFAULT_THEME))))
         g.addRow("Theme", self.theme_cb)
-        self.startup_cb = QCheckBox("Open Daily Scheduler when Windows starts")
+        self.startup_cb = QCheckBox("Open Daily Scheduler at login")
         self.startup_cb.setChecked(is_startup_enabled())
         g.addRow("Startup", self.startup_cb)
         self.autostart_cb = QCheckBox("Start the Ollama server when the app launches")

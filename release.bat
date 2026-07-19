@@ -117,7 +117,8 @@ if "!SKIP_CHECKS!"=="0" (
 
   where ruff >nul 2>&1 && (
     echo → ruff…
-    ruff check *.py --select E9,F63,F7,F82
+    REM cmd does not expand *.py for ruff; pass the directory instead.
+    ruff check . --select E9,F63,F7,F82
     if errorlevel 1 exit /b 1
   )
 

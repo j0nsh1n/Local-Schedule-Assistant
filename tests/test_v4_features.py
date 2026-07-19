@@ -46,8 +46,15 @@ core.save_all_activities([{"id": "a", "date": "2026-07-14", "startMin": 600,
                           "title": "Test"}])
 items = core.list_schedule_backups()
 check("has bak and/or daily after save", len(items) >= 1)
-loaded = core.load_activities_from_path(items[0]["path"])
-check("load backup returns list", isinstance(loaded, list) and len(loaded) >= 1)
+# Don't assume items[0]: on coarse-mtime filesystems .bak (empty seed) can tie
+# the daily snapshot and win the stable sort. Pick any entry with real data.
+loaded_any = None
+for it in items:
+    data = core.load_activities_from_path(it["path"])
+    if isinstance(data, list) and len(data) >= 1:
+        loaded_any = data
+        break
+check("load backup returns list", loaded_any is not None and len(loaded_any) >= 1)
 check("load garbage → None",
       core.load_activities_from_path(TMP / "nope.json") is None)
 
