@@ -1,13 +1,15 @@
 name: Release — Linux binary
 
-# Builds the Linux onedir package (PyInstaller can only build for the OS it runs
-# on) and attaches a zip to the GitHub release. Fires automatically when a
-# release is published; also runnable by hand against an existing tag.
+# Builds the Linux onedir package + AppImage (PyInstaller can only build for
+# the OS it runs on) and attaches both to the GitHub release. Fires
+# automatically when a release is published; also runnable by hand against an
+# existing tag.
 #
 # --onedir (not --onefile): no ~6 s self-extract on every launch; ship as a zip
-# so the folder (binary + _internal/) stays intact. Built on ubuntu-22.04 for
-# older glibc → runs on Ubuntu 22.04+/Debian 12+ (a Nobara-built binary would
-# demand Fedora's newer glibc).
+# so the folder (binary + _internal/) stays intact. AppImage wraps the same
+# onedir via packaging/make-appimage.sh. Built on ubuntu-22.04 for older glibc
+# → runs on Ubuntu 22.04+/Debian 12+ (a Nobara-built binary would demand
+# Fedora's newer glibc).
 on:
   release:
     types: [published]
@@ -66,6 +68,22 @@ jobs:
           echo "Built $bin ($size bytes)"
           test "$size" -gt 1000000
 
+      - name: Build AppImage
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          # System libs so offscreen Qt can render the AppImage icon.
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0 libxcb-cursor0 libgl1
+          chmod +x packaging/make-appimage.sh
+          packaging/make-appimage.sh \
+            dist/DailyScheduler-linux-x86_64 \
+            dist/DailyScheduler-x86_64.AppImage
+          test -x dist/DailyScheduler-x86_64.AppImage
+          size=$(stat -c%s dist/DailyScheduler-x86_64.AppImage)
+          echo "AppImage $size bytes"
+          test "$size" -gt 1000000
+
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,4 +92,6 @@ jobs:
           gh release upload "$TAG" \
             dist/DailyScheduler-linux-x86_64.zip \
             dist/DailyScheduler-linux-x86_64.zip.sha256 \
+            dist/DailyScheduler-x86_64.AppImage \
+            dist/DailyScheduler-x86_64.AppImage.sha256 \
             --clobber

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Daily Scheduler
+Comment=Daily planner with a local AI assistant
+Exec=DailyScheduler
+Icon=daily-scheduler
+Terminal=false
+Categories=Office;Calendar;
+StartupNotify=true

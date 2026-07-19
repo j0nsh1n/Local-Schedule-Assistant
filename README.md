@@ -66,11 +66,11 @@ The planner works fully offline with **neither** Ollama **nor** Google Calendar 
 
 ### Option A — prebuilt package (easiest, no Python)
 
-Grab the **zip for your OS** from the [latest release](../../releases/latest).
-Releases ship as an **onedir** folder (app binary + libraries) inside a zip — this
-starts in about a second, with no slow self-extract step on every launch.
+Grab the package for your OS from the [latest release](../../releases/latest).
+Onedir zips start in about a second (no slow self-extract on every launch).
+SHA-256 checksums (`.sha256`) ship next to each asset.
 
-**Windows** — `DailyScheduler-win64.zip` (or `DailyScheduler-vX.Y.Z-win64.zip`)
+**Windows** — `DailyScheduler-win64.zip`
 1. Unzip anywhere (e.g. `Documents\DailyScheduler\`).
 2. Run `DailyScheduler\DailyScheduler.exe` inside the unzipped folder.
 3. If SmartScreen shows *"Windows protected your PC"*, click **More info → Run
@@ -79,7 +79,12 @@ starts in about a second, with no slow self-extract step on every launch.
    required). Re-toggle **Start with Windows** after moving the folder so the
    shortcut points at the new path.
 
-**Linux** — `DailyScheduler-linux-x86_64.zip` (v3.0.0+; onedir from v3.7.0)
+**Linux — AppImage** (recommended when present on the release): `DailyScheduler-x86_64.AppImage`
+1. `chmod +x DailyScheduler-x86_64.AppImage && ./DailyScheduler-x86_64.AppImage`
+2. No install step. Optional: move it somewhere on your `PATH` or pin it in your
+   app menu. Built on Ubuntu 22.04 (glibc ≥ 2.35).
+
+**Linux — zip** — `DailyScheduler-linux-x86_64.zip` (v3.0.0+; onedir from v3.7.0)
 1. `unzip DailyScheduler-linux-x86_64.zip && chmod +x DailyScheduler-linux-x86_64/DailyScheduler`
 2. `./DailyScheduler-linux-x86_64/DailyScheduler`
 3. If it exits complaining about `libxcb-cursor`, install it (Qt 6.5+ needs it):
@@ -279,7 +284,8 @@ Everything lives in `~/.daily-scheduler/` — plain JSON you can back up or insp
 ## Building the package yourself
 
 Releases use PyInstaller **`--onedir`** (a folder, not a single self-extracting file)
-so startup is fast. Zip the whole folder for distribution.
+so startup is fast. Zip the whole folder for distribution. Public Linux assets
+(including the **AppImage**) are built in CI on **ubuntu-22.04** for older glibc.
 
 **Windows** (from the repo root):
 
@@ -297,13 +303,26 @@ py -m PyInstaller --noconfirm --onedir --windowed --name DailyScheduler --collec
 Result: `dist\DailyScheduler\DailyScheduler.exe` plus `_internal\` (~270 MB total).
 `build-windows.bat` also writes `dist_exe\DailyScheduler-win64.zip` for the release.
 
-**Linux** (local / personal builds only — public assets are CI-built on ubuntu-22.04
-for older glibc):
+**Linux** (local / personal builds only — public assets are CI-built):
 
 ```bash
-./build-linux.sh
-# → dist/DailyScheduler/DailyScheduler
+./build-linux.sh              # → dist/DailyScheduler/DailyScheduler
+./build-linux.sh --appimage   # also wraps it (this distro's glibc only)
 ```
+
+### Cutting a release
+
+Version is bumped in a normal PR. After that lands on `main`:
+
+```bash
+./release.sh                  # Linux / macOS / Git Bash
+release.bat                   # Windows
+```
+
+The script reads `__version__` from `app.py`, runs checks, tags `vX.Y.Z`, and
+runs `gh release create`. Publishing the release triggers CI, which attaches the
+Windows zip, Linux zip, AppImage, and their `.sha256` files. Flags: `--notes FILE`,
+`--draft`, `--skip-checks`, `--yes`, `--dry-run`.
 
 ---
 
