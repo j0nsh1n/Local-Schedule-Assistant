@@ -72,9 +72,11 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          # System libs so offscreen Qt can render the AppImage icon.
+          # System libs so offscreen Qt can render the AppImage icon, plus
+          # appimagetool's host deps (desktop-file-validate, mksquashfs).
           sudo apt-get update
-          sudo apt-get install -y libegl1 libxkbcommon0 libxcb-cursor0 libgl1
+          sudo apt-get install -y libegl1 libxkbcommon0 libxcb-cursor0 libgl1 \
+            desktop-file-utils squashfs-tools
           chmod +x packaging/make-appimage.sh
           packaging/make-appimage.sh \
             dist/DailyScheduler-linux-x86_64 \
