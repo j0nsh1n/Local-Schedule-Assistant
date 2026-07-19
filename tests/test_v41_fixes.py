@@ -11,15 +11,20 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import app
+import ai
+import aipanel
+import core
+import gcal
+import mainwindow
+import requests
 from PySide6.QtWidgets import QApplication
 
 TMP = Path(tempfile.mkdtemp())
-app.DATA_FILE     = TMP / "activities.json"
-app.BACKUP_DIR    = TMP / "backups"
-app.SETTINGS_FILE = TMP / "settings.json"
-app.CREDS_FILE    = TMP / "credentials.json"
-app.TOKEN_FILE    = TMP / "token.json"
+core.DATA_FILE     = TMP / "activities.json"
+core.BACKUP_DIR    = TMP / "backups"
+core.SETTINGS_FILE = TMP / "settings.json"
+core.CREDS_FILE    = TMP / "credentials.json"
+core.TOKEN_FILE    = TMP / "token.json"
 
 results = []
 def check(name, cond):
@@ -29,19 +34,19 @@ def check(name, cond):
 qapp = QApplication.instance() or QApplication(sys.argv)
 
 # ── model_is_installed: EXACT match only ──────────────────────────────────────
-check("exact tag matches", app.model_is_installed("qwen3:14b", ["qwen3:14b"]))
-check(":latest normalizes", app.model_is_installed("gemma4", ["gemma4:latest"]))
+check("exact tag matches", ai.model_is_installed("qwen3:14b", ["qwen3:14b"]))
+check(":latest normalizes", ai.model_is_installed("gemma4", ["gemma4:latest"]))
 check("bare name does NOT match a specific tag (Ollama would 404 on :latest)",
-      not app.model_is_installed("deepseek-r1", ["deepseek-r1:14b"]))
+      not ai.model_is_installed("deepseek-r1", ["deepseek-r1:14b"]))
 check("quant-suffix install does NOT satisfy the curated tag",
-      not app.model_is_installed("qwen3:14b", ["qwen3:14b-q4_K_M"]))
+      not ai.model_is_installed("qwen3:14b", ["qwen3:14b-q4_K_M"]))
 
 # ── installed-models cache: no GUI-thread HTTP after construction ─────────────
 calls = {"n": 0}
-_real_list = app.list_ollama_models
-app.list_ollama_models = lambda: (calls.__setitem__("n", calls["n"] + 1) or ["qwen3:14b"])
+_real_list = ai.list_ollama_models
+ai.list_ollama_models = lambda: (calls.__setitem__("n", calls["n"] + 1) or ["qwen3:14b"])
 try:
-    panel = app.AIPanel(lambda: {})
+    panel = aipanel.AIPanel(lambda: {})
     seed = calls["n"]
     check("construction seeds the cache (bounded, one-off)", seed >= 1)
     panel._on_ollama(True)             # 30-s poll path
@@ -53,18 +58,18 @@ try:
           panel._installed_models == ["qwen3:14b", "gemma4:latest"])
     check("choices read the cache", "gemma4:latest" in panel._model_choices())
 finally:
-    app.list_ollama_models = _real_list
+    ai.list_ollama_models = _real_list
 
 # ── OllamaCheckThread parses tags from the same /api/tags response ────────────
 class _FakeResp:
     ok = True
     def json(self):
         return {"models": [{"name": "qwen3:14b"}, {"name": ""}, {"name": "gemma4:latest"}]}
-_real_get = app.requests.get
-app.requests.get = lambda *a, **k: _FakeResp()
+_real_get = requests.get
+requests.get = lambda *a, **k: _FakeResp()
 try:
     got = {}
-    t = app.OllamaCheckThread()
+    t = ai.OllamaCheckThread()
     t.models.connect(lambda tags: got.__setitem__("tags", tags))
     t.result.connect(lambda ok: got.__setitem__("ok", ok))
     t.run()   # synchronous: run() directly, no thread start
@@ -72,7 +77,7 @@ try:
     check("check thread emits non-empty tags only",
           got.get("tags") == ["qwen3:14b", "gemma4:latest"])
 finally:
-    app.requests.get = _real_get
+    requests.get = _real_get
 
 # ── CalFetchThread: one bad calendar can't blank the good ones ────────────────
 def _ev(hour):
@@ -94,13 +99,13 @@ class _FakeSvc:
             return _Req(calendarId)
     def events(self): return self._Events()
 
-ct = app.CalFetchThread(None, datetime(2026, 7, 13).date(), datetime(2026, 7, 14).date(),
+ct = gcal.CalFetchThread(None, datetime(2026, 7, 13).date(), datetime(2026, 7, 14).date(),
                         calendar_ids=["primary", "typo@bad"])
 by_date, failed = ct._collect(_FakeSvc())
 check("good calendar's events survive a bad one", DAY in by_date and len(by_date[DAY]) == 1)
 check("failure names the bad calendar only", failed == ["typo@bad"])
 check("event ids are namespaced by calendar", by_date[DAY][0]["id"].startswith("primary:"))
-ct2 = app.CalFetchThread(None, datetime(2026, 7, 13).date(), datetime(2026, 7, 14).date(),
+ct2 = gcal.CalFetchThread(None, datetime(2026, 7, 13).date(), datetime(2026, 7, 14).date(),
                          calendar_ids=["typo@bad"])
 bd2, f2 = ct2._collect(_FakeSvc())
 check("all-failed reports every id (run() then emits error)", bd2 == {} and f2 == ["typo@bad"])
@@ -125,7 +130,7 @@ s._set_status = lambda m: None
 for m in ("_manual_snapshot", "_manual_undo_last", "_manual_redo_last",
           "_ai_snapshot_before", "_ai_turn_start", "_ai_turn_end",
           "_ai_undo_last", "_ai_undo_invalidate", "_update_undo_state"):
-    setattr(s, m, getattr(app.MainWindow, m).__get__(s))
+    setattr(s, m, getattr(mainwindow.MainWindow, m).__get__(s))
 
 # Manual edit, then an AI turn — Ctrl+Z must undo ONLY the AI turn.
 s._manual_snapshot(); s._all_acts = s._all_acts + [blk(2)]      # manual edit
@@ -169,14 +174,14 @@ check("do-nothing turn drops both snapshots",
       len(s._manual_undo) == mu and len(s._ai_undo) == au)
 
 # ── Debounced splitter save ───────────────────────────────────────────────────
-mw = app.MainWindow()
-app.SETTINGS_FILE.unlink(missing_ok=True)
+mw = mainwindow.MainWindow()
+core.SETTINGS_FILE.unlink(missing_ok=True)
 mw._persist_layout_splits()
 check("splitter save is debounced (no immediate write)",
-      mw._split_save_timer.isActive() and not app.SETTINGS_FILE.exists())
+      mw._split_save_timer.isActive() and not core.SETTINGS_FILE.exists())
 mw._persist_layout_splits_now()
-check("flush writes settings", app.SETTINGS_FILE.exists()
-      and isinstance(json.loads(app.SETTINGS_FILE.read_text()).get("body_split"), list))
+check("flush writes settings", core.SETTINGS_FILE.exists()
+      and isinstance(json.loads(core.SETTINGS_FILE.read_text()).get("body_split"), list))
 
 n = len(results)
 print(f"RESULT: {'PASS' if all(results) else 'FAIL'} ({sum(results)}/{n})")

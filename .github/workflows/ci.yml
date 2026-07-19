@@ -27,10 +27,10 @@ jobs:
       # Static checks only — no need to install the heavy GUI deps (PySide6),
       # since both tools analyse the source without importing it.
       - name: Syntax check
-        run: python -m py_compile app.py
+        run: python -m py_compile *.py
 
       - name: Lint (real-bug rules)
-        run: ruff check app.py --select E9,F63,F7,F82
+        run: ruff check *.py --select E9,F63,F7,F82
 
   # Offscreen Qt suite (v4.0). Synthetic data only — never real schedule files.
   tests:

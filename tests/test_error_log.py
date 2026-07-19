@@ -8,11 +8,11 @@ import os, sys, io, tempfile, faulthandler
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import app
+import core
 
 TMP = Path(tempfile.mkdtemp())
-app.CRASH_LOG = TMP / "crash.log"
-app.ERROR_LOG = TMP / "app.log"
+core.CRASH_LOG = TMP / "crash.log"
+core.ERROR_LOG = TMP / "app.log"
 
 results = []
 def check(name, cond):
@@ -35,32 +35,32 @@ def _exc_info():
 # ── _rotate_log: single-generation, threshold-gated ───────────────────────────
 p = TMP / "rot.log"
 p.write_text("small")
-app._rotate_log(p, max_bytes=1000)
+core._rotate_log(p, max_bytes=1000)
 check("small log is left untouched", p.exists() and not p.with_name("rot.log.old").exists())
 
 p.write_text("x" * 2000)
-app._rotate_log(p, max_bytes=1000)
+core._rotate_log(p, max_bytes=1000)
 old = p.with_name("rot.log.old")
 check("oversize log moved to .old", old.exists() and old.read_text() == "x" * 2000)
 check("live log path is cleared after rotation", not p.exists())
 
 p.write_text("y" * 2000)
-app._rotate_log(p, max_bytes=1000)
+core._rotate_log(p, max_bytes=1000)
 check("rotation replaces a prior .old (one generation)", old.read_text() == "y" * 2000)
 
 # ── log_exception: writes a traceback + header, chains to stderr ───────────────
 saved_stderr = sys.stderr
 sys.stderr = cap = io.StringIO()          # capture the default-hook output (proves chaining)
 try:
-    app.log_exception(*_exc_info())
+    core.log_exception(*_exc_info())
 finally:
     sys.stderr = saved_stderr
-body = app.ERROR_LOG.read_text(encoding="utf-8")
+body = core.ERROR_LOG.read_text(encoding="utf-8")
 
-check("app.log created", app.ERROR_LOG.exists())
+check("app.log created", core.ERROR_LOG.exists())
 check("logs the exception type + message", "ValueError" in body and "synthetic failure" in body)
 check("logs the failing function frame", "_boom" in body)
-check("header carries version", f"v{app.APP_VERSION}" in body)
+check("header carries version", f"v{core.APP_VERSION}" in body)
 check("header carries pid", f"pid {os.getpid()}" in body)
 check("still chained to stderr (default hook ran)", "ValueError" in cap.getvalue())
 
@@ -71,34 +71,34 @@ check("PRIVACY: same for the stderr copy", SECRET not in cap.getvalue())
 # a second exception APPENDS (newest-last), not overwrites
 sys.stderr = io.StringIO()
 try:
-    app.log_exception(*_exc_info())
+    core.log_exception(*_exc_info())
 finally:
     sys.stderr = saved_stderr
-check("second exception appends (two entries)", app.ERROR_LOG.read_text().count("=====") == 4)
+check("second exception appends (two entries)", core.ERROR_LOG.read_text().count("=====") == 4)
 
 # rotation fires through log_exception at the real 1 MB threshold
-app.ERROR_LOG.write_text("z" * 1_100_000)
+core.ERROR_LOG.write_text("z" * 1_100_000)
 sys.stderr = io.StringIO()
 try:
-    app.log_exception(*_exc_info())
+    core.log_exception(*_exc_info())
 finally:
     sys.stderr = saved_stderr
-check("log_exception rotates app.log past ~1 MB", app.ERROR_LOG.with_name("app.log.old").exists())
-check("post-rotation log holds only the new entry", app.ERROR_LOG.read_text().count("=====") == 2)
+check("log_exception rotates app.log past ~1 MB", core.ERROR_LOG.with_name("app.log.old").exists())
+check("post-rotation log holds only the new entry", core.ERROR_LOG.read_text().count("=====") == 2)
 
 # ── install_crash_logging: wires excepthook + faulthandler, rotates crash.log ──
-app.CRASH_LOG.write_text("w" * 1_100_000)   # a big prior crash.log should rotate on launch
+core.CRASH_LOG.write_text("w" * 1_100_000)   # a big prior crash.log should rotate on launch
 saved_hook = sys.excepthook
 try:
-    app.install_crash_logging()
-    check("sys.excepthook set to log_exception", sys.excepthook is app.log_exception)
+    core.install_crash_logging()
+    check("sys.excepthook set to log_exception", sys.excepthook is core.log_exception)
     check("faulthandler enabled", faulthandler.is_enabled())
-    check("crash.log opened/created", app.CRASH_LOG.exists())
-    check("crash.log rotated on launch", app.CRASH_LOG.with_name("crash.log.old").exists())
+    check("crash.log opened/created", core.CRASH_LOG.exists())
+    check("crash.log rotated on launch", core.CRASH_LOG.with_name("crash.log.old").exists())
 finally:
     faulthandler.disable()
-    if app._crash_fh:
-        app._crash_fh.close()
+    if core._crash_fh:
+        core._crash_fh.close()
     sys.excepthook = saved_hook          # restore so we don't leak global state
 
 n = len(results)

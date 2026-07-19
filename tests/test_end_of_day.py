@@ -6,16 +6,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import app
+import core
+import dialogs
+import theme
+from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTime
 
 TMP = Path(tempfile.mkdtemp())
-app.DATA_FILE = TMP / "a.json"
-app.SETTINGS_FILE = TMP / "s.json"
-app.CREDS_FILE = TMP / "c.json"
-app.TOKEN_FILE = TMP / "t.json"
-app.CHAT_FILE = TMP / "chat.json"
+core.DATA_FILE = TMP / "a.json"
+core.SETTINGS_FILE = TMP / "s.json"
+core.CREDS_FILE = TMP / "c.json"
+core.TOKEN_FILE = TMP / "t.json"
+core.CHAT_FILE = TMP / "chat.json"
 
 results = []
 def check(name, cond):
@@ -23,20 +26,20 @@ def check(name, cond):
     print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
 
 qapp = QApplication.instance() or QApplication(sys.argv)
-app.apply_theme("nocturne")
+theme.apply_theme("nocturne")
 
-check("24:00 → DAY_END", app.parse_hhmm("24:00") == app.DAY_END == 1440)
-check("2400 → DAY_END", app.parse_hhmm("2400") == 1440)
-check("24 → DAY_END", app.parse_hhmm("24") == 1440)
-check("23:59 still 1439", app.parse_hhmm("23:59") == 1439)
-check("00:00 still 0", app.parse_hhmm("00:00") == 0)
-check("fmt 1440 is 24:00", app.fmt_time(1440) == "24:00")
+check("24:00 → DAY_END", core.parse_hhmm("24:00") == core.DAY_END == 1440)
+check("2400 → DAY_END", core.parse_hhmm("2400") == 1440)
+check("24 → DAY_END", core.parse_hhmm("24") == 1440)
+check("23:59 still 1439", core.parse_hhmm("23:59") == 1439)
+check("00:00 still 0", core.parse_hhmm("00:00") == 0)
+check("fmt 1440 is 24:00", core.fmt_time(1440) == "24:00")
 
-check("00:00 end after start → eod", app.coerce_end_min(22 * 60, 0) == 1440)
-check("00:00 end with start 0 stays 0", app.coerce_end_min(0, 0) == 0)
-check("normal end unchanged", app.coerce_end_min(600, 720) == 720)
+check("00:00 end after start → eod", core.coerce_end_min(22 * 60, 0) == 1440)
+check("00:00 end with start 0 stays 0", core.coerce_end_min(0, 0) == 0)
+check("normal end unchanged", core.coerce_end_min(600, 720) == 720)
 
-dlg = app.AddActivityDialog(
+dlg = dialogs.AddActivityDialog(
     22 * 60, 1440, "sleep",
     existing={"id": "x1", "date": "2026-07-14", "startMin": 22 * 60, "endMin": 1440,
               "type": "sleep", "color": "#888", "title": "Sleep"},
@@ -49,7 +52,7 @@ check("save maps 00:00 end → 1440",
       dlg.result_activity is not None and dlg.result_activity["endMin"] == 1440)
 check("save keeps start 22:00", dlg.result_activity["startMin"] == 22 * 60)
 
-dlg2 = app.AddActivityDialog(10 * 60, 11 * 60, "study", for_date="2026-07-14")
+dlg2 = dialogs.AddActivityDialog(10 * 60, 11 * 60, "study", for_date="2026-07-14")
 dlg2.t_start.setTime(QTime(10, 0))
 dlg2.t_end.setTime(QTime(0, 0))
 dlg2._save()
@@ -58,15 +61,15 @@ check("10:00–00:00 saves as end 1440",
 check("duration is 14h",
       dlg2.result_activity["endMin"] - dlg2.result_activity["startMin"] == 14 * 60)
 
-dlg3 = app.AddActivityDialog(0, 60, "study", for_date="2026-07-14")
+dlg3 = dialogs.AddActivityDialog(0, 60, "study", for_date="2026-07-14")
 dlg3.t_start.setTime(QTime(0, 0))
 dlg3.t_end.setTime(QTime(0, 0))
-with patch.object(app.QMessageBox, "warning", return_value=app.QMessageBox.Ok):
+with patch.object(QMessageBox, "warning", return_value=QMessageBox.Ok):
     dlg3._save()
 check("00:00–00:00 rejected", dlg3.result_activity is None)
 
 # Re-save of full-day 00:00–24:00 (both QTime fields show 00:00)
-dlg4 = app.AddActivityDialog(
+dlg4 = dialogs.AddActivityDialog(
     0, 1440, "sleep",
     existing={"id": "full", "date": "2026-07-14", "startMin": 0, "endMin": 1440,
               "type": "sleep", "color": "#888", "title": "All day"},
@@ -76,20 +79,20 @@ dlg4._save()
 check("re-save 00:00–24:00 keeps end 1440",
       dlg4.result_activity is not None and dlg4.result_activity["endMin"] == 1440)
 check("coerce original_end full day",
-      app.coerce_end_min(0, 0, original_end=1440) == 1440)
+      core.coerce_end_min(0, 0, original_end=1440) == 1440)
 
 # End / start alert window helpers (wall clock never reaches 1440)
 check("end alert at 24:00 fires near midnight",
-      app.end_alert_due(1440, 1439, window=2)
-      and app.end_alert_due(1440, 1438, window=2)
-      and not app.end_alert_due(1440, 1430, window=2))
+      core.end_alert_due(1440, 1439, window=2)
+      and core.end_alert_due(1440, 1438, window=2)
+      and not core.end_alert_due(1440, 1430, window=2))
 check("end alert normal time",
-      app.end_alert_due(600, 600) and not app.end_alert_due(600, 610))
+      core.end_alert_due(600, 600) and not core.end_alert_due(600, 610))
 check("start alert lead clamps to 0",
-      app.start_alert_due(30, 0, lead=60)  # fire_at=max(0,-30)=0 → fires at midnight
-      and app.start_alert_due(30, 30, lead=0)
-      and not app.start_alert_due(30, 100, lead=0)
-      and not app.start_alert_due(30, 0, lead=5))  # fire_at=25, not yet
+      core.start_alert_due(30, 0, lead=60)  # fire_at=max(0,-30)=0 → fires at midnight
+      and core.start_alert_due(30, 30, lead=0)
+      and not core.start_alert_due(30, 100, lead=0)
+      and not core.start_alert_due(30, 0, lead=5))  # fire_at=25, not yet
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

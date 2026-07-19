@@ -12,15 +12,17 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import app
+import aipanel
+import core
+import mainwindow
 from PySide6.QtWidgets import QApplication
 
 TMP = Path(tempfile.mkdtemp())
-app.DATA_FILE     = TMP / "activities.json"
-app.BACKUP_DIR    = TMP / "backups"
-app.SETTINGS_FILE = TMP / "settings.json"
-app.CREDS_FILE    = TMP / "credentials.json"
-app.TOKEN_FILE    = TMP / "token.json"
+core.DATA_FILE     = TMP / "activities.json"
+core.BACKUP_DIR    = TMP / "backups"
+core.SETTINGS_FILE = TMP / "settings.json"
+core.CREDS_FILE    = TMP / "credentials.json"
+core.TOKEN_FILE    = TMP / "token.json"
 
 results = []
 def check(name, cond):
@@ -43,7 +45,7 @@ def overlaps(a, s, e):
     return a["startMin"] < e and a["endMin"] > s
 
 def fresh(src_blocks, cal=None):
-    mw = app.MainWindow()
+    mw = mainwindow.MainWindow()
     mw._cur_date = MON
     mw._all_acts = list(src_blocks)
     mw._cal_by_date = cal or {}
@@ -89,13 +91,13 @@ check("a block that can't fit after the meeting is dropped", len(dst) == 0)
 check("result reports the drop", "dropped" in res)
 
 # ── resolve_date maps weekday names correctly (why the model shouldn't compute) ─
-check("resolve_date('Thursday', Mon Jul 6) == Jul 9", app.resolve_date("Thursday", MON) == THU)
-check("resolve_date('wednesday') == Jul 8", app.resolve_date("wednesday", MON) == WED)
+check("resolve_date('Thursday', Mon Jul 6) == Jul 9", core.resolve_date("Thursday", MON) == THU)
+check("resolve_date('wednesday') == Jul 8", core.resolve_date("wednesday", MON) == WED)
 check("resolve_date('monday') jumps a full week (never returns base)",
-      app.resolve_date("monday", MON) == "2026-07-13")
+      core.resolve_date("monday", MON) == "2026-07-13")
 
 # ── the prompt steers the model to pass the weekday word, not a computed date ──
-prompt = app.AIPanel(lambda: {"cal_events": [], "activities": [], "week_ahead": "",
+prompt = aipanel.AIPanel(lambda: {"cal_events": [], "activities": [], "week_ahead": "",
                               "view_date": MON.isoformat(), "today": MON.isoformat(),
                               "weekday": "Monday", "now_min": 600, "viewing_today": True})._sys_prompt()
 check("prompt tells the model NOT to compute the date itself",

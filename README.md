@@ -74,7 +74,8 @@ SHA-256 checksums (`.sha256`) ship next to each asset.
 1. Unzip anywhere (e.g. `Documents\DailyScheduler\`).
 2. Run `DailyScheduler\DailyScheduler.exe` inside the unzipped folder.
 3. If SmartScreen shows *"Windows protected your PC"*, click **More info → Run
-   anyway** (unsigned binary, not malicious — audit [`app.py`](app.py)).
+   anyway** (unsigned binary, not malicious — the source is right here to audit,
+   starting at [`app.py`](app.py)).
 4. Keep the whole folder together (the `_internal` directory next to the exe is
    required). Re-toggle **Start with Windows** after moving the folder so the
    shortcut points at the new path.
@@ -319,7 +320,7 @@ Version is bumped in a normal PR. After that lands on `main`:
 release.bat                   # Windows
 ```
 
-The script reads `__version__` from `app.py`, runs checks, tags `vX.Y.Z`, and
+The script reads `__version__` from `core.py`, runs checks, tags `vX.Y.Z`, and
 runs `gh release create`. Publishing the release triggers CI, which attaches the
 Windows zip, Linux zip, AppImage, and their `.sha256` files. Flags: `--notes FILE`,
 `--draft`, `--skip-checks`, `--yes`, `--dry-run`.
@@ -329,7 +330,9 @@ Windows zip, Linux zip, AppImage, and their `.sha256` files. Flags: `--notes FIL
 ## Tech
 
 Python · PySide6 (Qt6) · [Ollama](https://ollama.com) (local LLM, tool-calling) ·
-Google Calendar API (optional, read-only) · single-file app (`app.py`)
+Google Calendar API (optional, read-only) · flat module layout (`app.py` entry
+point + `core` / `theme` / `gcal` / `ai` / `platform_utils` / `views` /
+`dialogs` / `aipanel` / `mainwindow`)
 
 ## License
 
