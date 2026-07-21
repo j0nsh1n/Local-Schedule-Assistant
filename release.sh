@@ -2,22 +2,22 @@
 # One-command release cut for Daily Scheduler.
 #
 # After a version PR is merged to main (with __version__ already bumped in
-# app.py), this tags that commit and publishes a GitHub Release. CI then
+# core.py), this tags that commit and publishes a GitHub Release. CI then
 # builds and attaches:
 #   • DailyScheduler-win64.zip (+ .sha256)
 #   • DailyScheduler-linux-x86_64.zip (+ .sha256)
 #   • DailyScheduler-x86_64.AppImage (+ .sha256)
 #
 # Usage:
-#   ./release.sh                     # use __version__ from app.py
-#   ./release.sh 4.1.0               # require this version matches app.py
+#   ./release.sh                     # use __version__ from core.py
+#   ./release.sh 4.1.0               # require this version matches core.py
 #   ./release.sh --notes notes.md    # release body from file
 #   ./release.sh --draft             # create as draft (CI still needs publish)
 #   ./release.sh --skip-checks       # skip syntax/ruff/tests
 #   ./release.sh --yes               # no interactive confirm
 #   ./release.sh --dry-run           # print plan, make no changes
 #
-# Does NOT edit app.py or open a PR — bump the version in a normal PR first.
+# Does NOT edit core.py or open a PR — bump the version in a normal PR first.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -70,13 +70,13 @@ need git
 need gh
 need python3
 
-# ── Version from app.py ──────────────────────────────────────────────────
+# ── Version from core.py (moved out of app.py in the v4.2.0 module split) ─
 APP_VERSION="$(python3 - <<'PY'
 import re, pathlib
-t = pathlib.Path("app.py").read_text(encoding="utf-8")
+t = pathlib.Path("core.py").read_text(encoding="utf-8")
 m = re.search(r'^__version__\s*=\s*"([^"]+)"', t, re.M)
 if not m:
-    raise SystemExit("could not parse __version__ from app.py")
+    raise SystemExit("could not parse __version__ from core.py")
 print(m.group(1))
 PY
 )"
@@ -85,7 +85,7 @@ PY
 if [[ -n "$WANT_VERSION" ]]; then
   WANT_VERSION="${WANT_VERSION#v}"
   [[ "$WANT_VERSION" == "$APP_VERSION" ]] || \
-    die "app.py is $APP_VERSION but you asked for $WANT_VERSION — bump/merge first"
+    die "core.py is $APP_VERSION but you asked for $WANT_VERSION — bump/merge first"
 fi
 
 TAG="v${APP_VERSION}"
@@ -123,11 +123,11 @@ fi
 # ── Checks ───────────────────────────────────────────────────────────────
 if [[ "$SKIP_CHECKS" -eq 0 ]]; then
   info "Syntax check…"
-  python3 -m py_compile app.py
+  python3 -m py_compile *.py
 
   if command -v ruff >/dev/null 2>&1; then
     info "ruff (real-bug rules)…"
-    ruff check app.py --select E9,F63,F7,F82
+    ruff check *.py --select E9,F63,F7,F82
   else
     info "ruff not installed — skipping lint (CI still runs it)"
   fi

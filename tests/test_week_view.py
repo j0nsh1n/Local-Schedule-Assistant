@@ -9,16 +9,19 @@ from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import app
+import core
+import gcal
+import mainwindow
+import views
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QPixmap
 
 TMP = Path(tempfile.mkdtemp())
-app.DATA_FILE     = TMP / "activities.json"
-app.BACKUP_DIR    = TMP / "backups"
-app.SETTINGS_FILE = TMP / "settings.json"
-app.CREDS_FILE    = TMP / "credentials.json"
-app.TOKEN_FILE    = TMP / "token.json"
+core.DATA_FILE     = TMP / "activities.json"
+core.BACKUP_DIR    = TMP / "backups"
+core.SETTINGS_FILE = TMP / "settings.json"
+core.CREDS_FILE    = TMP / "credentials.json"
+core.TOKEN_FILE    = TMP / "token.json"
 
 results = []
 def check(name, cond):
@@ -34,7 +37,7 @@ def _blk(i, ds, sm, dur=60):
 # ── WeekViewWidget: geometry, painting, hit-testing ──────────────────────────
 monday = date(2026, 6, 29)                      # this week straddles Jun → Jul
 days = [(monday + timedelta(days=i)).isoformat() for i in range(7)]
-w = app.WeekViewWidget()
+w = views.WeekViewWidget()
 w.resize(1050, 720)
 
 acts = {days[0]: [_blk(1, days[0], 600)],                       # Mon 10:00-11:00
@@ -45,8 +48,8 @@ cal  = {days[2]: [{"id": "cal1", "date": days[2], "startMin": 780, "endMin": 840
 w.set_week(monday, acts, cal)
 
 check("days() spans Mon–Sun", w.days() == [monday + timedelta(days=i) for i in range(7)])
-check("scale: day start at header base", w._y(app.DAY_START) == w.HDR_H)
-check("scale: day end at widget bottom", w._y(app.DAY_END) == w.height())
+check("scale: day start at header base", w._y(core.DAY_START) == w.HDR_H)
+check("scale: day end at widget bottom", w._y(core.DAY_END) == w.height())
 
 w.render(QPixmap(w.size()))                     # run paintEvent → fill hit lists
 check("user blocks hit-listed", {aid for _, aid in w._block_hits} == {"w1", "w2", "w3"})
@@ -69,7 +72,7 @@ r3 = next(r for r, aid in w._block_hits if aid == "w3")
 check("overlapping blocks split the column", not r2.intersects(r3) or r2 != r3)
 
 # ── MainWindow wiring ────────────────────────────────────────────────────────
-mw = app.MainWindow()
+mw = mainwindow.MainWindow()
 mw._all_acts = [_blk(1, days[0], 600)]
 mw._cur_date = date(2026, 7, 1)                 # a Wednesday
 mw._set_view("week")
@@ -113,7 +116,7 @@ class FakeFetch:
         self.done = FakeSig(); self.error = FakeSig(); self.warn = FakeSig(); self.finished = FakeSig()
     def start(self): pass
 
-real_fetch, app.CalFetchThread = app.CalFetchThread, FakeFetch
+real_fetch, gcal.CalFetchThread = gcal.CalFetchThread, FakeFetch
 mw._creds = object()
 mw._fetched_keys.clear()
 mw._cur_date = date(2026, 7, 1)
@@ -131,7 +134,7 @@ mw._cur_date = date(2026, 7, 8)                 # mid-month week
 mw._ensure_cal_for_view()
 check("mid-month week fetches one month",
       FakeFetch.ranges == [(date(2026, 7, 1), date(2026, 8, 1))])
-app.CalFetchThread = real_fetch
+gcal.CalFetchThread = real_fetch
 mw._creds = None
 
 n = len(results)

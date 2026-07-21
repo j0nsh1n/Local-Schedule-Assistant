@@ -12,15 +12,18 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import app
+import core
+import gcal
+import mainwindow
+import theme
 from PySide6.QtWidgets import QApplication
 
 TMP = Path(tempfile.mkdtemp())
-app.DATA_FILE = TMP / "a.json"
-app.SETTINGS_FILE = TMP / "s.json"
-app.CREDS_FILE = TMP / "c.json"
-app.TOKEN_FILE = TMP / "t.json"
-app.CHAT_FILE = TMP / "chat.json"
+core.DATA_FILE = TMP / "a.json"
+core.SETTINGS_FILE = TMP / "s.json"
+core.CREDS_FILE = TMP / "c.json"
+core.TOKEN_FILE = TMP / "t.json"
+core.CHAT_FILE = TMP / "chat.json"
 
 results = []
 def check(name, cond):
@@ -33,16 +36,16 @@ def local_from_iso(iso: str):
     return s.hour * 60 + s.minute, s.date().isoformat()
 
 qapp = QApplication.instance() or QApplication(sys.argv)
-app.apply_theme("nocturne")
+theme.apply_theme("nocturne")
 
 START_ISO = "2026-07-14T10:00:00-07:00"
 END_ISO   = "2026-07-14T11:00:00-07:00"
 exp_sm, exp_ds = local_from_iso(START_ISO)
 exp_em, _      = local_from_iso(END_ISO)
-exp_start_hhmm = app.fmt_time(exp_sm)
+exp_start_hhmm = core.fmt_time(exp_sm)
 
 # ── normalize_google_event ───────────────────────────────────────────────────
-timed = app.normalize_google_event({
+timed = gcal.normalize_google_event({
     "id": "t1", "summary": "Dentist",
     "start": {"dateTime": START_ISO},
     "end":   {"dateTime": END_ISO},
@@ -53,7 +56,7 @@ check("timed minutes",
       timed[0]["startMin"] == exp_sm and timed[0]["endMin"] == exp_em)
 check("timed date (local TZ)", timed[0]["date"] == exp_ds)
 
-ad = app.normalize_google_event({
+ad = gcal.normalize_google_event({
     "id": "a1", "summary": "Essay due",
     "start": {"date": "2026-07-14"},
     "end":   {"date": "2026-07-15"},
@@ -64,7 +67,7 @@ check("all-day title", ad[0]["title"] == "Essay due")
 check("all-day date", ad[0]["date"] == "2026-07-14")
 check("all-day id namespaced", ad[0]["id"] == "a1:2026-07-14")
 
-multi = app.normalize_google_event({
+multi = gcal.normalize_google_event({
     "id": "h1", "summary": "Spring break",
     "start": {"date": "2026-07-14"},
     "end":   {"date": "2026-07-17"},
@@ -74,14 +77,14 @@ check("multi-day dates exclusive end",
       [e["date"] for e in multi] == ["2026-07-14", "2026-07-15", "2026-07-16"])
 check("multi all flagged", all(e["allDay"] for e in multi))
 
-one = app.normalize_google_event({
+one = gcal.normalize_google_event({
     "id": "x", "summary": "Holiday",
     "start": {"date": "2026-07-14"},
     "end":   {"date": "2026-07-14"},
 })
 check("end<=start still one day", len(one) == 1 and one[0]["date"] == "2026-07-14")
 
-check("empty start → []", app.normalize_google_event({"id": "z", "summary": "x"}) == [])
+check("empty start → []", gcal.normalize_google_event({"id": "z", "summary": "x"}) == [])
 
 # Overnight timed (local): must split across midnights, not drop (em <= sm).
 # Build ISO in the *runner's* local TZ — fixed -07:00 stamps collapse to one
@@ -91,7 +94,7 @@ _d0 = date(2026, 7, 14)
 _d1 = date(2026, 7, 15)
 ov_s = datetime(2026, 7, 14, 23, 0, tzinfo=_tz)
 ov_e = datetime(2026, 7, 15, 1, 0, tzinfo=_tz)
-overnight = app.normalize_google_event({
+overnight = gcal.normalize_google_event({
     "id": "ov1", "summary": "Late flight",
     "start": {"dateTime": ov_s.isoformat()},
     "end":   {"dateTime": ov_e.isoformat()},
@@ -100,7 +103,7 @@ check("overnight timed → 2 day segments", len(overnight) == 2)
 if len(overnight) == 2:
     check("overnight first day ends at 24:00",
           overnight[0]["date"] == _d0.isoformat()
-          and overnight[0]["endMin"] == app.DAY_END)
+          and overnight[0]["endMin"] == core.DAY_END)
     check("overnight second day starts at 00:00",
           overnight[1]["date"] == _d1.isoformat()
           and overnight[1]["startMin"] == 0
@@ -110,15 +113,15 @@ if len(overnight) == 2:
 # ── filters ──────────────────────────────────────────────────────────────────
 mix = timed + ad
 check("timed_cal filters out all-day",
-      app.timed_cal_events(mix) == timed)
+      core.timed_cal_events(mix) == timed)
 check("allday_cal keeps only all-day",
-      app.allday_cal_events(mix) == ad)
+      core.allday_cal_events(mix) == ad)
 check("missing allDay treated as timed",
-      app.is_all_day_event({"startMin": 600, "endMin": 660}) is False)
+      core.is_all_day_event({"startMin": 600, "endMin": 660}) is False)
 
 # ── format + week_ahead ──────────────────────────────────────────────────────
-check("brief all-day", "all day" in app.format_cal_event_brief(ad[0]).lower())
-check("brief timed has times", exp_start_hhmm in app.format_cal_event_brief(timed[0]))
+check("brief all-day", "all day" in core.format_cal_event_brief(ad[0]).lower())
+check("brief timed has times", exp_start_hhmm in core.format_cal_event_brief(timed[0]))
 
 # Week window anchored on the all-day calendar date (TZ-independent)
 anchor = date(2026, 7, 14)
@@ -130,7 +133,7 @@ cal = {
 if exp_ds == "2026-07-14":
     cal["2026-07-14"] = list(ad) + list(timed)
 
-wa = app.week_ahead_lines(cal, anchor)
+wa = core.week_ahead_lines(cal, anchor)
 check("week_ahead mentions Essay due all day", "Essay due (all day)" in wa)
 check("week_ahead mentions Dentist timed",
       "Dentist" in wa and exp_start_hhmm in wa)
@@ -144,14 +147,14 @@ check("multi-day appears on next day", "Spring break (all day)" in wa)
 
 only_ad = {"2026-07-14": ad}
 check("all-day-only day not omitted",
-      "Essay due" in app.week_ahead_lines(only_ad, anchor))
+      "Essay due" in core.week_ahead_lines(only_ad, anchor))
 
 # ── free time must ignore all-day ────────────────────────────────────────────
-slots = app._free_slots([], app.DAY_START, app.DAY_END)
+slots = core._free_slots([], core.DAY_START, core.DAY_END)
 check("empty occ full day free",
-      len(slots) == 1 and slots[0] == (app.DAY_START, app.DAY_END))
+      len(slots) == 1 and slots[0] == (core.DAY_START, core.DAY_END))
 
-mw = app.MainWindow()
+mw = mainwindow.MainWindow()
 # Timed + all-day on the timed event's local day; all-day alone doesn't affect intervals
 day_events = list(timed) + (list(ad) if exp_ds == "2026-07-14" else [])
 mw._cal_by_date = {exp_ds: day_events}
@@ -161,10 +164,10 @@ gaps = mw._free_gaps(exp_ds)
 check("free gaps not blocked by all-day",
       any(e - s >= 60 for s, e in gaps))
 
-lines_ad = [f"[calendar all-day] {ev['title']}" for ev in app.allday_cal_events(mix)]
+lines_ad = [f"[calendar all-day] {ev['title']}" for ev in core.allday_cal_events(mix)]
 check("list style all-day line", lines_ad == ["[calendar all-day] Essay due"])
 
-ads = app.allday_cal_events(mix)
+ads = core.allday_cal_events(mix)
 banner = "All day  ·  " + " · ".join(e.get("title") or "(no title)" for e in ads)
 check("banner text", banner == "All day  ·  Essay due")
 

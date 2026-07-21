@@ -8,16 +8,19 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import app
+import aipanel
+import core
+import theme
+import requests
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QThread
 
 TMP = Path(tempfile.mkdtemp())
-app.DATA_FILE     = TMP / "activities.json"
-app.BACKUP_DIR    = TMP / "backups"
-app.SETTINGS_FILE = TMP / "settings.json"
-app.CREDS_FILE    = TMP / "credentials.json"
-app.TOKEN_FILE    = TMP / "token.json"
+core.DATA_FILE     = TMP / "activities.json"
+core.BACKUP_DIR    = TMP / "backups"
+core.SETTINGS_FILE = TMP / "settings.json"
+core.CREDS_FILE    = TMP / "credentials.json"
+core.TOKEN_FILE    = TMP / "token.json"
 
 results = []
 def check(name, cond):
@@ -25,17 +28,17 @@ def check(name, cond):
     print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
 
 qapp = QApplication.instance() or QApplication(sys.argv)
-app.apply_theme("nocturne")
+theme.apply_theme("nocturne")
 
 # Slow the HTTP check so we can observe "already running" behaviour.
-real_get = app.requests.get
+real_get = requests.get
 def slow_get(url, **kw):
     time.sleep(0.15)
     class R:
         ok = True
         status_code = 200
     return R()
-app.requests.get = slow_get
+requests.get = slow_get
 
 def wait_idle(panel, seconds=5.0):
     """Drain until no check thread is running and the ref is cleared."""
@@ -53,7 +56,7 @@ def wait_idle(panel, seconds=5.0):
     return panel._check_thread is None
 
 try:
-    panel = app.AIPanel(lambda: {})
+    panel = aipanel.AIPanel(lambda: {})
     # Stop the 30 s timer so it doesn't fire extra polls during the test.
     panel._timer.stop()
     # __init__ already kicked one poll — wait it out so we start clean.
@@ -79,7 +82,7 @@ try:
     check("new poll starts a new thread", second is not None and second is not first)
     check("status settles connected after ok", wait_idle(panel) and panel._ollama_up is True)
 finally:
-    app.requests.get = real_get
+    requests.get = real_get
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

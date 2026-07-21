@@ -9,16 +9,18 @@ from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import app
+import core
+import gcal
+import mainwindow
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QObject, Signal
 
 TMP = Path(tempfile.mkdtemp())
-app.DATA_FILE     = TMP / "activities.json"
-app.BACKUP_DIR    = TMP / "backups"
-app.SETTINGS_FILE = TMP / "settings.json"
-app.CREDS_FILE    = TMP / "credentials.json"
-app.TOKEN_FILE    = TMP / "token.json"
+core.DATA_FILE     = TMP / "activities.json"
+core.BACKUP_DIR    = TMP / "backups"
+core.SETTINGS_FILE = TMP / "settings.json"
+core.CREDS_FILE    = TMP / "credentials.json"
+core.TOKEN_FILE    = TMP / "token.json"
 
 results = []
 def check(name, cond):
@@ -35,7 +37,7 @@ def ev(d, sm, em, title):
 START = date(2026, 7, 6)   # fixed anchor — week_ahead_lines is pure (no clock read)
 
 # ── Pure week_ahead_lines ─────────────────────────────────────────────────────
-check("empty cache → empty string", app.week_ahead_lines({}, START) == "")
+check("empty cache → empty string", core.week_ahead_lines({}, START) == "")
 
 cal = {
     START.isoformat():                       [ev(START, 600, 660, "Dentist")],
@@ -45,7 +47,7 @@ cal = {
     (START + timedelta(days=9)).isoformat(): [ev(START + timedelta(days=9), 600, 660, "Too far")],
     (START - timedelta(days=1)).isoformat(): [ev(START - timedelta(days=1), 600, 660, "Yesterday")],
 }
-out   = app.week_ahead_lines(cal, START)
+out   = core.week_ahead_lines(cal, START)
 lines = out.splitlines()
 
 check("only in-window days with events appear", len(lines) == 3)
@@ -62,19 +64,19 @@ check("each line carries the ISO date", lines[0].startswith(f"  {START.isoformat
 
 # window is inclusive of its last day and its size is configurable
 near = {(START + timedelta(days=6)).isoformat(): [ev(START + timedelta(days=6), 600, 660, "Day7")]}
-check("last day of 7-day window included (offset 6)", "Day7" in app.week_ahead_lines(near, START))
-check("shrinking the window excludes it", app.week_ahead_lines(near, START, days=6) == "")
+check("last day of 7-day window included (offset 6)", "Day7" in core.week_ahead_lines(near, START))
+check("shrinking the window excludes it", core.week_ahead_lines(near, START, days=6) == "")
 
 # ── _month_range key math ─────────────────────────────────────────────────────
-k, s, e = app.MainWindow._month_range(2026, 7)
+k, s, e = mainwindow.MainWindow._month_range(2026, 7)
 check("month key format", k == "m2026-7")
 check("month start is the 1st", s == date(2026, 7, 1))
 check("month end is exclusive next-month 1st", e == date(2026, 8, 1))
-k, s, e = app.MainWindow._month_range(2026, 12)
+k, s, e = mainwindow.MainWindow._month_range(2026, 12)
 check("December rolls end to next January", k == "m2026-12" and e == date(2027, 1, 1))
 
 # ── MainWindow / AIPanel wiring ───────────────────────────────────────────────
-mw = app.MainWindow()
+mw = mainwindow.MainWindow()
 today = date.today()
 mw._cal_by_date = {
     today.isoformat():                       [ev(today, 600, 660, "Dentist")],
@@ -121,9 +123,9 @@ class FakeCalThread(QObject):
         super().__init__(); self._s = start; FETCHES.append(start)
     def start(self):                       # synchronous: emit synthetic events, then finish
         self.done.emit(SYNTH.get((self._s.year, self._s.month), {})); self.finished.emit()
-app.CalFetchThread = FakeCalThread
+gcal.CalFetchThread = FakeCalThread
 
-mw2 = app.MainWindow()
+mw2 = mainwindow.MainWindow()
 mw2._creds = object()          # gate passes; no real auth
 mw2._refresh_cal()             # the integrated on-connect entry point
 

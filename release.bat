@@ -58,16 +58,16 @@ where git >nul 2>&1 || ( echo error: git is required & exit /b 1 )
 where gh  >nul 2>&1 || ( echo error: gh is required & exit /b 1 )
 where py  >nul 2>&1 || ( echo error: py launcher is required & exit /b 1 )
 
-for /f "usebackq delims=" %%V in (`py -c "import re,pathlib;t=pathlib.Path('app.py').read_text(encoding='utf-8');m=re.search(r'^__version__\s*=\s*\"([^\"]+)\"',t,re.M);assert m;print(m.group(1))"`) do set "APP_VERSION=%%V"
+for /f "usebackq delims=" %%V in (`py -c "import re,pathlib;t=pathlib.Path('core.py').read_text(encoding='utf-8');m=re.search(r'^__version__\s*=\s*\"([^\"]+)\"',t,re.M);assert m;print(m.group(1))"`) do set "APP_VERSION=%%V"
 if not defined APP_VERSION (
-  echo error: could not parse __version__ from app.py
+  echo error: could not parse __version__ from core.py
   exit /b 1
 )
 
 if defined WANT_VERSION (
   set "WANT_VERSION=!WANT_VERSION:v=!"
   if /i not "!WANT_VERSION!"=="!APP_VERSION!" (
-    echo error: app.py is !APP_VERSION! but you asked for !WANT_VERSION!
+    echo error: core.py is !APP_VERSION! but you asked for !WANT_VERSION!
     exit /b 1
   )
 )
@@ -112,12 +112,13 @@ gh release view "!TAG!" >nul 2>&1 && (
 
 if "!SKIP_CHECKS!"=="0" (
   echo → Syntax check…
-  py -c "import ast; ast.parse(open('app.py',encoding='utf-8').read())"
+  py -c "import ast,glob; [ast.parse(open(f,encoding='utf-8').read()) for f in glob.glob('*.py')]"
   if errorlevel 1 exit /b 1
 
   where ruff >nul 2>&1 && (
     echo → ruff…
-    ruff check app.py --select E9,F63,F7,F82
+    REM cmd does not expand *.py for ruff; pass the directory instead.
+    ruff check . --select E9,F63,F7,F82
     if errorlevel 1 exit /b 1
   )
 

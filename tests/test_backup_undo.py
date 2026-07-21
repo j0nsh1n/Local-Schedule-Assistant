@@ -8,11 +8,12 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import app
+import core
+import mainwindow
 
 TMP = Path(tempfile.mkdtemp())
-app.DATA_FILE  = TMP / "activities.json"
-app.BACKUP_DIR = TMP / "backups"
+core.DATA_FILE  = TMP / "activities.json"
+core.BACKUP_DIR = TMP / "backups"
 
 results = []
 def check(name, cond):
@@ -25,10 +26,10 @@ def _blk(i, sm):
 
 # ── Backups ──────────────────────────────────────────────────────────────────
 acts = [_blk(1, 600)]
-app.save_all_activities(acts)
-today_bak = app.BACKUP_DIR / f"activities-{date.today().isoformat()}.json"
-prev_bak  = app.DATA_FILE.with_name("activities.json.bak")
-check("data file written", app.DATA_FILE.exists())
+core.save_all_activities(acts)
+today_bak = core.BACKUP_DIR / f"activities-{date.today().isoformat()}.json"
+prev_bak  = core.DATA_FILE.with_name("activities.json.bak")
+check("data file written", core.DATA_FILE.exists())
 check("daily backup created", today_bak.exists())
 check("backup content matches", json.loads(today_bak.read_text()) == acts)
 check("no .bak on first-ever save", not prev_bak.exists())
@@ -36,18 +37,18 @@ check("no .bak on first-ever save", not prev_bak.exists())
 # .bak lags the live file by exactly one save (v2.6.1: recovers a bad save even
 # after a restart wiped the in-memory AI undo).
 acts2 = acts + [_blk(9, 900)]
-app.save_all_activities(acts2)
+core.save_all_activities(acts2)
 check(".bak holds the previous state", json.loads(prev_bak.read_text()) == acts)
-check("live file holds the new state", json.loads(app.DATA_FILE.read_text()) == acts2)
-app.save_all_activities(acts)                       # save again ("the bad save")
+check("live file holds the new state", json.loads(core.DATA_FILE.read_text()) == acts2)
+core.save_all_activities(acts)                       # save again ("the bad save")
 check(".bak rotated to one-save-ago", json.loads(prev_bak.read_text()) == acts2)
 
 # Pruning: seed KEEP+5 old dated backups, save again, expect only newest KEEP remain.
-for i in range(app.BACKUP_KEEP + 5):
-    (app.BACKUP_DIR / f"activities-2026-01-{i + 1:02d}.json").write_text("[]")
-app.save_all_activities(acts)
-remaining = sorted(app.BACKUP_DIR.glob("activities-*.json"))
-check(f"pruned to {app.BACKUP_KEEP} (got {len(remaining)})", len(remaining) == app.BACKUP_KEEP)
+for i in range(core.BACKUP_KEEP + 5):
+    (core.BACKUP_DIR / f"activities-2026-01-{i + 1:02d}.json").write_text("[]")
+core.save_all_activities(acts)
+remaining = sorted(core.BACKUP_DIR.glob("activities-*.json"))
+check(f"pruned to {core.BACKUP_KEEP} (got {len(remaining)})", len(remaining) == core.BACKUP_KEEP)
 check("today's backup survives prune", today_bak in remaining)
 
 # ── AI undo ──────────────────────────────────────────────────────────────────
@@ -68,7 +69,7 @@ s._refresh_view = lambda: None
 s._set_status = lambda m: None
 for m in ("_ai_turn_start", "_ai_turn_end", "_ai_snapshot_before", "_ai_undo_last",
           "_ai_undo_invalidate", "_update_undo_state", "_manual_snapshot"):
-    setattr(s, m, getattr(app.MainWindow, m).__get__(s))
+    setattr(s, m, getattr(mainwindow.MainWindow, m).__get__(s))
 
 # Turn 1: first mutating tool snapshots; Undo stays LOCKED until the turn ends.
 s._ai_turn_start()
@@ -96,7 +97,7 @@ check("do-nothing turn drops its undo point", len(s._ai_undo) == 1)
 # Undo restores the pre-turn schedule.
 s._ai_undo_last()
 check("undo restored the schedule", len(s._all_acts) == 1 and s._all_acts[0]["id"] == "a1")
-check("undo persisted to disk", json.loads(app.DATA_FILE.read_text())[0]["id"] == "a1")
+check("undo persisted to disk", json.loads(core.DATA_FILE.read_text())[0]["id"] == "a1")
 check("stack empty after undo", len(s._ai_undo) == 0)
 check("undo button disabled when empty", s._ai_panel.enabled is False)
 s._ai_undo_last()                                      # no-op on empty stack
@@ -111,7 +112,7 @@ check("manual edit clears the stack",
       len(s._ai_undo) == 0 and s._ai_panel.enabled is False)
 
 # All four manual-mutation paths call the invalidator (source-level guard).
-src = Path(app.__file__).read_text(encoding="utf-8")
+src = Path(mainwindow.__file__).read_text(encoding="utf-8")
 check("all manual edit paths invalidate undo",
       src.count("self._ai_undo_invalidate()") >= 4)
 
