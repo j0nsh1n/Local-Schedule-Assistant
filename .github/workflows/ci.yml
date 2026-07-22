@@ -32,6 +32,23 @@ jobs:
       - name: Lint (real-bug rules)
         run: ruff check *.py --select E9,F63,F7,F82
 
+  # Pure planning logic (v4.3.0). core.py has been Qt-free since the v4.2.0 split,
+  # so this needs no PySide6 and no display — it finishes in well under a second and
+  # gives fast feedback on the layer that carries the real bugs. Deliberately does
+  # NOT install requirements.txt: if core ever imports Qt, this job fails.
+  core-tests:
+    name: Core logic (no Qt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Qt-free core suite
+        run: python tests/test_core_pure.py
+
   # Offscreen Qt suite (v4.0). Synthetic data only — never real schedule files.
   tests:
     name: Offscreen tests
