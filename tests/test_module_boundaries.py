@@ -20,16 +20,25 @@ import tempfile
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# Sandbox HOME *before* importing core: core.py creates DATA_DIR at import time,
+# so importing it first would touch the real ~/.daily-scheduler/ (privacy rule).
+TMP = Path(tempfile.mkdtemp())
+os.environ["HOME"] = str(TMP)
+os.environ["USERPROFILE"] = str(TMP)          # Windows equivalent
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import core
 
-TMP = Path(tempfile.mkdtemp())
+assert core.DATA_DIR.is_relative_to(TMP), f"core.DATA_DIR escaped the sandbox: {core.DATA_DIR}"
+
 core.DATA_FILE     = TMP / "activities.json"
 core.BACKUP_DIR    = TMP / "backups"
 core.SETTINGS_FILE = TMP / "settings.json"
 core.CREDS_FILE    = TMP / "credentials.json"
 core.TOKEN_FILE    = TMP / "token.json"
+core.BAK_FILE      = TMP / "activities.json.bak"
 
 import theme  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402

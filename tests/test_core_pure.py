@@ -9,19 +9,29 @@ and it keeps core honest: if someone imports Qt into core.py, this stops running
 Synthetic data only — DATA_FILE and friends are redirected to a temp dir before
 anything can touch the real store, and nothing here reads a schedule.
 """
+import os
 import sys
 import tempfile
 from datetime import date
 from pathlib import Path
 
+# Sandbox HOME *before* importing core: core.py creates DATA_DIR at import time,
+# so importing it first would touch the real ~/.daily-scheduler/ (privacy rule —
+# this suite must never read or create anything in the son's real store).
+TMP = Path(tempfile.mkdtemp())
+os.environ["HOME"] = str(TMP)
+os.environ["USERPROFILE"] = str(TMP)          # Windows equivalent
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import core
 
-TMP = Path(tempfile.mkdtemp())
+assert core.DATA_DIR.is_relative_to(TMP), f"core.DATA_DIR escaped the sandbox: {core.DATA_DIR}"
+
 core.DATA_FILE     = TMP / "activities.json"
 core.BACKUP_DIR    = TMP / "backups"
 core.SETTINGS_FILE = TMP / "settings.json"
+core.BAK_FILE      = TMP / "activities.json.bak"
 
 results = []
 def check(name, cond):
