@@ -1,4 +1,22 @@
-"""Daily Scheduler — Ollama client, AI tools, prompts, model profiles.
+"""Daily Scheduler — Ollama client, AI tool schemas, prompts, model profiles.
+
+Everything about talking to the local model lives here. What the tools actually
+DO to the schedule lives in ai_tools.py; this module only declares them.
+
+Contents
+    MODEL_PROFILES ....... the curated model list — one source of truth for the
+                           picker, the VRAM/disk badges and the "when to use
+                           each" guide
+    Ollama process ....... start/stop/unload, OLLAMA_MODELS env, /api/tags
+    Chat transcript ...... load/save chat.json so an OOM can't eat the history
+    Memory preflight ..... free-RAM probe + friendly mid-stream OOM text
+    Threads .............. OllamaThread (streaming chat), OllamaCheckThread
+                           (status poll), OllamaPullThread (model download)
+    AI_TOOLS ............. the tool schemas the model sees; enums are generated
+                           from core.ACTIVITY_TYPES so new categories propagate
+    extract_tool_calls ... recovers tool calls a model printed as plain text
+    Per-model prompts .... model_guidance() — family-specific steering
+                           (Qwen3, DeepSeek-R1, gpt-oss, Gemma, GLM, Mistral)
 
 Copyright (C) 2026 Jonathan Shin
 GPL-3.0-or-later — see LICENSE. Split out of app.py in v4.2.0;
@@ -143,20 +161,6 @@ def default_ollama_models_dir() -> Path:
     home = (os.environ.get("OLLAMA_HOME") or "").strip()
     base = Path(home).expanduser() if home else (Path.home() / ".ollama")
     return base / "models"
-
-def resolve_ollama_models_dir(settings: Optional[Dict] = None) -> Path:
-    """Configured models folder, or Ollama's default path."""
-    raw = ""
-    if settings is not None:
-        raw = str(settings.get("ollama_models_dir") or "").strip()
-    if not raw:
-        try:
-            raw = str(load_settings().get("ollama_models_dir") or "").strip()
-        except Exception:
-            raw = ""
-    if raw:
-        return Path(raw).expanduser()
-    return default_ollama_models_dir()
 
 def ollama_env(settings: Optional[Dict] = None) -> Dict[str, str]:
     """Environment for `ollama serve` / pull: optional OLLAMA_MODELS override."""

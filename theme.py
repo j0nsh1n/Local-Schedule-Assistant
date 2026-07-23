@@ -1,5 +1,24 @@
 """Daily Scheduler — theme registry, colour globals, QSS + paint helpers.
 
+Contents
+    THEMES ............... the registry (nocturne = dark, slate = light)
+    C_* colour globals ... re-pointed by apply_theme(); see the rule below
+    app_chrome_stylesheet  global QSS applied once at launch
+    Block paint recipe ... block_colors / paint_schedule_block /
+                           style_activity_type_chip — chips and timeline tiles
+                           share these so a picked category looks like the
+                           block that will land on the day
+
+IMPORTANT — how to read a colour from another module:
+
+    import theme;  theme.C_BG          # correct: follows apply_theme()
+    from theme import C_BG             # WRONG: binds once at import time
+
+apply_theme() rebinds the module globals, so a `from theme import C_BG` captures
+whichever colour happened to be current when that module was first imported and
+then silently stops updating. tests/test_module_boundaries.py fails the build if
+anyone does this.
+
 Copyright (C) 2026 Jonathan Shin
 GPL-3.0-or-later — see LICENSE. Split out of app.py in v4.2.0;
 app.py remains the entry point.
@@ -32,7 +51,7 @@ THEMES = {
         "now": "#f07167", "grid": "#1a1a20", "ghost": "#3a3a44",
         "ok": "#5fbf85", "ok_txt": "#8fd9a8", "err": "#f07167", "err_txt": "#f5a8a2",
         "warn": "#e8b84a", "info": "#6b8cae",   # muted steel, not GCal blue
-        "rad": 4, "rad_lg": 6, "mono": True,
+        "rad": 4, "rad_lg": 6,
     },
     "slate": {      # paper-light planner
         "label": "Slate — light",
@@ -43,7 +62,7 @@ THEMES = {
         "now": "#c2410c", "grid": "#e4e4de", "ghost": "#c4c4bc",
         "ok": "#2ba37e", "ok_txt": "#1e7a5e", "err": "#b91c1c", "err_txt": "#991b1b",
         "warn": "#b45309", "info": "#57534e",
-        "rad": 4, "rad_lg": 6, "mono": False,
+        "rad": 4, "rad_lg": 6,
     },
 }
 
@@ -52,7 +71,6 @@ C_BG = C_SURFACE = C_SURF2 = C_BORDER = C_BORDER2 = None
 C_TEXT = C_MUTED = C_ACCENT = C_ACCENT2 = C_ON_ACCENT = C_NOW = None
 C_GRID = C_GHOST = C_OK = C_OK_TXT = C_ERR = C_ERR_TXT = C_WARN = C_INFO = None
 RAD = RAD_LG = 0
-THEME_MONO = False
 THEME_NAME = DEFAULT_THEME
 
 def _rgba(color, alpha) -> str:
@@ -66,7 +84,7 @@ def apply_theme(name: str):
     global C_BG, C_SURFACE, C_SURF2, C_BORDER, C_BORDER2, C_TEXT, C_MUTED
     global C_ACCENT, C_ACCENT2, C_ON_ACCENT, C_NOW, C_GRID, C_GHOST
     global C_OK, C_OK_TXT, C_ERR, C_ERR_TXT, C_WARN, C_INFO
-    global RAD, RAD_LG, THEME_MONO, THEME_NAME
+    global RAD, RAD_LG, THEME_NAME
     THEME_NAME = name if name in THEMES else DEFAULT_THEME
     t = THEMES[THEME_NAME]
     C_BG        = QColor(t["bg"]);        C_SURFACE   = QColor(t["surface"])
@@ -80,7 +98,6 @@ def apply_theme(name: str):
     C_ERR       = QColor(t["err"]);       C_ERR_TXT   = QColor(t["err_txt"])
     C_WARN      = QColor(t["warn"]);      C_INFO      = QColor(t["info"])
     RAD         = t["rad"];               RAD_LG      = t["rad_lg"]
-    THEME_MONO  = t["mono"]
 
 def app_chrome_stylesheet() -> str:
     """Global widget chrome for a more modern, cohesive look (applied once at launch)."""
@@ -178,10 +195,9 @@ def style_activity_type_chip(btn, at: dict, selected: bool, *, compact: bool = F
         """)
 
 def paint_schedule_block(p: QPainter, rect: QRect, fill: QColor, accent: QColor,
-                         radius: int = 0, accent_w: int = 3, outline: bool = False):
+                         accent_w: int = 3, outline: bool = False):
     """Square planner tiles (deliberately not GCal-style rounded cards): solid fill,
-    1px outline, crisp left accent bar. `radius` is ignored (kept for call-site
-    compatibility)."""
+    1px outline, crisp left accent bar."""
     p.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), BLOCK_OUTLINE_A), 1))
     p.setBrush(fill)
     p.drawRect(rect.adjusted(0, 0, -1, -1))

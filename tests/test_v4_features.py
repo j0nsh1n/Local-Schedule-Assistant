@@ -1,6 +1,6 @@
 """v4.0.0 — model install checks, calendar ID parse, backup listing helpers.
 Synthetic temp DATA_DIR only — no real schedule data."""
-import os, sys, tempfile, json
+import os, sys, tempfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pathlib import Path
 
@@ -24,7 +24,7 @@ def check(name, cond):
     results.append(bool(cond))
     print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
 
-check("version 4.3.1", core.APP_VERSION == "4.3.1")
+check("version 4.4.0", core.APP_VERSION == "4.4.0")
 
 # model_is_installed
 check("exact match", ai.model_is_installed("qwen3:14b", ["qwen3:14b"]))

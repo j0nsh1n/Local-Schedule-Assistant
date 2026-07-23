@@ -1,5 +1,20 @@
 """Daily Scheduler — Google Calendar auth + fetch threads.
 
+Calendar events are READ-ONLY in this app: they are obstacles the planner works
+around, never blocks it edits. Google Calendar is entirely optional — the planner
+works offline and every failure here degrades to "no events".
+
+Contents
+    normalize_google_event  one API event -> 0+ day-scoped dicts. Timed events
+                            give one entry; all-day events expand to one entry
+                            per day across Google's half-open [start, end) range
+                            and are marked `allDay` so they never consume free
+                            time in the planner (they show as a banner instead)
+    GoogleAuthThread ...... OAuth flow, off the GUI thread
+    CalFetchThread ........ range fetch across one or more calendar IDs, with
+                            per-calendar fault isolation: one bad ID warns and
+                            the rest still sync (it used to blank everything)
+
 Copyright (C) 2026 Jonathan Shin
 GPL-3.0-or-later — see LICENSE. Split out of app.py in v4.2.0;
 app.py remains the entry point.
