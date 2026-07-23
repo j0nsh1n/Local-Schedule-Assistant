@@ -1,5 +1,28 @@
 """Daily Scheduler — the main application window.
 
+MainWindow owns the application state (the schedule, the calendar cache, the
+current date/view) and wires every widget together. The AI tool implementations
+it exposes to the assistant live in ai_tools.AIToolsMixin, which it inherits.
+
+Sections in this file, in order (each has a `# ──` banner):
+
+    App page layout ...... _build_app / _build_header — the QStackedWidget,
+                           the day/week/month/year stack, the splitters
+    Boot ................. first-run setup screen vs. straight to the app
+    Google Calendar ...... auth thread, range fetching, per-month caching
+    Per-day accessors .... _day_acts / _day_cal / _cal_intervals — the last is
+                           what keeps AI placement off read-only meetings
+    Navigation ........... view switching and ‹ Today ›
+    View refresh ......... _refresh_view — the single repaint path; call it
+                           after ANY schedule mutation
+    Activity actions ..... create/edit/drag/delete + Ctrl+Z / Ctrl+Y history
+    Layout splitters ..... debounced persistence of pane sizes
+    AI panel ............. panel wiring, per-turn context, snapshot/undo
+    Status / Now-Next .... status bar text and the live "Now: … Next: …" line
+    Auto-update check .... GitHub releases poll, notify-only
+    Tray icon ............ creation, retry, re-assert (see the v2.5.3 lesson)
+    Alerting ............. block-start alerts, DND-override popup, sound
+
 Copyright (C) 2026 Jonathan Shin
 GPL-3.0-or-later — see LICENSE. Split out of app.py in v4.2.0;
 app.py remains the entry point.
@@ -371,6 +394,7 @@ class MainWindow(AIToolsMixin, QMainWindow):
         if core.CREDS_FILE.exists():
             self._auth_google()
 
+    # ── Google Calendar (auth, range fetch, per-month cache) ───────────────
     def _auth_google(self):
         self._set_status("Connecting to Google Calendar…")
         self._auth_t = GoogleAuthThread()

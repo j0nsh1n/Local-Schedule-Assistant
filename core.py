@@ -1,4 +1,26 @@
-"""Daily Scheduler — constants, pure helpers, storage, settings (no Qt).
+"""Daily Scheduler — constants, pure helpers, storage, settings.
+
+The foundation layer every other module imports. Deliberately **Qt-free**: it must
+stay importable without a display so the planning logic can be tested on its own
+(see tests/test_core_pure.py, and the "Core logic (no Qt)" CI job that installs no
+PySide6). Don't import PySide6 here.
+
+Contents
+    App metadata ......... __version__, GITHUB_REPO, release-check URLs
+    App data paths ....... DATA_DIR and every file under ~/.daily-scheduler/
+    Layout constants ..... the 24h day (DAY_START/END), HOUR_PX, GUTTER_W
+    Activity types ....... ACTIVITY_TYPES — the one source of truth for
+                           categories; tool schemas and the AI prompt are
+                           generated from it, so adding one propagates
+    Pure helpers ......... time/duration formatting, version compare,
+                           Now/Next summary, calendar-event shaping
+    Crash / error logging  install_crash_logging() — app.log + crash.log
+    Local storage ........ load/save activities (+ .bak rotation)
+    Rolling backups ...... dated dailies, pruned to BACKUP_KEEP
+    Notification de-dup .. claim_block_alert() — exactly-once across processes
+    Settings ............. DEFAULT_SETTINGS, load/save, time parsing
+    Interval helpers ..... the scheduling math: free slots, placement,
+                           sequentialize(), overlap columns
 
 Copyright (C) 2026 Jonathan Shin
 GPL-3.0-or-later — see LICENSE. Split out of app.py in v4.2.0;
@@ -21,7 +43,7 @@ from typing import Optional, List, Dict
 
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "4.3.1"
+__version__  = "4.4.0"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against

@@ -1,5 +1,26 @@
 """Daily Scheduler — calendar view widgets (day/week/month/year, sidebar).
 
+Every view is custom-painted with QPainter — there is no browser engine and no
+QML. Widgets are deliberately dumb: they paint what they're handed via set_data()
+and emit signals on interaction; MainWindow owns the state and does the saving.
+
+Contents
+    TimelineWidget ....... the Day view. The only fully interactive one: drag
+                           empty space to create, drag a block to move, drag an
+                           edge to resize, right-click to edit/delete
+    SidebarWidget ........ activity-type picker + daily summary
+    WeekViewWidget ....... 7 columns Mon–Sun, whole day scaled per column;
+                           read-mostly (click a block to edit, a header to jump)
+    _DayCellGrid ......... shared base for the read-only date grids below —
+                           records cell rects while painting, emits day_clicked
+    MonthViewWidget ...... month grid with event chips
+    YearViewWidget ....... 12 mini-months, busy days dotted
+
+Overlapping blocks are laid out side-by-side by core.assign_overlap_cols(), which
+the Day and Week views share so they always agree. Colours come from theme.C_* —
+read them through the module (`theme.C_BG`), never `from theme import C_BG`, or
+they stop following a theme change.
+
 Copyright (C) 2026 Jonathan Shin
 GPL-3.0-or-later — see LICENSE. Split out of app.py in v4.2.0;
 app.py remains the entry point.
@@ -216,10 +237,9 @@ class TimelineWidget(QWidget):
 
             dur  = blk["endMin"] - blk["startMin"]
             c, bg = block_colors(blk.get("color") or theme.C_ACCENT.name())
-            rr   = max(4, min(theme.RAD + 2, rect.height() // 2, 10))
             dragging = (self._preview and blk.get("_btype") == "user"
                         and blk["id"] == self._preview[0])
-            paint_schedule_block(p, rect, bg, c, radius=rr, accent_w=3,
+            paint_schedule_block(p, rect, bg, c, accent_w=3,
                                  outline=bool(dragging))
 
             tr = rect.adjusted(10, 4, -6, -4)
@@ -653,8 +673,7 @@ class WeekViewWidget(QWidget):
                 bx = int(x0 + 3 + b["_col"] * bw)
                 rect = QRect(bx, by, int(bw - 2), bh)
                 c, bg = block_colors(b.get("color") or theme.C_ACCENT.name())
-                rr = max(3, min(theme.RAD, rect.height() // 2, 8))
-                paint_schedule_block(p, rect, bg, c, radius=rr, accent_w=2)
+                paint_schedule_block(p, rect, bg, c, accent_w=2)
                 if b["_btype"] == "user":
                     self._block_hits.append((rect, b["id"]))
                 if bh >= 26:
@@ -749,12 +768,30 @@ class WeekViewWidget(QWidget):
         else:
             self.day_clicked.emit(val)
 
+class _DayCellGrid(QWidget):
+    """Shared base for the read-only date grids (Month, Year).
+
+    Both paint a grid of day cells, record each cell's rect in `self._hits` as
+    (QRect, date) while painting, and emit `day_clicked` when one is clicked —
+    so the hit-testing lives here instead of being duplicated per view."""
+    day_clicked = Signal(object)   # datetime.date
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hits: List[tuple] = []   # [(QRect, date)], rebuilt on every paint
+
+    def mousePressEvent(self, ev):
+        pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
+        for rect, d in self._hits:
+            if rect.contains(pos):
+                self.day_clicked.emit(d)
+                return
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  MONTH VIEW  (Google-Calendar-style month grid)
 # ══════════════════════════════════════════════════════════════════════════
-class MonthViewWidget(QWidget):
-    day_clicked = Signal(object)   # datetime.date
-
+class MonthViewWidget(_DayCellGrid):
     HDR_H = 26
 
     def __init__(self, parent=None):
@@ -762,7 +799,6 @@ class MonthViewWidget(QWidget):
         self._year  = date.today().year
         self._month = date.today().month
         self._events: Dict[str, List[Dict]] = {}
-        self._hits: List[tuple] = []
         self.setMinimumHeight(480)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -837,24 +873,16 @@ class MonthViewWidget(QWidget):
                     p.drawText(QRect(x + 8, int(y + 27 + len(shown) * 17), int(cw) - 12, 13),
                                Qt.AlignVCenter | Qt.AlignLeft, f"+{len(evs) - len(shown)} more")
 
-    def mousePressEvent(self, ev):
-        pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
-        for rect, d in self._hits:
-            if rect.contains(pos):
-                self.day_clicked.emit(d)
-                return
 
 # ══════════════════════════════════════════════════════════════════════════
 #  YEAR VIEW  (12 mini-months, busy days dotted)
 # ══════════════════════════════════════════════════════════════════════════
-class YearViewWidget(QWidget):
-    day_clicked = Signal(object)   # datetime.date
+class YearViewWidget(_DayCellGrid):
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._year = date.today().year
         self._busy: set = set()
-        self._hits: List[tuple] = []
         self.setMinimumSize(860, 660)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -919,9 +947,3 @@ class YearViewWidget(QWidget):
                     p.setBrush(Qt.NoBrush)
                     p.drawText(cell, Qt.AlignCenter, str(d.day))
 
-    def mousePressEvent(self, ev):
-        pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
-        for rect, d in self._hits:
-            if rect.contains(pos):
-                self.day_clicked.emit(d)
-                return

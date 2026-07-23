@@ -8,6 +8,45 @@ invokes; it and its two tool-only helpers live here as a mixin so they stay
 next to each other and out of the window class. MainWindow inherits this, so
 every `self.` reference (schedule state, calendar cache, `_refresh_view`) still
 resolves exactly as before — this is a move, not a rewrite.
+
+The tools (search for `name == "<tool>"` to jump to one)
+
+    Single block     add_block, delete_block, move_block, split_block
+    Whole day        clear_day, copy_day, replace_day, shift_blocks,
+                     add_recurring, clear_range
+    Planners         schedule_tasks (fit UNORDERED tasks into real free time),
+                     plan_day (build an ORDERED day around fixed anchors),
+                     make_room (insert an appointment, ripple the rest),
+                     reflow_from_now (running late),
+                     plan_for_deadline (spread work across days)
+    Read-only        find_free_time, list_blocks, week_summary
+                     — these never mutate, and core.AI_READONLY_TOOLS keeps
+                       them from creating an undo snapshot
+
+What the mutating tools do and don't guarantee:
+
+  * **Placement avoids overlaps — except add_recurring.** Everything routed
+    through core.sequentialize() / find_free_placement() passes
+    `blocked=self._cal_intervals(ds)`, so editable blocks are pushed off
+    read-only Google Calendar events instead of landing on a meeting.
+    add_recurring is the exception: it stamps each occurrence at the requested
+    time, checks the day for collisions and names them in its result, but does
+    NOT reposition and does NOT look at calendar events. (Deliberate so far —
+    a weekly class should land at its real time — but it means it can create
+    an overlap no other tool would.)
+  * **Deleting vs. dropping.** Only replace_day and clear_* remove blocks
+    outright. But any tool that re-lays a day (shift_blocks, plan_day,
+    make_room, reflow_from_now, copy_day) can push a block past 24:00, and
+    sequentialize() DROPS whatever no longer fits, returning n_dropped. Each
+    of those branches reports the count — keep doing that, or a block can
+    disappear with nothing in the chat to explain it.
+  * **Everything is undoable.** Every mutation is preceded by
+    `_ai_snapshot_before()`, so ↶ Undo restores the whole turn.
+
+Each branch returns a human-readable string that is BOTH shown in chat and fed
+back to the model as the tool result — so the wording doubles as the model's
+feedback signal. Keep it factual and specific (what moved, to when, what was
+dropped); vague results make the model narrate instead of verifying.
 """
 
 import json
@@ -78,6 +117,7 @@ class AIToolsMixin:
                 return (f"Error: couldn't understand the date "
                         f"'{args.get('date')}'. Use Month/Day like 6/14, or 'tomorrow'.")
 
+            # ── SINGLE BLOCK — add / delete / move ──────────────────────────
             if name == "add_block":
                 sm = parse_hhmm(str(args["start"]))
                 em = coerce_end_min(sm, parse_hhmm(str(args["end"])))
@@ -193,6 +233,7 @@ class AIToolsMixin:
                 return (f"Moved '{a['title']}' to {a['date']}, "
                         f"{fmt_time(a['startMin'])}–{fmt_time(a['endMin'])}.{note}")
 
+            # ── WHOLE DAY — clear / copy / shift / replace / recur ──────────
             if name == "clear_day":
                 n = sum(1 for a in self._all_acts if a.get("date") == ds)
                 if not n:
@@ -386,6 +427,7 @@ class AIToolsMixin:
                 return (f"Cleared {len(hits)} block(s) in {fmt_time(rs)}–{fmt_time(re_)} on "
                         f"{ds}: " + ", ".join(f"'{a['title']}'" for a in hits))
 
+            # ── READ-ONLY — free time ───────────────────────────────────────
             if name == "find_free_time":
                 after  = parse_hhmm(str(args["after"]))  if args.get("after")  else core.DAY_START
                 before = parse_hhmm(str(args["before"])) if args.get("before") else core.DAY_END
@@ -405,6 +447,7 @@ class AIToolsMixin:
                         ", ".join(f"{fmt_time(s)}–{fmt_time(e)} ({fmt_dur(e - s)})"
                                   for s, e in gaps))
 
+            # ── SINGLE BLOCK — pomodoro split ───────────────────────────────
             if name == "split_block":
                 hits = self._select_acts(ds, args.get("title"), args.get("at"))
                 if not hits:
@@ -463,6 +506,7 @@ class AIToolsMixin:
                 return (f"Split '{a['title']}' into {n_chunks} × {chunk}-min chunks"
                         f"{f' with {brk}-min breaks' if brk else ''}.")
 
+            # ── PLANNERS — deterministic layout, never overlaps ─────────────
             if name == "schedule_tasks":
                 raw = args.get("tasks")
                 if isinstance(raw, str):
@@ -763,6 +807,7 @@ class AIToolsMixin:
                     out += f" ({n_drop} couldn't fit even shrunk — remove or shorten something.)"
                 return out
 
+            # ── READ-ONLY — day listing + CONFLICTS (the verify signal) ─────
             if name == "list_blocks":
                 cal_all = self._cal_by_date.get(ds, [])
                 cal_ad  = allday_cal_events(cal_all)
@@ -798,6 +843,7 @@ class AIToolsMixin:
                     out += "\nNo conflicts: nothing overlaps and no block sits on a meeting."
                 return out
 
+            # ── PLANNERS — recover a slipped day / spread to a deadline ─────
             if name == "reflow_from_now":
                 try:
                     delay = int(float(args.get("minutes")))
@@ -917,6 +963,7 @@ class AIToolsMixin:
                     out += f" | couldn't fit {len(skipped)} (no free slot before the deadline)"
                 return out
 
+            # ── READ-ONLY — weekly totals ───────────────────────────────────
             if name == "week_summary":
                 if args.get("start") or args.get("end"):
                     s = resolve_date(args.get("start"), self._cur_date) or self._cur_date.isoformat()

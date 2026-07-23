@@ -1,5 +1,23 @@
 """Daily Scheduler — run-at-login, alert sounds, update check.
 
+Where the OS-specific behaviour is quarantined. Anything that branches on
+Windows vs. Linux belongs here rather than in the widget modules.
+
+Contents
+    Run-at-login ......... set_startup / is_startup_enabled.
+                           Windows: a Startup-folder .lnk (NOT a registry Run
+                           key — that worked but never showed in Task Manager).
+                           Linux: ~/.config/autostart/*.desktop.
+                           Both pass --startup. The shortcut records an absolute
+                           path, so it must be rewritten if the app moves.
+    Alert tones .......... NOTIFY_TONES + WAV synthesis with the stdlib.
+                           A file is needed because QApplication.beep() is
+                           silent under PipeWire.
+    play_alert_sound ..... QSoundEffect, falling back to MessageBeep / beep()
+    UpdateCheckThread .... polls the GitHub releases API. Notify-only: it never
+                           downloads anything, and fails silently on every
+                           non-200 (offline, rate-limited, 404).
+
 Copyright (C) 2026 Jonathan Shin
 GPL-3.0-or-later — see LICENSE. Split out of app.py in v4.2.0;
 app.py remains the entry point.
@@ -209,10 +227,6 @@ def ensure_alert_wav(tone_id: str = "chime") -> Optional[Path]:
         return p
     except Exception:
         return None
-
-# Back-compat alias used by older call sites / tests
-def _ensure_alert_wav() -> Optional[Path]:
-    return ensure_alert_wav("chime")
 
 def play_alert_sound(parent=None, *, tone: str = "chime", volume: float = 0.8) -> None:
     """Play a short alert tone. `volume` is 0..1. Uses Qt multimedia when available;

@@ -8,7 +8,7 @@ use the same conversion — CI runners are UTC, so hard-coded PDT minute offsets
 (600/660 for 10:00–11:00 -07:00) fail there."""
 import os, sys, tempfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

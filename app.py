@@ -3,6 +3,18 @@
 Daily Scheduler — Native Desktop App
 Pure Python + PySide6 (Qt6). No browser engine.
 
+Entry point only. Everything else lives in focused modules — start with
+ARCHITECTURE.md for the map, or core.py for the data model.
+
+What main() does, in order:
+  1. --version short-circuit (so packaging smoke tests need no display)
+  2. install_crash_logging() FIRST, so anything after it is recorded
+  3. apply_theme() before any widget bakes colours
+  4. single-instance guard — an ATOMIC QSharedMemory.create(); losers ping the
+     winner to surface its window and exit. Never refuses to launch: if the
+     guard itself misbehaves, we start anyway
+  5. build and show the window (deferred slightly on a --startup launch)
+
 Copyright (C) 2026 Jonathan Shin
 
 This program is free software: you can redistribute it and/or modify

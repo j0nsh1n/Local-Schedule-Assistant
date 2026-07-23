@@ -4,7 +4,6 @@ helpers, UpdateCheckThread's fail-silent behaviour on every response class, and 
 MainWindow wiring (status pill, opt-out setting, releases-page open)."""
 import os, sys, tempfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -14,7 +13,6 @@ import platform_utils
 import requests
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QUrl
 
 TMP = Path(tempfile.mkdtemp())
 core.DATA_FILE     = TMP / "activities.json"
