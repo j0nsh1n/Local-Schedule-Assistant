@@ -411,9 +411,10 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: Dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(460)
         self.setMinimumHeight(520)
-        self.resize(480, 640)
+        # Width is computed from the real content at the end of __init__ — a hardcoded
+        # width clipped the right-hand side of every field at desktop font sizes of
+        # 10pt+ (the rows are wider than 480px once the font grows).
         self.values = dict(settings)
         self.startup_requested = is_startup_enabled()
         self.restored_acts: Optional[List[Dict]] = None
@@ -434,7 +435,10 @@ class SettingsDialog(QDialog):
         root = QVBoxLayout(self); root.setSpacing(0); root.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # AsNeeded, not AlwaysOff: the dialog sizes itself to the content below, but a
+        # small screen (or a very large font) can still force it narrower than the rows
+        # need. With scrolling off, that overflow was silently unreachable.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         body = QWidget()
         lay = QVBoxLayout(body); lay.setSpacing(8); lay.setContentsMargins(22, 18, 22, 12)
@@ -611,6 +615,28 @@ class SettingsDialog(QDialog):
         save.clicked.connect(self._save)
         br.addWidget(cancel); br.addWidget(save)
         root.addWidget(foot)
+
+        self._size_to_content(scroll, body)
+
+    def _size_to_content(self, scroll, body):
+        """Open wide enough for the widest row, instead of a hardcoded width.
+
+        The form rows (and the three DATA buttons) scale with the desktop font, so a
+        fixed 480px clipped the right-hand side of the fields at 10pt and up — the
+        overflow wasn't reachable because horizontal scrolling was off. Derive the
+        width from the content, but never exceed the screen we're opening on."""
+        bar = scroll.verticalScrollBar().sizeHint().width() + 2   # room for the scrollbar
+        want = body.sizeHint().width() + bar
+        floor = body.minimumSizeHint().width() + bar
+
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            cap = int(screen.availableGeometry().width() * 0.9)
+            want, floor = min(want, cap), min(floor, cap)
+
+        # Keep the old 460/480 as lower bounds so small fonts don't shrink the dialog.
+        self.setMinimumWidth(max(460, floor))
+        self.resize(max(480, want), self.height())
 
     def _on_settings_model_changed(self, text):
         tip = model_when_text(text)

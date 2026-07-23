@@ -21,7 +21,7 @@ from typing import Optional, List, Dict
 
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "4.3.0"
+__version__  = "4.3.1"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
