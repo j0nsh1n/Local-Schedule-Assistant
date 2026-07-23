@@ -1,5 +1,27 @@
 """Daily Scheduler — the AI assistant panel.
 
+The chat UI and the turn loop. What the tools DO lives in ai_tools.py; the model
+plumbing (threads, schemas, prompts) lives in ai.py.
+
+How one turn runs
+    _generate()      freezes the mode for the whole turn, then spawns
+                     OllamaThread with the system prompt + history
+    _on_token()      streams text into the last assistant message
+    _on_tool_calls() runs each call through `execute_tool` (wired by MainWindow
+                     to AIToolsMixin._ai_execute), appends the results, and
+                     re-spawns the thread so the model can verify its own work —
+                     up to ai.MAX_TOOL_ROUNDS
+    _turn_ended()    EVERY finish path (final text, error, round limit, Stop)
+                     funnels here, so MainWindow unlocks Undo exactly once
+
+Three things that look odd but are deliberate:
+  * the turn's mode is captured at the start — switching tabs mid-stream used to
+    write the reply into the wrong transcript
+  * the installed-model list is cached and refreshed from the background status
+    poll; calling Ollama from the GUI thread froze the window while a model
+    loaded
+  * the transcript is persisted as it streams, so an OOM kill can't eat it
+
 Copyright (C) 2026 Jonathan Shin
 GPL-3.0-or-later — see LICENSE. Split out of app.py in v4.2.0;
 app.py remains the entry point.
@@ -471,7 +493,7 @@ class AIPanel(QWidget):
         self._inp.setPlaceholderText(hints.get(mode, "Ask me anything about your day…"))
         self._render()
         if mode == "suggest" and not self.history["suggest"]:
-            QTimer.singleShot(200, lambda: self._generate(None))
+            QTimer.singleShot(200, self._generate)
 
     def _render(self):
         msgs = self.history[self.mode]
@@ -698,7 +720,7 @@ class AIPanel(QWidget):
         self._inp.clear()
         self.history[self.mode].append({"role": "user", "content": txt})
         self._persist_chat(force=True)
-        self._render(); self._generate(txt)
+        self._render(); self._generate()
 
     def _do_undo(self):
         if callable(self.on_undo):
@@ -720,7 +742,9 @@ class AIPanel(QWidget):
         if callable(self.on_turn_end):
             self.on_turn_end()
 
-    def _generate(self, user_msg):
+    def _generate(self):
+        """Start a turn. The user's message is already in self.history (the caller
+        appends + renders it first), so nothing is passed in here."""
         if self._thread and self._thread.isRunning(): return
         self._user_stopped = False
         self._turn_mode = self.mode       # freeze for the whole turn (incl. tool rounds)

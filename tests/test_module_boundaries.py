@@ -57,7 +57,7 @@ MUTABLE = {
     "theme": {"C_BG", "C_SURFACE", "C_SURF2", "C_BORDER", "C_BORDER2", "C_TEXT",
               "C_MUTED", "C_ACCENT", "C_ACCENT2", "C_ON_ACCENT", "C_NOW", "C_GRID",
               "C_GHOST", "C_OK", "C_OK_TXT", "C_ERR", "C_ERR_TXT", "C_WARN",
-              "C_INFO", "RAD", "RAD_LG", "THEME_MONO", "THEME_NAME"},
+              "C_INFO", "RAD", "RAD_LG", "THEME_NAME"},
     "core":  {"DATA_DIR", "DATA_FILE", "CREDS_FILE", "TOKEN_FILE", "CRASH_LOG",
               "ERROR_LOG", "CHAT_FILE", "BACKUP_DIR", "BAK_FILE", "SETTINGS_FILE",
               "NOTIFY_MARK_DIR", "APP_VERSION"},

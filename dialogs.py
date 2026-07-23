@@ -1,5 +1,20 @@
 """Daily Scheduler — dialogs and popups (add/edit, setup, alerts, settings).
 
+Contents
+    AddActivityDialog .... create AND edit AND delete one block (one dialog
+                           serves all three; `activity=None` means create)
+    SetupWidget .......... first-run screen shown when no credentials exist
+    AlertPopup ........... the app-drawn, always-on-top block-start alert.
+                           Exists because a normal tray toast can be suppressed
+                           by Do Not Disturb / Focus Assist and there is no
+                           public API to mark one as priority — so we draw our
+                           own frameless window instead
+    SettingsDialog ....... General / Notifications / AI / Calendar / Data
+
+SettingsDialog sizes itself from its content (_size_to_content) rather than a
+fixed width: the rows grow with the desktop font, and a hardcoded width clipped
+every field at 10pt and above. tests/test_settings_dialog.py guards this.
+
 Copyright (C) 2026 Jonathan Shin
 GPL-3.0-or-later — see LICENSE. Split out of app.py in v4.2.0;
 app.py remains the entry point.
@@ -403,7 +418,7 @@ class AlertPopup(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  MAIN WINDOW
+#  SETTINGS DIALOG  (General / Notifications / AI / Calendar / Data)
 # ══════════════════════════════════════════════════════════════════════════
 class SettingsDialog(QDialog):
     """Central settings — persisted to settings.json. Most changes apply live; a
