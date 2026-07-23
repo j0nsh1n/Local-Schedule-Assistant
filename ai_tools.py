@@ -23,15 +23,25 @@ The tools (search for `name == "<tool>"` to jump to one)
                      — these never mutate, and core.AI_READONLY_TOOLS keeps
                        them from creating an undo snapshot
 
-Two invariants every mutating tool upholds:
+What the mutating tools do and don't guarantee:
 
-  * **Never overlap.** Placement goes through core.sequentialize() /
-    find_free_placement() with `blocked=self._cal_intervals(ds)`, so editable
-    blocks are pushed off read-only Google Calendar events instead of landing
-    on a meeting.
-  * **Never silently destroy.** Only replace_day and clear_* remove blocks, and
-    every mutation is preceded by `_ai_snapshot_before()` so ↶ Undo can restore
-    the whole turn.
+  * **Placement avoids overlaps — except add_recurring.** Everything routed
+    through core.sequentialize() / find_free_placement() passes
+    `blocked=self._cal_intervals(ds)`, so editable blocks are pushed off
+    read-only Google Calendar events instead of landing on a meeting.
+    add_recurring is the exception: it stamps each occurrence at the requested
+    time, checks the day for collisions and names them in its result, but does
+    NOT reposition and does NOT look at calendar events. (Deliberate so far —
+    a weekly class should land at its real time — but it means it can create
+    an overlap no other tool would.)
+  * **Deleting vs. dropping.** Only replace_day and clear_* remove blocks
+    outright. But any tool that re-lays a day (shift_blocks, plan_day,
+    make_room, reflow_from_now, copy_day) can push a block past 24:00, and
+    sequentialize() DROPS whatever no longer fits, returning n_dropped. Each
+    of those branches reports the count — keep doing that, or a block can
+    disappear with nothing in the chat to explain it.
+  * **Everything is undoable.** Every mutation is preceded by
+    `_ai_snapshot_before()`, so ↶ Undo restores the whole turn.
 
 Each branch returns a human-readable string that is BOTH shown in chat and fed
 back to the model as the tool result — so the wording doubles as the model's

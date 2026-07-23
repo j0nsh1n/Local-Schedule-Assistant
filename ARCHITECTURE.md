@@ -13,7 +13,7 @@ listing its contents, so you can orient inside a file without scrolling it.
 Arrows point the way imports flow. Nothing below imports anything above it, so
 the graph stays acyclic.
 
-```
+```text
                          app.py            entry point: main(), single-instance guard
                             │
                        mainwindow.py       owns app state, wires everything together
@@ -94,19 +94,43 @@ single repaint path and also updates the Now/Next line.
 
 ## Invariants worth knowing
 
-- **Blocks never overlap.** Placement runs through `sequentialize()` /
-  `find_free_placement()` with the day's calendar events passed as `blocked=`,
-  so editable blocks are pushed off read-only meetings rather than landing on
-  them.
+- **Placement avoids overlaps** — with one documented exception. Everything that
+  routes through `sequentialize()` / `find_free_placement()` passes the day's
+  calendar events as `blocked=`, so editable blocks are pushed off read-only
+  meetings rather than landing on them.
+  **Exception:** `add_recurring` stamps each occurrence at the requested time
+  and only *reports* the days that collided — it does not reposition, and it
+  does not consult calendar events (see Known gaps).
 - **Calendar events are obstacles, not data.** Nothing writes to Google.
   All-day events are marked `allDay` and never consume free time.
-- **The AI can't silently destroy a day.** Only `replace_day` and `clear_*`
-  delete; every mutating turn takes an undo snapshot first, and ↶ Undo /
-  `Ctrl+Z` restore it.
+- **Nothing is lost silently, but "not deleted" isn't "not lost."**
+  `replace_day` and `clear_*` delete outright. Separately, any tool that
+  re-lays a day (`shift_blocks`, `plan_day`, `make_room`, `reflow_from_now`,
+  `copy_day`) can push a block past 24:00, and `sequentialize()` **drops**
+  what no longer fits — the count comes back as `n_dropped` and every one of
+  those tools reports it in its result string. Every mutating turn takes an
+  undo snapshot first, so ↶ Undo / `Ctrl+Z` restore the whole thing.
 - **Alerts fire exactly once**, even with two app instances running — the
   claim is an atomic `O_CREAT|O_EXCL` marker file, not an in-memory set.
 - **Data is local and plain JSON**, under `~/.daily-scheduler/`, with three
   recovery layers: `.bak` (one save back), 14 dated dailies, and in-session undo.
+
+---
+
+## Known gaps
+
+Real, currently-accepted limitations — listed so nobody has to rediscover them.
+
+- **`add_recurring` can create overlaps.** It places every occurrence at the
+  literal requested time, reporting collisions instead of avoiding them, and it
+  ignores calendar events entirely. That's defensible for its main use (a
+  weekly class belongs at its real time), but it is the one placement path that
+  can leave the day double-booked. Routing it through `sequentialize()` with
+  `blocked=_cal_intervals(ds)` — per occurrence, per day — would close it.
+- **Recurring blocks are stamped copies, not a rule.** Changing a class time
+  means editing every occurrence.
+- **The AI only sees the viewed day plus a 7-day calendar preview**, so it can
+  reason about upcoming events but not about blocks you scheduled next month.
 
 ---
 
