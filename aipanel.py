@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import (
     Qt, QTimer,
 )
+from PySide6.QtGui import QTextCursor
 
 import theme
 import ai
@@ -79,6 +80,7 @@ class AIPanel(QWidget):
         self.model       = DEFAULT_MODEL
         self.temperature = DEFAULT_SETTINGS["temperature"]
         self.num_ctx     = DEFAULT_SETTINGS["num_ctx"]
+        self._settings: Dict = dict(DEFAULT_SETTINGS)  # filled by apply_settings()
         self.on_model_edited = None       # set by MainWindow to persist model changes
         self.mode       = "chat"
         # Mode frozen for the in-flight turn so tab switches mid-stream can't
@@ -102,6 +104,12 @@ class AIPanel(QWidget):
         self._loop_msgs: List[Dict] = []  # running conversation for the tool loop
         self._depth = 0                   # tool-round counter (loop guard)
         self._user_stopped = False        # Stop must not apply tools after cancel
+        # Chat view scroll: setHtml() leaves a stale scrollbar max until layout
+        # finishes, so we defer "stick to bottom" and only force it when the
+        # user was already near the end (or we just started a turn).
+        self._render_pending = False
+        self._stick_chat_bottom = True
+        self._ignore_scroll = False  # True while we move the bar ourselves
 
         # Preferred width when the body splitter shows this panel; user can drag.
         self._panel_w = 340
@@ -235,6 +243,11 @@ class AIPanel(QWidget):
             QTextEdit {{ background: {theme.C_BG.name()}; border: none;
             color: {theme.C_TEXT.name()}; font-size: 12px; padding: 8px; }}
         """)
+        # Track whether the user is following the stream (near bottom) so we
+        # don't yank them down if they scroll up to re-read, and so we keep
+        # chasing the true maximum after setHtml layout.
+        self._msgs_view.verticalScrollBar().valueChanged.connect(
+            self._on_chat_scroll)
         lay.addWidget(self._msgs_view, 1)
 
         self._thinking = QLabel("⟳  Thinking…")
@@ -300,9 +313,34 @@ class AIPanel(QWidget):
         if callable(self.on_model_edited):
             self.on_model_edited(self.model)
 
+    def _llm_provider(self) -> str:
+        return str((self._settings or {}).get("llm_provider") or "ollama").strip().lower()
+
+    def _using_cloud(self) -> bool:
+        return self._llm_provider() != "ollama"
+
     def _refresh_model_hint(self):
         """Show badge / install state + when-to-use tooltip; enable ⬇ if missing.
         Uses the cached install list (poll thread) — no HTTP on the GUI thread."""
+        from ai import llm_provider_label
+        prov = self._llm_provider()
+        if prov != "ollama":
+            key = str((self._settings or {}).get("llm_api_key") or "").strip()
+            status = "API key set" if key else "API key missing — set in Settings"
+            p = model_profile(self.model)
+            label = llm_provider_label(prov)
+            if p:
+                self._model_hint.setText(f"{p['badge']}  ·  {label}  ·  {status}")
+            else:
+                self._model_hint.setText(f"{label}  ·  {self.model or 'model?'}  ·  {status}")
+            tip = (f"Provider: {label}\nModel: {self.model}\n"
+                   f"{'API key is set.' if key else 'Add your API key in Settings → AI Assistant.'}")
+            self._model_in.setToolTip(tip)
+            self._model_hint.setToolTip(tip)
+            self._pull_btn.setEnabled(False)
+            self._pull_btn.setToolTip("Pull is only for local Ollama models")
+            return
+
         have = (model_is_installed(self.model, self._installed_models)
                 if self._ollama_up else False)
         p = model_profile(self.model)
@@ -374,6 +412,13 @@ class AIPanel(QWidget):
         self.model       = s.get("model", DEFAULT_MODEL)
         self.temperature = float(s.get("temperature", 0.3))
         self.num_ctx     = int(s.get("num_ctx", 16384))
+        # Seed cloud model ids into the editable picker when using an external API.
+        prov = str(s.get("llm_provider") or "ollama")
+        if prov != "ollama":
+            from ai import CLOUD_MODEL_SUGGESTIONS
+            for m in CLOUD_MODEL_SUGGESTIONS.get(prov, []):
+                if self._model_in.findText(m) < 0:
+                    self._model_in.addItem(m)
         self._model_in.blockSignals(True)
         self._model_in.setCurrentText(self.model)
         self._model_in.blockSignals(False)
@@ -390,14 +435,31 @@ class AIPanel(QWidget):
         """Kick a status check. Hold the QThread ref until finished — dropping it
         left the only Python reference dying during main-thread GC while the C++
         thread was still mid-request (segfault in crash.log 2026-07-07). Same
-        pattern as MainWindow._check_for_update / _update_thread."""
-        if self._check_thread is not None and self._check_thread.isRunning():
-            return
+        pattern as MainWindow._check_for_update / _update_thread.
+
+        Clear the ref BEFORE deleteLater: if deleteLater runs first, the next poll
+        hits isRunning() on a dead C++ object (libshiboken RuntimeError)."""
+        t = self._check_thread
+        if t is not None:
+            try:
+                if t.isRunning():
+                    return
+            except RuntimeError:
+                # C++ side already gone (deleteLater raced the clear).
+                self._check_thread = None
         t = OllamaCheckThread()                       # unparented; ref held below
         t.result.connect(self._on_ollama)
         t.models.connect(self._on_models)
-        t.finished.connect(t.deleteLater)
-        t.finished.connect(lambda: setattr(self, "_check_thread", None))
+
+        def _done(th=t):
+            if self._check_thread is th:
+                self._check_thread = None
+            try:
+                th.deleteLater()
+            except RuntimeError:
+                pass
+
+        t.finished.connect(_done)
         self._check_thread = t
         t.start()
 
@@ -413,6 +475,20 @@ class AIPanel(QWidget):
     def _on_ollama(self, ok: bool):
         was = self._ollama_up
         self._ollama_up = ok
+        if self._using_cloud():
+            # Cloud path doesn't need Ollama; green when a key is present.
+            key_ok = bool(str((self._settings or {}).get("llm_api_key") or "").strip())
+            self._dot.setStyleSheet(
+                f"color: {(theme.C_OK if key_ok else theme.C_WARN).name()};")
+            from ai import llm_provider_label
+            if not self._stxt.text().startswith("Starting"):
+                self._stxt.setText(
+                    llm_provider_label(self._llm_provider())
+                    if key_ok else "API key missing")
+            self._set_power_state(False)  # ▶ still starts local Ollama if wanted
+            self._unload_btn.setEnabled(False)
+            self._refresh_model_hint()
+            return
         self._dot.setStyleSheet(f"color: {(theme.C_OK if ok else theme.C_ERR).name()};")
         if not self._stxt.text().startswith("Starting"):
             self._stxt.setText("Connected" if ok else "Not running")
@@ -495,7 +571,63 @@ class AIPanel(QWidget):
         if mode == "suggest" and not self.history["suggest"]:
             QTimer.singleShot(200, self._generate)
 
+    def _on_chat_scroll(self, value: int):
+        """User scrolled the chat — only auto-follow when they're near the bottom.
+        Ignore events we generate ourselves (setHtml often jumps to 0 first)."""
+        if self._ignore_scroll:
+            return
+        sb = self._msgs_view.verticalScrollBar()
+        # 64px slack so tiny layout jitter doesn't flip "following" off mid-stream.
+        self._stick_chat_bottom = (sb.maximum() - value) <= 64
+
+    def _scroll_chat_to_bottom(self):
+        """Scroll to the true end after setHtml layout. Immediate setValue(max)
+        is wrong: QTextEdit hasn't finished measuring the new document yet, so
+        maximum() is still the old height — that was the 'stuck scrolling'
+        bug while the model streams."""
+        view = self._msgs_view
+        sb = view.verticalScrollBar()
+        self._ignore_scroll = True
+
+        def _go():
+            # Prefer cursor→end: updates the scrollbar after document size settles.
+            cur = view.textCursor()
+            cur.movePosition(QTextCursor.MoveOperation.End)
+            view.setTextCursor(cur)
+            view.ensureCursorVisible()
+            sb.setValue(sb.maximum())
+
+        def _unlock():
+            self._ignore_scroll = False
+            # After our scroll, re-assert stick so the next stream chunk follows.
+            self._stick_chat_bottom = True
+
+        _go()
+        # One more pass after the event loop processes layout (critical for long streams).
+        QTimer.singleShot(0, _go)
+        QTimer.singleShot(16, _go)
+        QTimer.singleShot(20, _unlock)
+
+    def _schedule_render(self, *, force: bool = False):
+        """Throttle full HTML rebuilds during token streaming (every token used
+        to call setHtml → layout thrash + stuck scroll). Structural changes
+        (new messages, tool notes) pass force=True."""
+        if force:
+            self._render_pending = False
+            self._render()
+            return
+        if self._render_pending:
+            return
+        self._render_pending = True
+        QTimer.singleShot(50, self._flush_render)
+
+    def _flush_render(self):
+        self._render_pending = False
+        self._render()
+
     def _render(self):
+        # Render the UI tab's transcript. During an active turn the streamed text
+        # is in history[_hist_mode()]; if the user stayed on that tab they match.
         msgs = self.history[self.mode]
         if not msgs:
             hints = {
@@ -507,30 +639,48 @@ class AIPanel(QWidget):
                 f'<p style="color:{theme.C_MUTED.name()}; font-style:italic; text-align:center; margin-top:20px;">{h}</p>')
             return
 
+        # Stick to bottom if we already were, or a turn just started / is streaming
+        # while the user hasn't scrolled away.
+        sb = self._msgs_view.verticalScrollBar()
+        near_bottom = (sb.maximum() - sb.value()) <= 64 if sb.maximum() > 0 else True
+        follow = self._stick_chat_bottom or near_bottom
+
         html = ""
         for msg in msgs:
-            c = msg["content"].replace("&","&amp;").replace("<","&lt;").replace("\n","<br>")
-            r = msg["role"]
+            # Escape HTML; keep newlines as <br>. Don't also use white-space:pre-wrap
+            # on the same content — that double-counts line breaks and confuses height.
+            c = (msg.get("content") or "").replace("&", "&amp;").replace("<", "&lt;").replace("\n", "<br>")
+            r = msg.get("role")
             if r == "user":
-                html += (f'<div style="text-align:right;margin:4px 0;">'
-                         f'<span style="background:{theme.C_ACCENT.name()};color:{theme.C_ON_ACCENT.name()};padding:6px 10px;'
-                         f'border-radius:{theme.RAD}px;display:inline-block;max-width:88%;font-size:12px;">'
-                         f'{c}</span></div>')
+                # Block-level bubble (not inline-block): QTextEdit mis-measures tall
+                # inline-block spans, which also breaks the scrollbar range.
+                html += (f'<div style="text-align:right;margin:6px 0 6px 12%;">'
+                         f'<div style="background:{theme.C_ACCENT.name()};color:{theme.C_ON_ACCENT.name()};'
+                         f'padding:6px 10px;border-radius:{theme.RAD}px;font-size:12px;'
+                         f'display:block;text-align:left;">{c}</div></div>')
             elif r == "assistant":
-                html += (f'<div style="margin:4px 0;">'
-                         f'<span style="background:{theme.C_SURF2.name()};border:1px solid {theme.C_BORDER.name()};'
-                         f'color:{theme.C_TEXT.name()};padding:8px 10px;border-radius:{theme.RAD}px;'
-                         f'display:inline-block;font-size:12px;white-space:pre-wrap;">{c}</span></div>')
+                html += (f'<div style="margin:6px 12% 6px 0;background:{theme.C_SURF2.name()};'
+                         f'border:1px solid {theme.C_BORDER.name()};color:{theme.C_TEXT.name()};'
+                         f'padding:8px 10px;border-radius:{theme.RAD}px;font-size:12px;'
+                         f'display:block;">{c}</div>')
             elif r == "tool_note":
                 html += (f'<div style="margin:4px 0;background:{_rgba(theme.C_OK, .08)};'
-                         f'border:1px solid {_rgba(theme.C_OK, .25)};color:{theme.C_OK_TXT.name()};padding:6px 8px;'
-                         f'border-radius:{theme.RAD}px;font-size:11px;">{c}</div>')
+                         f'border:1px solid {_rgba(theme.C_OK, .25)};color:{theme.C_OK_TXT.name()};'
+                         f'padding:6px 8px;border-radius:{theme.RAD}px;font-size:11px;'
+                         f'display:block;">{c}</div>')
             elif r == "error":
                 html += (f'<div style="margin:4px 0;background:{_rgba(theme.C_ERR, .1)};'
-                         f'border:1px solid {_rgba(theme.C_ERR, .3)};color:{theme.C_ERR_TXT.name()};padding:8px;'
-                         f'border-radius:{theme.RAD}px;font-size:12px;">{c}</div>')
+                         f'border:1px solid {_rgba(theme.C_ERR, .3)};color:{theme.C_ERR_TXT.name()};'
+                         f'padding:8px;border-radius:{theme.RAD}px;font-size:12px;'
+                         f'display:block;">{c}</div>')
+        self._ignore_scroll = True  # setHtml resets the bar to 0 — don't treat as user scroll
         self._msgs_view.setHtml(html)
-        self._msgs_view.verticalScrollBar().setValue(self._msgs_view.verticalScrollBar().maximum())
+        if follow:
+            self._stick_chat_bottom = True
+            self._scroll_chat_to_bottom()
+        else:
+            # Keep the user's place as best we can after a full rebuild.
+            self._ignore_scroll = False
 
     def _persist_chat(self, *, force: bool = False):
         """Best-effort write of the transcript (throttled mid-stream)."""
@@ -538,6 +688,8 @@ class AIPanel(QWidget):
 
     def _maybe_memory_warning(self):
         """Soft, once-per-model-per-session note before a generate. Never blocks."""
+        if self._using_cloud():
+            return  # cloud APIs don't load weights into local VRAM
         if self.model in self._mem_warned:
             return
         warn = memory_warning_for(self.model)
@@ -602,7 +754,9 @@ class AIPanel(QWidget):
         p += (
             "\nTOOLS — pick the ONE that fits; never chain small calls for a bulk job:\n"
             "  add_block      – add one block\n"
-            "  add_recurring  – add the same block to many days (weekdays/weekends/daily or a dates list)\n"
+            "  add_recurring  – add the SAME single block to many days (one title/time). "
+            "For a full multi-day schedule use plan_days. Always pass start_date+end_date "
+            "(or dates) when the user names a range — weekdays alone starts from the VIEWED day.\n"
             "  move_block     – change a block's time, length, day, or title (match by title and/or 'at')\n"
             "  delete_block   – remove a block by title and/or 'at' (its start time)\n"
             "  clear_range    – delete blocks within a time window (\"clear my afternoon\")\n"
@@ -614,6 +768,11 @@ class AIPanel(QWidget):
             "  plan_day       – BUILD a full day: ORDERED tasks + fixed anchors (meals/workout) "
             "+ chunking, laid out around meetings (rebuilds the day). Best for 'X then Y, lunch "
             "at 13:00, workout at 16:00, 30-min chunks with breaks'.\n"
+            "  plan_days      – SAME plan on MANY days in ONE call. Use for 'plan 7/27–8/2 like "
+            "this' or 'every day this week'. Prefer 'blocks' (exact times) when the user listed "
+            "concrete times AND fixed anchors (lunch/workout/dinner); use tasks+fixed for "
+            "order+chunking. Pass start_date+end_date as Month/Day — NEVER invent years or "
+            "loop add_recurring for each slot.\n"
             "  make_room      – add ONE fixed appointment at a set time to an ALREADY-PLANNED day "
             "and shift the existing blocks around it WITHOUT deleting them (keep some 'pin'ned). "
             "Best for 'I have a meeting 12:00–13:30, adjust my day around it'.\n"
@@ -645,6 +804,14 @@ class AIPanel(QWidget):
             "The app lays everything out in order, splits into chunks, and flows the rest past the "
             "anchors and meetings — so you don't compute any times yourself. Don't shrink a task's "
             "minutes to 'make room' for breaks; plan_day handles that.\n"
+            "  - MULTI-DAY / WHOLE WEEK: use plan_days ONCE. Pass start_date and end_date exactly "
+            "as the user said them (e.g. start_date=\"7/27\", end_date=\"8/2\") — the app resolves "
+            "the ISO dates. If the user gave concrete times for every slot (including fixed "
+            "lunch/workout/dinner), put them all in plan_days.blocks with those exact HH:MM "
+            "times. NEVER: (1) invent a year, (2) compute a list of ISO dates yourself, "
+            "(3) call add_recurring once per block, (4) claim the week is done without a tool "
+            "result that lists the real dates. Fixed anchors MUST keep the user's times "
+            "(workout 16:00 stays 16:00, dinner 18:30 stays 18:30).\n"
             "  - For a NEW fixed appointment in an ALREADY-PLANNED day ('I have a meeting at 3pm, "
             "rearrange around it'), use make_room — ONE call that drops the appointment at the "
             "exact time and shifts the existing blocks around it without deleting any (pass 'pin' "
@@ -690,6 +857,13 @@ class AIPanel(QWidget):
             "  \"shift everything two hours later\"  → shift_blocks(minutes=120)\n"
             "  \"clear my afternoon\"               → clear_range(start=\"12:00\", end=\"18:00\")\n"
             "  \"study 16:00-18:00 every weekday\"  → add_recurring(title=\"Study\", start=\"16:00\", end=\"18:00\", weekdays=[\"weekdays\"])\n"
+            "  \"same full day plan 7/27 through 8/2: essays 08:00-09:30, … lunch 12:00-13:00, "
+            "workout 16:00-17:00, dinner 18:30-19:30\" → plan_days(start_date=\"7/27\", "
+            "end_date=\"8/2\", blocks=[{title:\"College Essays\",start:\"08:00\",end:\"09:30\","
+            "type:\"assignments\"}, … {title:\"Lunch\",start:\"12:00\",end:\"13:00\",type:\"meals\"}, "
+            "… {title:\"Workout\",start:\"16:00\",end:\"17:00\",type:\"exercise\"}, "
+            "{title:\"Dinner\",start:\"18:30\",end:\"19:30\",type:\"meals\"}])  "
+            "← ONE call; app expands the date range; fixed times stay exact.\n"
             "  \"when am I free for 2 hours?\"      → find_free_time(duration=120)\n"
             "  \"split my study block into 30-min chunks\" → split_block(title=\"study\", chunk=30, break=5)\n"
             "  \"plan my day: finish the essay (urgent), gym, read; keep dinner\" → "
@@ -720,6 +894,7 @@ class AIPanel(QWidget):
         self._inp.clear()
         self.history[self.mode].append({"role": "user", "content": txt})
         self._persist_chat(force=True)
+        self._stick_chat_bottom = True
         self._render(); self._generate()
 
     def _do_undo(self):
@@ -777,8 +952,14 @@ class AIPanel(QWidget):
         # let GC destroy the wrapper mid-teardown → segfault.
         if self._thread is not None and self._thread.isRunning():
             return
-        t = OllamaThread(self._loop_msgs, self.model, tools=AI_TOOLS,
-                         num_ctx=self.num_ctx, temperature=self._effective_temp())
+        s = self._settings or {}
+        t = OllamaThread(
+            self._loop_msgs, self.model, tools=AI_TOOLS,
+            num_ctx=self.num_ctx, temperature=self._effective_temp(),
+            provider=str(s.get("llm_provider") or "ollama"),
+            api_key=str(s.get("llm_api_key") or ""),
+            base_url=str(s.get("llm_base_url") or ""),
+        )
         t.token.connect(self._on_token)
         t.done.connect(self._on_done)
         t.tool_calls.connect(self._on_tool_calls)
@@ -803,7 +984,7 @@ class AIPanel(QWidget):
             h.pop()
         self._loop_msgs = self._loop_msgs + [
             {"role": "assistant", "content": self._cur_text or "", "tool_calls": calls}]
-        for call in calls:
+        for i, call in enumerate(calls):
             fn   = call.get("function") or {}
             name = fn.get("name", "?")
             args = fn.get("arguments") or {}
@@ -813,9 +994,13 @@ class AIPanel(QWidget):
             result = self.execute_tool(name, args) if callable(self.execute_tool) \
                      else "Tool execution unavailable."
             h.append({"role": "tool_note", "content": f"{name} → {result}"})
-            self._loop_msgs.append({"role": "tool", "tool_name": name,
-                                    "name": name, "content": str(result)})
-        self._render()
+            # tool_call_id is required by OpenAI/Anthropic multi-turn tool loops.
+            tcid = call.get("id") or f"call_{i}"
+            self._loop_msgs.append({
+                "role": "tool", "tool_call_id": tcid,
+                "tool_name": name, "name": name, "content": str(result),
+            })
+        self._schedule_render(force=True)
         self._persist_chat(force=True)
         self._depth += 1
         if self._depth >= MAX_TOOL_ROUNDS:   # guard against tool-call loops
@@ -835,11 +1020,12 @@ class AIPanel(QWidget):
             # "Thinking…" indicator up. _on_done will execute it.
             if h:
                 h[-1]["content"] = ""
-            self._render()
+            self._schedule_render()
         else:
             if h:
                 h[-1]["content"] = self._cur_text
-            self._render(); self._thinking.hide()
+            self._thinking.hide()
+            self._schedule_render()  # throttled — full setHtml every token froze scroll
         # Mid-stream crash insurance (throttled).
         self._persist_chat(force=False)
 
@@ -851,7 +1037,7 @@ class AIPanel(QWidget):
             if h and h[-1]["role"] == "assistant":
                 if not (h[-1].get("content") or "").strip():
                     h[-1]["content"] = "(Stopped.)"
-                self._render()
+                self._schedule_render(force=True)
             self._turn_ended()
             return
         # Small models sometimes print the tool call as text (<|python_tag|>, ``` fences,
@@ -874,7 +1060,7 @@ class AIPanel(QWidget):
             elif looks_like_tool_text(self._cur_text):
                 h[-1]["content"] = ("I tried to update your schedule but couldn't read "
                                     "the result — could you rephrase that?")
-            self._render()
+            self._schedule_render(force=True)
         self._turn_ended()
 
     def _on_error(self, msg):
@@ -886,7 +1072,8 @@ class AIPanel(QWidget):
         if h:
             h.pop()
         h.append({"role":"error","content":msg})
-        self._render(); self._turn_ended()
+        self._schedule_render(force=True)
+        self._turn_ended()
 
     def _stop(self):
         self._user_stopped = True

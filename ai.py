@@ -1,22 +1,20 @@
-"""Daily Scheduler — Ollama client, AI tool schemas, prompts, model profiles.
+"""Daily Scheduler — LLM client, AI tool schemas, prompts, model profiles.
 
-Everything about talking to the local model lives here. What the tools actually
-DO to the schedule lives in ai_tools.py; this module only declares them.
+Talks to local Ollama by default, or to external APIs when the user pastes a
+key in Settings (OpenAI, Anthropic, or any OpenAI-compatible base URL). What
+the tools actually DO to the schedule lives in ai_tools.py.
 
 Contents
-    MODEL_PROFILES ....... the curated model list — one source of truth for the
-                           picker, the VRAM/disk badges and the "when to use
-                           each" guide
+    MODEL_PROFILES ....... the curated Ollama model list
     Ollama process ....... start/stop/unload, OLLAMA_MODELS env, /api/tags
+    External providers ... OpenAI-compatible + Anthropic streaming + tools
     Chat transcript ...... load/save chat.json so an OOM can't eat the history
     Memory preflight ..... free-RAM probe + friendly mid-stream OOM text
-    Threads .............. OllamaThread (streaming chat), OllamaCheckThread
-                           (status poll), OllamaPullThread (model download)
-    AI_TOOLS ............. the tool schemas the model sees; enums are generated
-                           from core.ACTIVITY_TYPES so new categories propagate
+    Threads .............. OllamaThread (multi-provider streaming chat),
+                           OllamaCheckThread, OllamaPullThread
+    AI_TOOLS ............. tool schemas; enums from core.ACTIVITY_TYPES
     extract_tool_calls ... recovers tool calls a model printed as plain text
     Per-model prompts .... model_guidance() — family-specific steering
-                           (Qwen3, DeepSeek-R1, gpt-oss, Gemma, GLM, Mistral)
 
 Copyright (C) 2026 Jonathan Shin
 GPL-3.0-or-later — see LICENSE. Split out of app.py in v4.2.0;
@@ -523,24 +521,181 @@ class OllamaCheckThread(QThread):
             self.result.emit(False)
 
 
+# ── External LLM providers (OpenAI-compatible + Anthropic) ─────────────────
+OPENAI_DEFAULT_BASE = "https://api.openai.com/v1"
+ANTHROPIC_DEFAULT_BASE = "https://api.anthropic.com"
+
+# Suggested cloud model tags (picker seeds; user can type any id).
+CLOUD_MODEL_SUGGESTIONS = {
+    "openai": [
+        "gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini",
+    ],
+    "openai_compatible": [
+        "gpt-4o-mini", "claude-sonnet-4-5", "gemini-2.5-flash",
+    ],
+    "anthropic": [
+        "claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1",
+    ],
+}
+
+def llm_provider_label(provider: str) -> str:
+    return {
+        "ollama": "Local (Ollama)",
+        "openai": "OpenAI",
+        "openai_compatible": "OpenAI-compatible (custom URL)",
+        "anthropic": "Anthropic",
+    }.get(provider or "ollama", provider or "ollama")
+
+def resolve_llm_base_url(provider: str, base_url: str = "") -> str:
+    """Canonical chat API root (no trailing slash)."""
+    u = (base_url or "").strip().rstrip("/")
+    if provider == "openai":
+        return u or OPENAI_DEFAULT_BASE
+    if provider == "anthropic":
+        return u or ANTHROPIC_DEFAULT_BASE
+    if provider == "openai_compatible":
+        return u  # required — validated before request
+    return ""
+
+def messages_for_openai(messages: List[Dict]) -> List[Dict]:
+    """Map internal loop messages to OpenAI chat.completions shape."""
+    out = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        if role == "system":
+            out.append({"role": "system", "content": m.get("content") or ""})
+        elif role == "user":
+            out.append({"role": "user", "content": m.get("content") or ""})
+        elif role == "assistant":
+            msg = {"role": "assistant", "content": m.get("content") or ""}
+            tcs = m.get("tool_calls") or []
+            if tcs:
+                oai = []
+                for i, tc in enumerate(tcs):
+                    fn = (tc or {}).get("function") or {}
+                    args = fn.get("arguments", {})
+                    if isinstance(args, (dict, list)):
+                        args = json.dumps(args)
+                    oai.append({
+                        "id": (tc or {}).get("id") or f"call_{i}",
+                        "type": "function",
+                        "function": {
+                            "name": fn.get("name") or "?",
+                            "arguments": args if isinstance(args, str) else "{}",
+                        },
+                    })
+                msg["tool_calls"] = oai
+            out.append(msg)
+        elif role == "tool":
+            out.append({
+                "role": "tool",
+                "tool_call_id": m.get("tool_call_id") or m.get("id") or "call_0",
+                "content": str(m.get("content") or ""),
+            })
+        # skip tool_note / error (UI-only)
+    return out
+
+def messages_for_anthropic(messages: List[Dict]) -> tuple:
+    """Split system text + Anthropic messages (no system role in messages array)."""
+    system_parts = []
+    out = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        if role == "system":
+            system_parts.append(m.get("content") or "")
+        elif role == "user":
+            out.append({"role": "user", "content": m.get("content") or ""})
+        elif role == "assistant":
+            content = []
+            text = (m.get("content") or "").strip()
+            if text:
+                content.append({"type": "text", "text": text})
+            for i, tc in enumerate(m.get("tool_calls") or []):
+                fn = (tc or {}).get("function") or {}
+                args = fn.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args) if args else {}
+                    except Exception:
+                        args = {"raw": args}
+                if not isinstance(args, dict):
+                    args = {}
+                content.append({
+                    "type": "tool_use",
+                    "id": (tc or {}).get("id") or f"call_{i}",
+                    "name": fn.get("name") or "?",
+                    "input": args,
+                })
+            if not content:
+                content = [{"type": "text", "text": ""}]
+            out.append({"role": "assistant", "content": content})
+        elif role == "tool":
+            # Anthropic wants tool_result blocks on a user turn
+            block = {
+                "type": "tool_result",
+                "tool_use_id": m.get("tool_call_id") or m.get("id") or "call_0",
+                "content": str(m.get("content") or ""),
+            }
+            if out and out[-1].get("role") == "user" and isinstance(out[-1].get("content"), list):
+                out[-1]["content"].append(block)
+            else:
+                out.append({"role": "user", "content": [block]})
+    return "\n\n".join(p for p in system_parts if p), out
+
+def anthropic_tools_from_openai(tools: Optional[List]) -> List[Dict]:
+    """Convert OpenAI-style tool defs to Anthropic tools."""
+    out = []
+    for t in tools or []:
+        fn = (t.get("function") if isinstance(t, dict) else None) or {}
+        name = fn.get("name")
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "description": fn.get("description") or name,
+            "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
+        })
+    return out
+
+
 class OllamaThread(QThread):
+    """Streaming chat + tools for Ollama, OpenAI-compatible APIs, or Anthropic.
+
+    Name kept for call-site stability; provider is selected via constructor args
+    (from settings: llm_provider / llm_api_key / llm_base_url)."""
     token      = Signal(str)
     done       = Signal()
     tool_calls = Signal(list)
     error      = Signal(str)
 
-    def __init__(self, messages, model, tools=None, num_ctx=16384, temperature=0.3):
+    def __init__(self, messages, model, tools=None, num_ctx=16384, temperature=0.3,
+                 provider: str = "ollama", api_key: str = "", base_url: str = ""):
         super().__init__()
         self.messages    = messages
         self.model       = model
         self.tools       = tools
         self.num_ctx     = num_ctx
         self.temperature = temperature
+        self.provider    = (provider or "ollama").strip().lower() or "ollama"
+        self.api_key     = (api_key or "").strip()
+        self.base_url    = (base_url or "").strip()
         self._stop       = False
 
     def stop(self): self._stop = True
 
     def run(self):
+        if self.provider in ("openai", "openai_compatible"):
+            self._run_openai_compatible()
+        elif self.provider == "anthropic":
+            self._run_anthropic()
+        else:
+            self._run_ollama()
+
+    def _run_ollama(self):
         got_tokens = False
         try:
             payload = {"model": self.model, "messages": self.messages, "stream": True,
@@ -611,6 +766,233 @@ class OllamaThread(QThread):
             # ProtocolError once the runner is OOM-killed.
             if got_tokens:
                 self.error.emit(friendly_stream_error(ex, got_tokens=True, model=self.model))
+            else:
+                self.error.emit(str(ex))
+
+    def _run_openai_compatible(self):
+        got_tokens = False
+        try:
+            if not self.api_key:
+                self.error.emit(
+                    "No API key set.\n\nOpen Settings → AI Assistant, choose an external "
+                    "provider, and paste your API key.")
+                return
+            base = resolve_llm_base_url(self.provider, self.base_url)
+            if not base:
+                self.error.emit(
+                    "Base URL is required for OpenAI-compatible providers.\n\n"
+                    "Example: https://api.openai.com/v1 or your host's /v1 endpoint.")
+                return
+            url = base.rstrip("/") + "/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": self.model,
+                "messages": messages_for_openai(self.messages),
+                "stream": True,
+                "temperature": self.temperature,
+            }
+            if self.tools:
+                payload["tools"] = self.tools
+                payload["tool_choice"] = "auto"
+            resp = requests.post(url, headers=headers, json=payload,
+                                 stream=True, timeout=(10, 600))
+            if resp.status_code in (401, 403):
+                self.error.emit(
+                    "API rejected the key (HTTP %s).\nCheck the key in Settings → AI."
+                    % resp.status_code)
+                return
+            if resp.status_code == 404:
+                self.error.emit(
+                    f"Model or endpoint not found (404).\nModel: {self.model}\nURL: {url}")
+                return
+            if not resp.ok:
+                body = (resp.text or "")[:300]
+                self.error.emit(f"API error HTTP {resp.status_code}: {body}")
+                return
+
+            # Accumulate streamed tool_calls by index (OpenAI SSE).
+            tc_acc: Dict[int, Dict] = {}
+            raw, sent = "", 0
+            for line in resp.iter_lines(decode_unicode=True):
+                if self._stop:
+                    break
+                if not line:
+                    continue
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                if line.startswith(":"):  # comment / keepalive
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data_s = line[5:].strip()
+                if data_s == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_s)
+                except Exception:
+                    continue
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                delta = (choices[0] or {}).get("delta") or {}
+                c = delta.get("content") or ""
+                if c:
+                    raw += c
+                    vis = strip_think(raw)
+                    if len(vis) > sent:
+                        self.token.emit(vis[sent:]); sent = len(vis)
+                        got_tokens = True
+                for tc in delta.get("tool_calls") or []:
+                    idx = int(tc.get("index", 0))
+                    slot = tc_acc.setdefault(idx, {
+                        "id": "", "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    })
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"] += fn["arguments"]
+
+            calls = []
+            for idx in sorted(tc_acc.keys()):
+                slot = tc_acc[idx]
+                if not slot["function"].get("name"):
+                    continue
+                if not slot.get("id"):
+                    slot["id"] = f"call_{idx}"
+                # Keep arguments as JSON string for aipanel (it json.loads strings)
+                calls.append(slot)
+            if calls and not self._stop:
+                self.tool_calls.emit(calls)
+            else:
+                self.done.emit()
+        except requests.exceptions.Timeout:
+            self.error.emit(
+                f"The API timed out waiting for '{self.model}'. Try again, or a smaller model.")
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+                BrokenPipeError, ConnectionResetError) as ex:
+            self.error.emit(
+                f"Can't reach the API ({type(ex).__name__}). Check your network and base URL.")
+        except Exception as ex:
+            if got_tokens:
+                self.error.emit(f"Stream cut off mid-reply ({type(ex).__name__}). Try again.")
+            else:
+                self.error.emit(str(ex))
+
+    def _run_anthropic(self):
+        got_tokens = False
+        try:
+            if not self.api_key:
+                self.error.emit(
+                    "No Anthropic API key set.\n\nOpen Settings → AI Assistant and paste your key.")
+                return
+            base = resolve_llm_base_url("anthropic", self.base_url)
+            url = base.rstrip("/") + "/v1/messages"
+            headers = {
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            }
+            system, msgs = messages_for_anthropic(self.messages)
+            payload = {
+                "model": self.model,
+                "messages": msgs if msgs else [{"role": "user", "content": "Hello"}],
+                "max_tokens": min(8192, max(1024, int(self.num_ctx or 4096) // 4)),
+                "temperature": self.temperature,
+                "stream": True,
+            }
+            if system:
+                payload["system"] = system
+            if self.tools:
+                payload["tools"] = anthropic_tools_from_openai(self.tools)
+            resp = requests.post(url, headers=headers, json=payload,
+                                 stream=True, timeout=(10, 600))
+            if resp.status_code in (401, 403):
+                self.error.emit(
+                    "Anthropic rejected the API key (HTTP %s)." % resp.status_code)
+                return
+            if not resp.ok:
+                body = (resp.text or "")[:300]
+                self.error.emit(f"Anthropic error HTTP {resp.status_code}: {body}")
+                return
+
+            raw, sent = "", 0
+            tool_uses: Dict[int, Dict] = {}  # index → {id, name, input_json}
+            current_tool_idx = None
+            for line in resp.iter_lines(decode_unicode=True):
+                if self._stop:
+                    break
+                if not line:
+                    continue
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                if not line.startswith("data:"):
+                    continue
+                data_s = line[5:].strip()
+                if not data_s:
+                    continue
+                try:
+                    data = json.loads(data_s)
+                except Exception:
+                    continue
+                et = data.get("type")
+                if et == "content_block_start":
+                    block = data.get("content_block") or {}
+                    if block.get("type") == "tool_use":
+                        idx = int(data.get("index", 0))
+                        current_tool_idx = idx
+                        tool_uses[idx] = {
+                            "id": block.get("id") or f"call_{idx}",
+                            "name": block.get("name") or "",
+                            "input_json": "",
+                        }
+                elif et == "content_block_delta":
+                    delta = data.get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        c = delta.get("text") or ""
+                        if c:
+                            raw += c
+                            vis = strip_think(raw)
+                            if len(vis) > sent:
+                                self.token.emit(vis[sent:]); sent = len(vis)
+                                got_tokens = True
+                    elif delta.get("type") == "input_json_delta":
+                        idx = int(data.get("index", current_tool_idx or 0))
+                        if idx in tool_uses:
+                            tool_uses[idx]["input_json"] += delta.get("partial_json") or ""
+                elif et == "message_stop":
+                    break
+
+            calls = []
+            for idx in sorted(tool_uses.keys()):
+                tu = tool_uses[idx]
+                if not tu.get("name"):
+                    continue
+                args_s = tu.get("input_json") or "{}"
+                calls.append({
+                    "id": tu["id"],
+                    "type": "function",
+                    "function": {"name": tu["name"], "arguments": args_s},
+                })
+            if calls and not self._stop:
+                self.tool_calls.emit(calls)
+            else:
+                self.done.emit()
+        except requests.exceptions.Timeout:
+            self.error.emit(f"Anthropic timed out on '{self.model}'. Try again.")
+        except (requests.exceptions.ConnectionError,
+                BrokenPipeError, ConnectionResetError):
+            self.error.emit("Can't reach Anthropic. Check your network.")
+        except Exception as ex:
+            if got_tokens:
+                self.error.emit(f"Stream cut off mid-reply ({type(ex).__name__}).")
             else:
                 self.error.emit(str(ex))
 
@@ -697,20 +1079,25 @@ AI_TOOLS = [
         }, "required": ["to_date"]}}},
     {"type": "function", "function": {
         "name": "add_recurring",
-        "description": "Add the SAME block to multiple days in one call — for repeating "
-                       "things like classes or a daily study slot. Specify the days either "
-                       "with 'weekdays' (e.g. ['monday','wednesday'], or 'weekdays'/'weekends'/"
-                       "'daily') optionally over several 'weeks', or with an explicit 'dates' list.",
+        "description": "Add the SAME block to multiple days in one call — for one repeating "
+                       "slot (e.g. a daily class at 16:00). For a FULL multi-day schedule "
+                       "(many different blocks each day), use plan_days instead. Specify days "
+                       "with start_date+end_date, an explicit 'dates' list, or 'weekdays' "
+                       "(optionally with weeks). WARNING: weekdays alone starts from the "
+                       "VIEWED day — if the user named a range (e.g. 7/27–8/2), pass "
+                       "start_date and end_date (or dates), never invent the year.",
         "parameters": {"type": "object", "properties": {
             "title":    {"type": "string"},
             "start":    {"type": "string", "description": "24h HH:MM"},
             "end":      {"type": "string", "description": "24h HH:MM"},
             "type":     {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES]},
             "weekdays": {"type": "array", "items": {"type": "string"},
-                          "description": "Weekday names and/or 'weekdays','weekends','daily'. Applied across the next 'weeks' starting from the viewed day."},
-            "weeks":    {"type": "integer", "description": "How many weeks for weekday recurrence (default 1, max 8)."},
+                          "description": "Weekday names and/or 'weekdays','weekends','daily'."},
+            "weeks":    {"type": "integer", "description": "How many weeks for weekday recurrence (default 1, max 8). Ignored when end_date is set."},
+            "start_date": {"type": "string", "description": "First day of the window (Month/Day like 7/27, weekday word, or YYYY-MM-DD). Prefer this over relying on the viewed day."},
+            "end_date":   {"type": "string", "description": "Last day inclusive (Month/Day like 8/2). Use with start_date for a named range."},
             "dates":    {"type": "array", "items": {"type": "string"},
-                          "description": "Explicit list of dates (YYYY-MM-DD, or 6/14, tomorrow…). Use instead of weekdays for specific days."},
+                          "description": "Explicit list of dates (7/27, tomorrow, YYYY-MM-DD…). Use instead of weekdays for specific days."},
         }, "required": ["start", "end", "title"]}}},
     {"type": "function", "function": {
         "name": "clear_range",
@@ -817,7 +1204,8 @@ AI_TOOLS = [
                        "chunks separated by breaks, and flows the rest PAST every fixed anchor "
                        "and meeting. REPLACES the day's editable blocks, so include every fixed "
                        "item you want kept. PREFER THIS over hand-building with replace_day "
-                       "whenever there's a set order + fixed times + chunking.",
+                       "whenever there's a set order + fixed times + chunking. For the SAME "
+                       "plan across many days, use plan_days (one call) instead of looping.",
         "parameters": {"type": "object", "properties": {
             "date":  {"type": "string", "description": "ISO date YYYY-MM-DD. Omit for the viewed day."},
             "start": {"type": "string", "description": "When tasks begin, 24h HH:MM (default the user's waking-hours start; on today, not before now)."},
@@ -838,6 +1226,52 @@ AI_TOOLS = [
                     "break":   {"type": "integer", "description": "Break minutes between chunks (default 15 when chunk is set; 0 for none)."},
                 }, "required": ["title", "minutes"]}},
         }, "required": ["tasks"]}}},
+    {"type": "function", "function": {
+        "name": "plan_days",
+        "description": "Apply the SAME full-day plan to MANY days in ONE call — the correct "
+                       "tool for 'plan July 27 through August 2 like this' or 'same schedule "
+                       "every day this week'. Prefer this over looping add_recurring or "
+                       "plan_day: date ranges are resolved by the app (start_date+end_date or "
+                       "dates list), so they cannot drift to the wrong week. Two modes: "
+                       "(1) 'blocks' = exact start/end times for every slot (use when the user "
+                       "listed concrete times AND fixed anchors like lunch 12:00 / workout 16:00 / "
+                       "dinner 18:30 — put those exact times in the list); "
+                       "(2) 'tasks'+'fixed' = same layout engine as plan_day. "
+                       "Default clear=true replaces each day's editable blocks.",
+        "parameters": {"type": "object", "properties": {
+            "start_date": {"type": "string", "description": "First day (Month/Day like 7/27, or YYYY-MM-DD). Required with end_date unless using dates/weekdays."},
+            "end_date":   {"type": "string", "description": "Last day inclusive (Month/Day like 8/2)."},
+            "dates":      {"type": "array", "items": {"type": "string"},
+                            "description": "Explicit day list instead of a range."},
+            "weekdays":   {"type": "array", "items": {"type": "string"},
+                            "description": "Filter or generate days: names, 'weekdays', 'weekends', 'daily'."},
+            "weeks":      {"type": "integer", "description": "With weekdays only: how many weeks from start_date/viewed day (default 1)."},
+            "clear":      {"type": "boolean", "description": "If true (default), wipe each target day before placing. Set false to merge."},
+            "blocks": {"type": "array", "description": "Exact timed slots applied to EVERY target day. Preferred when the user gave concrete times.",
+                "items": {"type": "object", "properties": {
+                    "start": {"type": "string", "description": "24h HH:MM"},
+                    "end":   {"type": "string", "description": "24h HH:MM"},
+                    "title": {"type": "string"},
+                    "type":  {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES]},
+                }, "required": ["start", "end", "title"]}},
+            "start": {"type": "string", "description": "plan_day mode: when tasks begin (24h HH:MM)."},
+            "fixed": {"type": "array", "description": "plan_day mode: fixed anchors (lunch/workout/dinner at exact times).",
+                "items": {"type": "object", "properties": {
+                    "title":   {"type": "string"},
+                    "start":   {"type": "string"},
+                    "minutes": {"type": "integer"},
+                    "end":     {"type": "string"},
+                    "type":    {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES]},
+                }, "required": ["title", "start"]}},
+            "tasks": {"type": "array", "description": "plan_day mode: ordered tasks (focus minutes; breaks extra).",
+                "items": {"type": "object", "properties": {
+                    "title":   {"type": "string"},
+                    "minutes": {"type": "integer"},
+                    "type":    {"type": "string", "enum": [t["id"] for t in ACTIVITY_TYPES]},
+                    "chunk":   {"type": "integer"},
+                    "break":   {"type": "integer"},
+                }, "required": ["title", "minutes"]}},
+        }}}},
     {"type": "function", "function": {
         "name": "make_room",
         "description": "Add a FIXED appointment at an exact time and shuffle the day's existing "
@@ -970,7 +1404,8 @@ _R1_GUIDANCE = (
     "decide the next step. When done editing, call list_blocks ONCE to verify, fix anything "
     "wrong, then write ONE short confirmation sentence.\n"
     "6. NEVER chain many add_block calls for a bulk job — use the single matching bulk tool "
-    "(schedule_tasks, replace_day, shift_blocks, clear_day, copy_day, add_recurring).\n"
+    "(plan_days for multi-day templates, schedule_tasks, replace_day, shift_blocks, clear_day, "
+    "copy_day, add_recurring).\n"
     "7. If genuinely ambiguous, ask ONE short question. But if the user named a time, target "
     "that block with 'at' = its start time; don't ask.\n"
 )
@@ -985,9 +1420,10 @@ _GPTOSS_GUIDANCE = (
     "prose, as printed JSON, or inside a code block, and never narrate it in an analysis "
     "channel.\n"
     "3. ONE BEST TOOL PER REQUEST. For whole-day or bulk changes use the bulk tool "
-    "(schedule_tasks to plan, replace_day to rebuild, shift_blocks to move everything, "
-    "clear_day/clear_range to wipe, copy_day to duplicate, add_recurring to repeat) — never "
-    "a sequence of single add_block calls.\n"
+    "(plan_days for the same plan on many days, schedule_tasks to plan one day, replace_day "
+    "to rebuild, shift_blocks to move everything, clear_day/clear_range to wipe, copy_day to "
+    "duplicate, add_recurring for one repeating slot) — never a sequence of single add_block "
+    "calls.\n"
     "4. EXACT SHAPES. Times = 24-hour 'HH:MM' strings; dates = 'YYYY-MM-DD' or the user's "
     "words (never invent the year). schedule_tasks.tasks and replace_day.blocks are JSON "
     "arrays of objects with the required keys.\n"
@@ -1005,9 +1441,9 @@ _QWEN3_GUIDANCE = (
     "alternatives or second-guess. Keep any thinking brief, then call the tool.\n"
     "2. A TOOL CALL IS REQUIRED for every add / move / delete / rename / clear / shift / "
     "copy / split / plan / replace request — never just describe the change in words.\n"
-    "3. ONE TOOL FOR BULK JOBS: schedule_tasks to plan, replace_day to rebuild from scratch, "
-    "shift_blocks to move the whole day, add_recurring for repeats. Don't chain single "
-    "add_block calls.\n"
+    "3. ONE TOOL FOR BULK JOBS: plan_days for multi-day templates, schedule_tasks to plan, "
+    "replace_day to rebuild from scratch, shift_blocks to move the whole day, add_recurring "
+    "for one repeating slot. Don't chain single add_block calls.\n"
     "4. EXACT SHAPES. Times = zero-padded 24-hour 'HH:MM' strings; dates = 'YYYY-MM-DD' or "
     "the user's words (never invent the year). schedule_tasks.tasks and replace_day.blocks "
     "are arrays of objects.\n"
@@ -1022,9 +1458,9 @@ _QWEN25_GUIDANCE = (
     "updates through tool calls.\n"
     "2. NATIVE CHANNEL ONLY. Use the function-calling interface; do not print the call as "
     "text, JSON, an array, or inside ``` fences.\n"
-    "3. ONE TOOL PER JOB. For bulk or whole-day work use schedule_tasks / replace_day / "
-    "shift_blocks / clear_day / copy_day / add_recurring instead of repeated add_block "
-    "calls.\n"
+    "3. ONE TOOL PER JOB. For bulk or whole-day work use plan_days / schedule_tasks / "
+    "replace_day / shift_blocks / clear_day / copy_day / add_recurring instead of repeated "
+    "add_block calls.\n"
     "4. EXACT SHAPES. Times = 24-hour 'HH:MM' strings; dates = 'YYYY-MM-DD' or the user's "
     "words (never invent the year). schedule_tasks.tasks and replace_day.blocks are arrays "
     "of objects.\n"
@@ -1038,8 +1474,8 @@ _GENERIC_GUIDANCE = (
     "2. Prefer the native tool-calling channel. If your runtime cannot call functions, emit "
     "ONE single JSON object {\"name\":\"<tool>\",\"arguments\":{…}} and nothing else — no "
     "prose, no code fences.\n"
-    "3. Use ONE tool for bulk jobs (schedule_tasks / replace_day / shift_blocks / clear_day / "
-    "copy_day / add_recurring); never chain single add_block calls.\n"
+    "3. Use ONE tool for bulk jobs (plan_days / schedule_tasks / replace_day / shift_blocks / "
+    "clear_day / copy_day / add_recurring); never chain single add_block calls.\n"
     "4. EXACT SHAPES. Times = 24-hour 'HH:MM' strings; dates = 'YYYY-MM-DD' or the user's "
     "words (never invent the year). schedule_tasks.tasks and replace_day.blocks are arrays "
     "of objects.\n"
@@ -1060,9 +1496,9 @@ _GEMMA_GUIDANCE = (
     "'HH:MM' strings ('09:00', '14:30'); dates are 'YYYY-MM-DD' or the user's own words "
     "('6/14', 'tomorrow') — NEVER invent the year. plan_day.tasks / plan_day.fixed / "
     "schedule_tasks.tasks / replace_day.blocks are JSON ARRAYS of objects with the required keys.\n"
-    "4. ONE TOOL PER BULK JOB: plan_day to build an ordered day, schedule_tasks to fit tasks, "
-    "replace_day to rebuild, shift_blocks to move the whole day, add_recurring to repeat — never "
-    "a chain of single add_block calls.\n"
+    "4. ONE TOOL PER BULK JOB: plan_days for multi-day templates, plan_day for one ordered day, "
+    "schedule_tasks to fit tasks, replace_day to rebuild, shift_blocks to move the whole day, "
+    "add_recurring for one repeating slot — never a chain of single add_block calls.\n"
     "5. Keep replies short. After multi-step edits call list_blocks, fix anything in its "
     "CONFLICTS section, then confirm in ONE sentence.\n"
 )
@@ -1075,9 +1511,9 @@ _GLM_GUIDANCE = (
     "2. NATIVE TOOL CALLS only — do not print the call as text, JSON, or inside ``` fences. Any "
     "hidden reasoning is stripped before the user sees it, so it changes nothing on its own; "
     "keep it short — this is simple scheduling, not a puzzle.\n"
-    "3. ONE TOOL FOR BULK JOBS: plan_day (ordered day with fixed anchors + chunking), "
-    "schedule_tasks (fit tasks into free time), replace_day (rebuild), shift_blocks (move the "
-    "whole day). Don't chain single add_block calls.\n"
+    "3. ONE TOOL FOR BULK JOBS: plan_days (same plan on many days), plan_day (ordered day with "
+    "fixed anchors + chunking), schedule_tasks (fit tasks into free time), replace_day "
+    "(rebuild), shift_blocks (move the whole day). Don't chain single add_block calls.\n"
     "4. EXACT SHAPES: times = 24-hour zero-padded 'HH:MM' strings; dates = 'YYYY-MM-DD' or the "
     "user's words (never invent the year). tasks / fixed / blocks are arrays of objects.\n"
     "5. After multi-step edits, call list_blocks, fix anything in its CONFLICTS section, then "
@@ -1086,17 +1522,27 @@ _GLM_GUIDANCE = (
 
 _MISTRAL_GUIDANCE = (
     "\n\n══ MODEL-SPECIFIC INSTRUCTIONS — Mistral ══\n"
-    "Your function-calling is solid — use it precisely and literally:\n"
-    "1. ALWAYS call the matching tool for any schedule change; prose alone changes nothing.\n"
+    "Your function-calling is solid — use it precisely and literally. You have a known failure "
+    "mode on multi-day plans: narrating a week while tools write the wrong dates or times. "
+    "Hard rules against that:\n"
+    "1. ALWAYS call the matching tool for any schedule change; prose alone changes nothing. "
+    "Never say 'I've cleared and planned July 27–August 2' unless the tool RESULT text lists "
+    "exactly those dates.\n"
     "2. Use the NATIVE function-calling channel — never emit the call as text, an array, or "
     "inside ``` fences.\n"
-    "3. EXACT ARGUMENT SHAPES: times = 24-hour zero-padded 'HH:MM' strings; dates = 'YYYY-MM-DD' "
-    "or the user's words (never invent the year). plan_day.tasks / plan_day.fixed / "
-    "schedule_tasks.tasks / replace_day.blocks are JSON arrays of objects with the required keys.\n"
-    "4. ONE TOOL PER BULK JOB: plan_day / schedule_tasks / replace_day / shift_blocks / "
-    "add_recurring — don't loop single add_block calls for a bulk change.\n"
-    "5. After multi-step edits, call list_blocks, fix anything in its CONFLICTS section, then "
-    "confirm in ONE short sentence.\n"
+    "3. EXACT ARGUMENT SHAPES: times = 24-hour zero-padded 'HH:MM' strings; for multi-day "
+    "ranges pass start_date/end_date as Month/Day (\"7/27\", \"8/2\") or the user's words — "
+    "NEVER invent a year and NEVER compute a list of ISO dates yourself. plan_days.blocks / "
+    "plan_day.tasks / plan_day.fixed / schedule_tasks.tasks / replace_day.blocks are JSON "
+    "arrays of objects with the required keys.\n"
+    "4. ONE TOOL PER BULK JOB: plan_days for the same plan on many days; plan_day for one day; "
+    "schedule_tasks / replace_day / shift_blocks for other bulk work. Do NOT loop add_recurring "
+    "once per block for a full-day template — that is how dates and fixed times get corrupted.\n"
+    "5. FIXED ANCHORS KEEP THEIR TIMES. If the user said workout 16:00–17:00 and dinner "
+    "18:30–19:30, those times go into blocks/fixed unchanged — do not slide them to fill gaps.\n"
+    "6. After multi-day edits, read the tool result's date list. If it is wrong, fix with "
+    "another plan_days call (correct start_date/end_date). Then list_blocks on a sample day, "
+    "fix CONFLICTS, confirm in ONE short sentence.\n"
 )
 
 def model_guidance(model: str) -> str:

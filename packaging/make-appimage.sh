@@ -106,7 +106,7 @@ export ARCH=x86_64
 
 # VERSION is embedded in some AppImage metadata; prefer app.py if readable.
 if [[ -z "${VERSION:-}" && -f "$ROOT/app.py" ]]; then
-  VERSION="$(python3 -c "import re,pathlib; t=pathlib.Path('$ROOT/app.py').read_text(); m=re.search(r'__version__\s*=\s*\"([^\"]+)\"', t); print(m.group(1) if m else '')")"
+  VERSION="$(python3 -c "import re,pathlib; t=pathlib.Path('$ROOT/core.py').read_text(); m=re.search(r'^__version__\s*=\s*\"([^\"]+)\"', t, re.M); print(m.group(1) if m else '')")"
   export VERSION
 fi
 

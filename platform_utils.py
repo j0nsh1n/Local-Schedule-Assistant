@@ -62,11 +62,32 @@ def _entry_script() -> Path:
     file is platform_utils.py — never point Startup/XDG shortcuts here."""
     return Path(__file__).resolve().parent / "app.py"
 
+def _installed_launcher() -> Optional[Path]:
+    """User-level command installed by install-launcher.sh (~/.local/bin/daily-scheduler).
+    Prefer this for XDG autostart so login launch matches the pin-able desktop app."""
+    name = "daily-scheduler"
+    candidates = []
+    xdg_bin = os.environ.get("XDG_BIN_HOME")
+    if xdg_bin:
+        candidates.append(Path(xdg_bin) / name)
+    candidates.append(Path.home() / ".local" / "bin" / name)
+    for p in candidates:
+        try:
+            if p.is_file() and os.access(p, os.X_OK):
+                return p
+        except OSError:
+            continue
+    return None
+
 def _startup_target():
     """(target, arguments, working_dir) the shortcut should launch — the APP only,
     never Ollama, with --startup so it opens quietly into the tray."""
     if getattr(sys, "frozen", False):                  # packaged .exe
         return sys.executable, "--startup", str(Path(sys.executable).parent)
+    # Prefer the pin-able no-extension launcher when install-launcher.sh was run.
+    launcher = _installed_launcher()
+    if launcher is not None:
+        return str(launcher), "--startup", str(_entry_script().parent)
     script = _entry_script()                           # running from source
     return sys.executable, f'"{script}" --startup', str(script.parent)
 
@@ -95,6 +116,9 @@ def _desktop_exec_line() -> str:
     target, args, _ = _startup_target()
     if getattr(sys, "frozen", False):
         return f"{q(target)} {args}"
+    launcher = _installed_launcher()
+    if launcher is not None:
+        return f"{q(str(launcher))} --startup"
     script = _entry_script()
     return f"{q(target)} {q(str(script))} --startup"
 
@@ -112,7 +136,9 @@ def _set_startup_linux(enabled: bool) -> bool:
         "Comment=Daily planner with a local AI assistant\n"
         f"Exec={_desktop_exec_line()}\n"
         f"Path={workdir}\n"
+        "Icon=daily-scheduler\n"
         "Terminal=false\n"
+        "StartupWMClass=daily-scheduler\n"
         "X-GNOME-Autostart-enabled=true\n",
         encoding="utf-8",
     )
