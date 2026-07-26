@@ -112,11 +112,23 @@ pip install -r requirements.txt
 python app.py
 ```
 
+**Linux — pin to the taskbar / app menu** (recommended for day-to-day use):
+
+```bash
+./install-launcher.sh
+```
+
+This installs a real command (`~/.local/bin/daily-scheduler`, **no `.sh`**) plus an
+XDG desktop entry and icon so KDE/GNOME treat the app as **Daily Scheduler**, not
+`python` or a shell script. Then launch it from the app menu and pin that icon.
+Uninstall with `./install-launcher.sh --uninstall`.
+
 ### Linux notes (v3.0.0+)
 
 - **Run at login** uses a standard XDG autostart entry
   (`~/.config/autostart/daily-scheduler.desktop`) — toggle it from the tray menu
-  ("Start at login") or your desktop's autostart settings.
+  ("Start at login") or your desktop's autostart settings. After
+  `install-launcher.sh`, autostart uses the same `daily-scheduler` command.
 - **Tray icon:** KDE Plasma works out of the box. Vanilla **GNOME needs the
   [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/)**
   or the icon won't show; the app still works — closing the window without a tray
@@ -132,9 +144,11 @@ python app.py
 
 ---
 
-## Setting up the AI assistant (Ollama)
+## Setting up the AI assistant
 
 The AI is optional — skip this section and you still have a full-featured planner.
+
+### Local (Ollama) — default, private
 
 [Ollama](https://ollama.com) is a free, open-source runtime that runs large language
 models entirely on your own machine. Nothing you type ever leaves your PC.
@@ -192,6 +206,21 @@ again. (Prefer it automatic? Settings → **General** can start the server with 
 > starts the server on demand. For zero idle usage: on Windows, quit the Ollama tray app
 > and remove it from Startup apps; on Linux, the install script enables a systemd service
 > you can turn off with `sudo systemctl disable --now ollama`.
+
+### Cloud APIs (optional)
+
+Prefer a hosted model? **Settings → AI Assistant**:
+
+| Provider | What you need |
+|---|---|
+| **OpenAI** | API key from [platform.openai.com](https://platform.openai.com) |
+| **Anthropic** | API key from [console.anthropic.com](https://console.anthropic.com) |
+| **OpenAI-compatible** | API key + base URL (e.g. Groq, OpenRouter, or any `/v1` host) |
+
+Paste the key (stored only in `~/.daily-scheduler/settings.json` on this machine), set the
+model id (e.g. `gpt-4o-mini`, `claude-sonnet-4-5`), and chat. **Cloud mode sends your AI
+prompts and schedule context to that provider** — use local Ollama if you want everything
+private. The key is never logged or included in crash dumps.
 
 ---
 

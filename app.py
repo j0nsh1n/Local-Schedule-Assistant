@@ -43,9 +43,14 @@ from PySide6.QtCore import (
     QTimer, QThread, QSharedMemory,
 )
 from PySide6.QtGui import (
-    QPalette,
+    QGuiApplication, QPalette,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
+
+# Basename of the XDG desktop entry (no ".desktop"). Must match
+# packaging/daily-scheduler.desktop and install-launcher.sh so Linux
+# shells (KDE/GNOME) group + pin the window as Daily Scheduler, not python.
+DESKTOP_FILE_ID = "daily-scheduler"
 
 import core
 import theme
@@ -76,9 +81,19 @@ def main():
         except Exception:
             pass
 
+    # Linux: set the desktop-file id BEFORE QApplication so Wayland app_id / X11
+    # WM_CLASS match daily-scheduler.desktop — required for taskbar pin/group.
+    if sys.platform.startswith("linux"):
+        QGuiApplication.setDesktopFileName(DESKTOP_FILE_ID)
+
     app = QApplication(sys.argv)
     app.setApplicationName("Daily Scheduler")
+    app.setApplicationDisplayName("Daily Scheduler")
+    app.setOrganizationName("DailyScheduler")
     app.setApplicationVersion(core.APP_VERSION)
+    # Re-assert after construction (some Qt builds only read it from the instance).
+    if sys.platform.startswith("linux"):
+        app.setDesktopFileName(DESKTOP_FILE_ID)
     app.setStyle("Fusion")
     # Keep running in the tray after the window is closed, so reminders still fire.
     app.setQuitOnLastWindowClosed(False)
@@ -129,11 +144,32 @@ def main():
             _server.listen(_key)
         else:
             # Another live copy holds the lock — surface its window, then exit.
-            _ping = QLocalSocket()
-            _ping.connectToServer(_key)
-            if _ping.waitForConnected(400):
-                _ping.write(b"show"); _ping.flush(); _ping.waitForBytesWritten(400)
-                _ping.disconnectFromServer()
+            def _ping_running_instance() -> bool:
+                """Tell the winner to show its window. Returns True if a live
+                server accepted the connection. Never calls waitForBytesWritten
+                unless still Connected (avoids Qt's UnconnectedState warning)."""
+                sock = QLocalSocket()
+                sock.connectToServer(_key)
+                if not sock.waitForConnected(800):
+                    sock.abort()
+                    return False
+                try:
+                    sock.write(b"show")
+                    sock.flush()
+                    if sock.state() == QLocalSocket.ConnectedState:
+                        sock.waitForBytesWritten(400)
+                    if sock.state() == QLocalSocket.ConnectedState:
+                        sock.waitForDisconnected(200)
+                except Exception:
+                    pass
+                try:
+                    sock.disconnectFromServer()
+                except Exception:
+                    pass
+                sock.abort()
+                return True
+
+            if _ping_running_instance():
                 try: _guard.detach()
                 except Exception: pass
                 return
@@ -156,11 +192,7 @@ def main():
                     surfaced = False
                     for _ in range(3):
                         QThread.msleep(500)
-                        _p2 = QLocalSocket()
-                        _p2.connectToServer(_key)
-                        if _p2.waitForConnected(400):
-                            _p2.write(b"show"); _p2.flush(); _p2.waitForBytesWritten(400)
-                            _p2.disconnectFromServer()
+                        if _ping_running_instance():
                             surfaced = True
                             break
                     if surfaced:
@@ -207,11 +239,26 @@ def main():
     # still inside the startup delay and it doesn't exist yet).
     if _server is not None:
         def _surface():
-            conn = _server.nextPendingConnection()
-            if conn is not None:
-                conn.close()
-            _build_window()
-            holder["win"]._show_from_tray()
+            try:
+                conn = _server.nextPendingConnection()
+                if conn is not None:
+                    # Drain any payload so the peer can finish cleanly.
+                    if conn.waitForReadyRead(50):
+                        conn.readAll()
+                    conn.disconnectFromServer()
+                    conn.close()
+            except Exception:
+                pass
+            try:
+                _build_window()
+                w = holder.get("win")
+                if w is not None:
+                    if hasattr(w, "_show_from_tray"):
+                        w._show_from_tray()
+                    else:
+                        w.show(); w.raise_(); w.activateWindow()
+            except Exception:
+                pass
         _server.newConnection.connect(_surface)
 
     # At Windows sign-in (--startup) the GPU driver can crash/reset for the first ~minute

@@ -532,11 +532,68 @@ class SettingsDialog(QDialog):
 
         section("AI ASSISTANT")
         a = QFormLayout(); a.setSpacing(8)
+
+        # Provider: local Ollama or a cloud API with a user-supplied key.
+        self.provider_cb = QComboBox()
+        for pid, label in (
+            ("ollama", "Local (Ollama) — free, private, no key"),
+            ("openai", "OpenAI — needs API key"),
+            ("anthropic", "Anthropic — needs API key"),
+            ("openai_compatible", "OpenAI-compatible — custom URL + key"),
+        ):
+            self.provider_cb.addItem(label, pid)
+        cur_prov = str(settings.get("llm_provider") or "ollama")
+        idx = max(0, self.provider_cb.findData(cur_prov))
+        self.provider_cb.setCurrentIndex(idx)
+        self.provider_cb.currentIndexChanged.connect(self._on_provider_changed)
+        a.addRow("Provider", self.provider_cb)
+
+        self.api_key_edit = QLineEdit(str(settings.get("llm_api_key") or ""))
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.setPlaceholderText("sk-… or provider key")
+        self.api_key_edit.setToolTip(
+            "Stored only in ~/.daily-scheduler/settings.json on this machine.\n"
+            "Never sent anywhere except the provider you selected.\n"
+            "Leave blank for local Ollama.")
+        show_key = QCheckBox("Show")
+        show_key.toggled.connect(
+            lambda on: self.api_key_edit.setEchoMode(
+                QLineEdit.Normal if on else QLineEdit.Password))
+        key_row = QHBoxLayout(); key_row.setContentsMargins(0, 0, 0, 0)
+        key_row.addWidget(self.api_key_edit, 1)
+        key_row.addWidget(show_key)
+        key_w = QWidget(); key_w.setLayout(key_row)
+        a.addRow("API key", key_w)
+        self._api_key_row_label = a.labelForField(key_w)
+
+        self.base_url_edit = QLineEdit(str(settings.get("llm_base_url") or ""))
+        self.base_url_edit.setPlaceholderText(
+            "https://api.openai.com/v1  (or your host’s /v1 endpoint)")
+        self.base_url_edit.setToolTip(
+            "OpenAI-compatible base URL (no trailing path beyond /v1).\n"
+            "Examples: https://api.openai.com/v1 · https://api.groq.com/openai/v1 · "
+            "https://openrouter.ai/api/v1\n"
+            "Required for “OpenAI-compatible”; optional override for OpenAI/Anthropic.")
+        a.addRow("Base URL", self.base_url_edit)
+        self._base_url_row_label = a.labelForField(self.base_url_edit)
+
+        api_hint = QLabel(
+            "Cloud providers send your prompts (and schedule context in the AI panel) "
+            "to that service. Local Ollama keeps everything on this computer.")
+        api_hint.setWordWrap(True)
+        api_hint.setStyleSheet(f"color:{theme.C_MUTED.name()}; font-size:10px;")
+        a.addRow("", api_hint)
+
         self.model_cb = QComboBox(); self.model_cb.setEditable(True)
         seen, models = set(), []
         for m in ai.list_ollama_models() + ai.RECOMMENDED_MODELS:
             if m and m not in seen:
                 seen.add(m); models.append(m)
+        # Seed cloud suggestions so the field isn't empty when switching providers.
+        for plist in ai.CLOUD_MODEL_SUGGESTIONS.values():
+            for m in plist:
+                if m and m not in seen:
+                    seen.add(m); models.append(m)
         self.model_cb.addItems(models)
         self.model_cb.setCurrentText(settings.get("model", DEFAULT_MODEL))
         self.model_cb.currentTextChanged.connect(self._on_settings_model_changed)
@@ -591,13 +648,14 @@ class SettingsDialog(QDialog):
         models_row.addWidget(self.models_dir, 1)
         models_row.addWidget(browse_m)
         models_row.addWidget(open_m)
-        mw = QWidget(); mw.setLayout(models_row)
-        a.addRow("Models folder", mw)
-        models_hint = QLabel(
+        self._models_dir_w = QWidget(); self._models_dir_w.setLayout(models_row)
+        a.addRow("Models folder", self._models_dir_w)
+        self.models_hint = QLabel(
             "Custom path only takes effect when this app starts Ollama (▶ in the AI panel).")
-        models_hint.setWordWrap(True)
-        models_hint.setStyleSheet(f"color:{theme.C_MUTED.name()}; font-size:10px;")
-        a.addRow("", models_hint)
+        self.models_hint.setWordWrap(True)
+        self.models_hint.setStyleSheet(f"color:{theme.C_MUTED.name()}; font-size:10px;")
+        a.addRow("", self.models_hint)
+        self._on_provider_changed()  # show/hide key + URL rows
         lay.addLayout(a)
 
         section("CALENDAR")
@@ -782,6 +840,27 @@ class SettingsDialog(QDialog):
         # Close settings with Accept so MainWindow applies the restore + saves settings
         self._save()
 
+    def _on_provider_changed(self, *_):
+        """Show API key / base URL only when using an external provider."""
+        prov = self.provider_cb.currentData() or "ollama"
+        cloud = prov != "ollama"
+        need_url = prov == "openai_compatible"
+        self.api_key_edit.setEnabled(cloud)
+        self.base_url_edit.setEnabled(cloud)
+        self.api_key_edit.setVisible(cloud)
+        self.base_url_edit.setVisible(need_url or cloud)
+        # Models folder is Ollama-only.
+        if hasattr(self, "_models_dir_w"):
+            self._models_dir_w.setEnabled(not cloud)
+            self.models_hint.setEnabled(not cloud)
+        # Seed model field with a sensible default when switching to a cloud provider
+        # and the current value looks like an Ollama tag.
+        if cloud and (":" in (self.model_cb.currentText() or "") or
+                      self.model_cb.currentText() in (ai.RECOMMENDED_MODELS or [])):
+            suggestions = ai.CLOUD_MODEL_SUGGESTIONS.get(prov) or []
+            if suggestions:
+                self.model_cb.setCurrentText(suggestions[0])
+
     def _save(self):
         self.startup_requested = self.startup_cb.isChecked()
         self.values.update({
@@ -797,6 +876,9 @@ class SettingsDialog(QDialog):
             "notify_volume":    int(self.vol_sb.value()),
             "dnd_override":     self.dnd_cb.isChecked(),
             "model":            self.model_cb.currentText().strip() or DEFAULT_MODEL,
+            "llm_provider":     self.provider_cb.currentData() or "ollama",
+            "llm_api_key":      self.api_key_edit.text().strip(),
+            "llm_base_url":     self.base_url_edit.text().strip(),
             "temperature":      round(self.temp_sb.value(), 2),
             "num_ctx":          self.ctx_cb.currentData(),
             "plan_day_start":   self.pstart.time().toString("HH:mm"),

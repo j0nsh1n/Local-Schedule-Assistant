@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QScrollArea, QDialog, QStackedWidget, QMessageBox, QMenu, QSystemTrayIcon,
     QGraphicsOpacityEffect, QSplitter,
+    QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QAbstractSpinBox,
 )
 from PySide6.QtCore import (
     Qt, QTimer, QThread, QRect, QUrl,
@@ -63,6 +64,7 @@ from core import (
     load_all_activities,
     load_settings,
     min_to_y,
+    new_id,
     now_next_summary,
     parse_calendar_ids,
     purge_old_alert_marks,
@@ -101,6 +103,9 @@ class MainWindow(AIToolsMixin, QMainWindow):
         self._manual_redo: List[List[Dict]] = []   # v4.1: Ctrl+Y restores what Ctrl+Z undid
         self._ai_turn_snapshotted = False
         self._ai_turn_active = False   # a turn is streaming — Undo is locked meanwhile
+        self._selected_aid: Optional[str] = None   # last focused user block (copy/dup target)
+        self._clip_act: Optional[Dict] = None      # clipboard: one block (fields sans id)
+        self._clip_day: Optional[List[Dict]] = None  # clipboard: whole day of blocks
         self._cur_date:    date = date.today()
         self._view         = "day"
         self._ai_visible   = False
@@ -129,6 +134,17 @@ class MainWindow(AIToolsMixin, QMainWindow):
         sy = QShortcut(QKeySequence("Ctrl+Y"), self)
         sy.setContext(Qt.WindowShortcut)
         sy.activated.connect(self._manual_redo_last)
+        # Copy / paste / duplicate / delete blocks (skip when a text field has focus)
+        for seq, slot in (
+            ("Ctrl+C", self._shortcut_copy),
+            ("Ctrl+V", self._shortcut_paste),
+            ("Ctrl+D", self._shortcut_duplicate),
+            ("Delete", self._shortcut_delete),
+            ("Backspace", self._shortcut_delete),
+        ):
+            sh = QShortcut(QKeySequence(seq), self)
+            sh.setContext(Qt.WindowShortcut)
+            sh.activated.connect(slot)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -168,6 +184,14 @@ class MainWindow(AIToolsMixin, QMainWindow):
         self._timeline.activity_delete_req.connect(self._delete_activity)
         self._timeline.activity_edit_req.connect(self._edit_activity)
         self._timeline.activity_changed.connect(self._commit_activity_change)
+        self._timeline.activity_selected.connect(self._select_activity)
+        self._timeline.activity_copy_req.connect(self._copy_activity)
+        self._timeline.activity_dup_req.connect(self._duplicate_activity)
+        self._timeline.activity_paste_req.connect(self._paste_activity)
+        self._timeline.day_copy_req.connect(lambda: self._copy_day())
+        self._timeline.day_dup_req.connect(lambda: self._duplicate_day())
+        self._timeline.day_paste_req.connect(lambda: self._paste_day())
+        self._timeline.day_clear_req.connect(lambda: self._clear_day())
         self._scroll.setWidget(self._timeline)
 
         self._allday_banner = QLabel()
@@ -188,6 +212,15 @@ class MainWindow(AIToolsMixin, QMainWindow):
         self._week_view = WeekViewWidget()
         self._week_view.day_clicked.connect(self._goto_date)
         self._week_view.block_clicked.connect(self._edit_activity)
+        self._week_view.activity_selected.connect(self._select_activity)
+        self._week_view.activity_copy_req.connect(self._copy_activity)
+        self._week_view.activity_dup_req.connect(self._duplicate_activity)
+        self._week_view.activity_delete_req.connect(self._delete_activity)
+        self._week_view.activity_paste_req.connect(self._paste_activity)
+        self._week_view.day_copy_req.connect(self._copy_day)
+        self._week_view.day_dup_req.connect(self._duplicate_day)
+        self._week_view.day_paste_req.connect(self._paste_day)
+        self._week_view.day_clear_req.connect(self._clear_day)
         self._month_view = MonthViewWidget()
         self._month_view.day_clicked.connect(self._goto_date)
         self._year_view = YearViewWidget()
@@ -593,6 +626,11 @@ class MainWindow(AIToolsMixin, QMainWindow):
             busy = {k for k, v in self._cal_by_date.items() if v} | \
                    {a.get("date") for a in self._all_acts}
             self._year_view.set_year(d.year, busy)
+        # Restore selection ring after set_data / set_week repaints.
+        if hasattr(self, "_timeline"):
+            self._timeline.set_selected(self._selected_aid)
+        if hasattr(self, "_week_view"):
+            self._week_view.set_selected(self._selected_aid)
 
     # ── Activity actions ───────────────────────────────────────────────────
     def _manual_snapshot(self):
@@ -652,6 +690,7 @@ class MainWindow(AIToolsMixin, QMainWindow):
         act = next((a for a in self._all_acts if a["id"] == aid), None)
         if not act:
             return
+        self._selected_aid = aid
         dlg = AddActivityDialog(act["startMin"], act["endMin"], act["type"],
                                 existing=act, parent=self)
         if dlg.exec() != QDialog.Accepted:
@@ -659,6 +698,8 @@ class MainWindow(AIToolsMixin, QMainWindow):
         self._manual_snapshot()
         if dlg.result_deleted:
             self._all_acts = [a for a in self._all_acts if a["id"] != aid]
+            if self._selected_aid == aid:
+                self._selected_aid = None
         elif dlg.result_activity:
             self._all_acts = [dlg.result_activity if a["id"] == aid else a
                               for a in self._all_acts]
@@ -668,6 +709,7 @@ class MainWindow(AIToolsMixin, QMainWindow):
 
     def _commit_activity_change(self, aid, start, end):
         """Apply a drag move/resize to an existing block."""
+        self._selected_aid = aid
         self._manual_snapshot()
         for a in self._all_acts:
             if a["id"] == aid:
@@ -681,9 +723,221 @@ class MainWindow(AIToolsMixin, QMainWindow):
     def _delete_activity(self, aid):
         self._manual_snapshot()
         self._all_acts = [a for a in self._all_acts if a["id"] != aid]
+        if self._selected_aid == aid:
+            self._selected_aid = None
         save_all_activities(self._all_acts)
         self._ai_undo_invalidate()
         self._refresh_view()
+
+    # ── Copy / paste / duplicate ────────────────────────────────────────────
+    def _text_field_focused(self) -> bool:
+        """True when the user is in a text control — leave Ctrl+C/V to Qt."""
+        w = QApplication.focusWidget()
+        return isinstance(w, (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QAbstractSpinBox))
+
+    def _select_activity(self, aid: str):
+        # Empty string from views means "deselect".
+        self._selected_aid = aid or None
+        # Keep Day/Week selection rings in sync after clicks.
+        if hasattr(self, "_timeline"):
+            self._timeline.set_selected(self._selected_aid)
+        if hasattr(self, "_week_view"):
+            self._week_view.set_selected(self._selected_aid)
+
+    def _find_act(self, aid: Optional[str]) -> Optional[Dict]:
+        if not aid:
+            return None
+        return next((a for a in self._all_acts if a.get("id") == aid), None)
+
+    def _clip_from_act(self, act: Dict) -> Dict:
+        """Clipboard payload: all fields except a unique id (regenerated on paste)."""
+        return {k: v for k, v in act.items() if k != "id"}
+
+    def _shortcut_copy(self):
+        if self._text_field_focused():
+            return
+        self._copy_activity(self._selected_aid)
+
+    def _shortcut_paste(self):
+        if self._text_field_focused():
+            return
+        # Prefer day paste if the last copy was a whole day and no single block is selected.
+        if self._clip_day and not self._selected_aid and not self._clip_act:
+            self._paste_day()
+        else:
+            self._paste_activity()
+
+    def _shortcut_duplicate(self):
+        if self._text_field_focused():
+            return
+        self._duplicate_activity(self._selected_aid)
+
+    def _shortcut_delete(self):
+        if self._text_field_focused():
+            return
+        aid = self._selected_aid
+        if not aid or not self._find_act(aid):
+            self._set_status("Nothing to delete — click a block first.")
+            return
+        self._delete_activity(aid)
+        self._set_status("Deleted.  (Ctrl+Z to undo)")
+
+    def _copy_activity(self, aid: Optional[str] = None):
+        act = self._find_act(aid or self._selected_aid)
+        if not act:
+            self._set_status("Nothing to copy — click a block first.")
+            return
+        self._selected_aid = act["id"]
+        self._clip_act = self._clip_from_act(act)
+        self._set_status(f"Copied “{act.get('title') or 'block'}”  (Ctrl+V to paste)")
+
+    def _duplicate_activity(self, aid: Optional[str] = None):
+        """Clone a block onto the same day/time (side-by-side via overlap layout)."""
+        act = self._find_act(aid or self._selected_aid)
+        if not act:
+            self._set_status("Nothing to duplicate — click a block first.")
+            return
+        self._manual_snapshot()
+        clone = self._clip_from_act(act)
+        clone["id"] = new_id()
+        # Keep date/times identical — week/day overlap columns show both.
+        self._all_acts.append(clone)
+        self._selected_aid = clone["id"]
+        self._clip_act = self._clip_from_act(clone)  # so Ctrl+V works next too
+        save_all_activities(self._all_acts)
+        self._ai_undo_invalidate()
+        self._refresh_view()
+        self._set_status(f"Duplicated “{clone.get('title') or 'block'}”  (Ctrl+Z to undo)")
+
+    def _paste_activity(self, on_date=None):
+        """Paste the clipboard block onto `on_date` or the currently viewed day."""
+        if not self._clip_act:
+            self._set_status("Clipboard empty — copy a block first (Ctrl+C or right-click).")
+            return
+        if isinstance(on_date, date):
+            target = on_date
+        else:
+            target = self._cur_date
+        self._manual_snapshot()
+        clone = dict(self._clip_act)
+        clone["id"] = new_id()
+        clone["date"] = target.isoformat()
+        sm = int(clone.get("startMin") or 0)
+        em = int(clone.get("endMin") or (sm + 60))
+        sm = max(core.DAY_START, min(sm, core.DAY_END - 5))
+        em = max(sm + 5, min(em, core.DAY_END))
+        clone["startMin"] = sm
+        clone["endMin"] = em
+        self._all_acts.append(clone)
+        self._selected_aid = clone["id"]
+        save_all_activities(self._all_acts)
+        self._ai_undo_invalidate()
+        self._refresh_view()
+        self._set_status(
+            f"Pasted “{clone.get('title') or 'block'}” on "
+            f"{target.strftime('%a %b %d')}  (Ctrl+Z to undo)")
+
+    def _copy_day(self, d=None):
+        """Copy every editable block on day `d` (default: viewed day)."""
+        if not isinstance(d, date):
+            d = self._cur_date
+        ds = d.isoformat()
+        acts = [a for a in self._all_acts if a.get("date") == ds]
+        if not acts:
+            self._set_status(f"No blocks on {d.strftime('%a %b %d')} to copy.")
+            return
+        self._clip_day = [self._clip_from_act(a) for a in acts]
+        # Also seed single-block clipboard with the first so Ctrl+V still does something.
+        self._clip_act = dict(self._clip_day[0]) if self._clip_day else None
+        self._set_status(
+            f"Copied day {d.strftime('%a %b %d')} ({len(acts)} block(s)) — "
+            f"right-click another day → Paste day")
+
+    def _duplicate_day(self, d=None):
+        """Copy all blocks from `d` onto the following day (merge, no wipe)."""
+        if not isinstance(d, date):
+            d = self._cur_date
+        src = d.isoformat()
+        dst_d = d + timedelta(days=1)
+        dst = dst_d.isoformat()
+        acts = [a for a in self._all_acts if a.get("date") == src]
+        if not acts:
+            self._set_status(f"No blocks on {d.strftime('%a %b %d')} to duplicate.")
+            return
+        self._manual_snapshot()
+        clones = []
+        for a in acts:
+            c = self._clip_from_act(a)
+            c["id"] = new_id()
+            c["date"] = dst
+            clones.append(c)
+        self._all_acts.extend(clones)
+        self._clip_day = [self._clip_from_act(c) for c in clones]
+        save_all_activities(self._all_acts)
+        self._ai_undo_invalidate()
+        self._refresh_view()
+        self._set_status(
+            f"Duplicated {len(clones)} block(s) → {dst_d.strftime('%a %b %d')}  "
+            f"(Ctrl+Z to undo)")
+
+    def _paste_day(self, d=None):
+        """Paste the day clipboard onto `d` (merge; does not wipe existing)."""
+        if not self._clip_day:
+            self._set_status("No day on clipboard — right-click a day → Copy day first.")
+            return
+        if not isinstance(d, date):
+            d = self._cur_date
+        ds = d.isoformat()
+        self._manual_snapshot()
+        clones = []
+        for tmpl in self._clip_day:
+            c = dict(tmpl)
+            c["id"] = new_id()
+            c["date"] = ds
+            sm = int(c.get("startMin") or 0)
+            em = int(c.get("endMin") or (sm + 60))
+            sm = max(core.DAY_START, min(sm, core.DAY_END - 5))
+            em = max(sm + 5, min(em, core.DAY_END))
+            c["startMin"] = sm
+            c["endMin"] = em
+            clones.append(c)
+        self._all_acts.extend(clones)
+        save_all_activities(self._all_acts)
+        self._ai_undo_invalidate()
+        self._refresh_view()
+        self._set_status(
+            f"Pasted {len(clones)} block(s) onto {d.strftime('%a %b %d')}  "
+            f"(Ctrl+Z to undo)")
+
+    def _clear_day(self, d=None):
+        """Remove every editable block on day `d` (default: viewed day). Confirms first."""
+        if not isinstance(d, date):
+            d = self._cur_date
+        ds = d.isoformat()
+        acts = [a for a in self._all_acts if a.get("date") == ds]
+        if not acts:
+            self._set_status(f"{d.strftime('%a %b %d')} is already empty.")
+            return
+        confirm = QMessageBox.question(
+            self, "Clear day",
+            f"Delete all {len(acts)} editable block(s) on "
+            f"{d.strftime('%A, %b %d')}?\n\n"
+            f"Google Calendar events are not touched.\n"
+            f"You can undo with Ctrl+Z.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+        self._manual_snapshot()
+        self._all_acts = [a for a in self._all_acts if a.get("date") != ds]
+        if self._selected_aid and not any(
+                a.get("id") == self._selected_aid for a in self._all_acts):
+            self._selected_aid = None
+        save_all_activities(self._all_acts)
+        self._ai_undo_invalidate()
+        self._refresh_view()
+        self._set_status(
+            f"Cleared {len(acts)} block(s) from {d.strftime('%a %b %d')}  "
+            f"(Ctrl+Z to undo)")
 
     # ── Layout splitters (calendar | sidebar | AI, and types | summary) ────
     def _on_body_split_moved(self, *_):

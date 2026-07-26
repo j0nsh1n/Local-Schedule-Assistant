@@ -74,6 +74,14 @@ class TimelineWidget(QWidget):
     activity_delete_req = Signal(str)        # activity id
     activity_edit_req   = Signal(str)        # activity id — open the edit dialog
     activity_changed    = Signal(str, int, int)  # id, new_start, new_end (drag move/resize)
+    activity_selected   = Signal(str)        # user focused a block (click / menu)
+    activity_copy_req   = Signal(str)        # copy to clipboard
+    activity_dup_req    = Signal(str)        # duplicate in place
+    activity_paste_req  = Signal(object)     # paste block; arg = date or None (viewed day)
+    day_copy_req        = Signal()           # copy all blocks on the viewed day
+    day_dup_req         = Signal()           # duplicate viewed day → next day
+    day_paste_req       = Signal()           # paste day clipboard onto viewed day
+    day_clear_req       = Signal()           # wipe all editable blocks on viewed day
 
     SNAP   = 5    # minutes — drag/resize snaps to this grid (5-min precision)
     EDGE_PX = 7   # pixels near a block's top/bottom that trigger resize
@@ -92,9 +100,16 @@ class TimelineWidget(QWidget):
         self._press_min:  Optional[int]   = None   # unsnapped minute at press
         self._preview:    Optional[tuple] = None   # (id, start, end) live during drag
         self._moved:      bool            = False  # did the cursor actually move?
+        self._selected_id: Optional[str]  = None   # single-click select; double-click edits
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setFixedHeight(min_to_y(core.DAY_END) + 24)
+
+    def set_selected(self, aid: Optional[str]):
+        """Highlight the selected block (single-click). None clears."""
+        if aid != self._selected_id:
+            self._selected_id = aid
+            self.update()
 
     def _snap(self, minute: int) -> int:
         m = round(minute / self.SNAP) * self.SNAP
@@ -239,8 +254,10 @@ class TimelineWidget(QWidget):
             c, bg = block_colors(blk.get("color") or theme.C_ACCENT.name())
             dragging = (self._preview and blk.get("_btype") == "user"
                         and blk["id"] == self._preview[0])
+            selected = (blk.get("_btype") == "user"
+                        and self._selected_id and blk.get("id") == self._selected_id)
             paint_schedule_block(p, rect, bg, c, accent_w=3,
-                                 outline=bool(dragging))
+                                 outline=bool(dragging or selected))
 
             tr = rect.adjusted(10, 4, -6, -4)
             if dur >= 25:
@@ -347,28 +364,52 @@ class TimelineWidget(QWidget):
             self._press_min = y_to_min(y)
             self._preview   = (blk["id"], blk["startMin"], blk["endMin"])
             self._moved     = False
+            self._selected_id = blk["id"]
+            self.activity_selected.emit(blk["id"])
             self.update()
             return
-        # otherwise begin creating a block
+        # otherwise begin creating a block (deselect)
+        self._selected_id = None
+        self.activity_selected.emit("")  # clear selection in MainWindow
         self._drag_start = self._snap(y_to_min(y))
         self._drag_cur   = self._drag_start
+        self.update()
+
+    def mouseDoubleClickEvent(self, ev):
+        """Double-click a user block → open the edit dialog (single click only selects)."""
+        x = ev.position().x() if hasattr(ev, "position") else ev.x()
+        y = int(ev.position().y()) if hasattr(ev, "position") else ev.y()
+        if ev.button() != Qt.LeftButton or x < GUTTER_W:
+            return
+        hit = self._user_block_at(x, y)
+        if not hit:
+            return
+        blk, _ = hit
+        self._selected_id = blk["id"]
+        self.activity_selected.emit(blk["id"])
+        # Cancel any drag that the first click of the double-click started.
+        self._edit_mode = self._edit_id = self._edit_orig = None
+        self._press_min = self._preview = None
+        self._moved = False
+        self.activity_edit_req.emit(blk["id"])
         self.update()
 
     def mouseReleaseEvent(self, ev):
         if ev.button() != Qt.LeftButton:
             return
 
-        # ── finish a move / resize (or treat a no-move click as "edit") ─────
+        # ── finish a move / resize (plain click only selects — double-click edits)
         if self._edit_mode:
             aid = self._edit_id
             preview, moved, orig = self._preview, self._moved, self._edit_orig
             self._edit_mode = self._edit_id = self._edit_orig = None
             self._press_min = self._preview = None
-            self.update()
             if moved and preview and (preview[1], preview[2]) != orig:
                 self.activity_changed.emit(aid, preview[1], preview[2])
             else:
-                self.activity_edit_req.emit(aid)   # a plain click → open editor
+                # Single click: keep selection (already emitted on press), no editor.
+                self._selected_id = aid
+            self.update()
             return
 
         # ── finish creating a block ─────────────────────────────────────────
@@ -394,23 +435,52 @@ class TimelineWidget(QWidget):
         if x < GUTTER_W:
             return
         hit = self._user_block_at(x, y)
-        if not hit:
-            return
-        act = hit[0]
         menu = QMenu(self)
         menu.setStyleSheet(f"""
             QMenu {{ background: {theme.C_SURFACE.name()}; color: {theme.C_TEXT.name()};
                      border: 1px solid {theme.C_BORDER2.name()}; padding: 4px; }}
             QMenu::item {{ padding: 6px 14px; border-radius: {theme.RAD}px; }}
             QMenu::item:selected {{ background: {theme.C_SURF2.name()}; }}
+            QMenu::item:disabled {{ color: {theme.C_MUTED.name()}; }}
         """)
-        edit_act = menu.addAction(f"✏  Edit '{act['title']}'…")
-        del_act  = menu.addAction(f"🗑  Delete '{act['title']}'")
+        edit_act = dup_act = copy_act = del_act = None
+        if hit:
+            act = hit[0]
+            self.activity_selected.emit(act["id"])
+            edit_act = menu.addAction(f"✏  Edit '{act['title']}'…")
+            dup_act  = menu.addAction("⧉  Duplicate block")
+            copy_act = menu.addAction("📋  Copy block")
+            menu.addSeparator()
+            del_act  = menu.addAction(f"🗑  Delete '{act['title']}'")
+            menu.addSeparator()
+        paste_act = menu.addAction("📋  Paste block")
+        menu.addSeparator()
+        day_copy = menu.addAction("📅  Copy day")
+        day_dup  = menu.addAction("📅  Duplicate day → next day")
+        day_paste = menu.addAction("📅  Paste day")
+        menu.addSeparator()
+        day_clear = menu.addAction("🗑  Clear day…")
         chosen = menu.exec(ev.globalPos())
-        if chosen == edit_act:
+        if not chosen:
+            return
+        if hit and chosen == edit_act:
             self.activity_edit_req.emit(act["id"])
-        elif chosen == del_act:
+        elif hit and chosen == dup_act:
+            self.activity_dup_req.emit(act["id"])
+        elif hit and chosen == copy_act:
+            self.activity_copy_req.emit(act["id"])
+        elif hit and chosen == del_act:
             self.activity_delete_req.emit(act["id"])
+        elif chosen == paste_act:
+            self.activity_paste_req.emit(None)   # MainWindow uses viewed day
+        elif chosen == day_copy:
+            self.day_copy_req.emit()
+        elif chosen == day_dup:
+            self.day_dup_req.emit()
+        elif chosen == day_paste:
+            self.day_paste_req.emit()
+        elif chosen == day_clear:
+            self.day_clear_req.emit()
 
     def leaveEvent(self, _ev):
         if self._drag_start is None and self._edit_mode is None:
@@ -577,12 +647,23 @@ class SidebarWidget(QWidget):
         self._sum_area.addStretch()   # leftover space below the list, not between rows
 
 # ══════════════════════════════════════════════════════════════════════════
-#  WEEK VIEW  (7 columns Mon–Sun, whole day scaled per column; read-mostly v1:
-#  click a block → edit dialog, click a day header → that day's Day view)
+#  WEEK VIEW  (7 columns Mon–Sun, whole day scaled per column:
+#  single-click selects a block, double-click opens the edit dialog;
+#  click a day header → that day's Day view)
 # ══════════════════════════════════════════════════════════════════════════
 class WeekViewWidget(QWidget):
     day_clicked   = Signal(object)   # datetime.date — header click → Day view
-    block_clicked = Signal(str)      # user activity id — open the edit dialog
+    block_clicked = Signal(str)      # user activity id — open the edit dialog (double-click)
+    activity_selected  = Signal(str)
+    activity_copy_req  = Signal(str)
+    activity_dup_req   = Signal(str)
+    activity_delete_req = Signal(str)
+    activity_paste_req = Signal(object)  # date to paste block onto (column day)
+    # Day-level ops (date = which column / header was targeted)
+    day_copy_req  = Signal(object)   # datetime.date
+    day_dup_req   = Signal(object)   # datetime.date → copy onto date+1
+    day_paste_req = Signal(object)   # datetime.date
+    day_clear_req = Signal(object)   # datetime.date — wipe editable blocks
 
     HDR_H = 34    # day-name strip
     AD_H  = 18    # all-day banner under the name (0 height when empty)
@@ -595,8 +676,14 @@ class WeekViewWidget(QWidget):
         self._cal:  Dict[str, List[Dict]] = {}   # iso date → read-only cal events
         self._block_hits: List[tuple] = []       # (QRect, activity id) — user blocks
         self._hdr_hits:   List[tuple] = []       # (QRect, datetime.date)
+        self._selected_id: Optional[str] = None
         self.setMinimumSize(720, 480)
         self.setMouseTracking(True)
+
+    def set_selected(self, aid: Optional[str]):
+        if aid != self._selected_id:
+            self._selected_id = aid
+            self.update()
 
     def set_week(self, monday: date, acts_by_date: Dict, cal_by_date: Dict):
         self._monday = monday
@@ -673,7 +760,9 @@ class WeekViewWidget(QWidget):
                 bx = int(x0 + 3 + b["_col"] * bw)
                 rect = QRect(bx, by, int(bw - 2), bh)
                 c, bg = block_colors(b.get("color") or theme.C_ACCENT.name())
-                paint_schedule_block(p, rect, bg, c, accent_w=2)
+                selected = (b.get("_btype") == "user"
+                            and self._selected_id and b.get("id") == self._selected_id)
+                paint_schedule_block(p, rect, bg, c, accent_w=2, outline=bool(selected))
                 if b["_btype"] == "user":
                     self._block_hits.append((rect, b["id"]))
                 if bh >= 26:
@@ -751,6 +840,32 @@ class WeekViewWidget(QWidget):
                 return ("day", d)
         return None
 
+    def _day_at_pos(self, pos) -> Optional[date]:
+        """Which calendar day is under the cursor (header, block, or empty column)."""
+        hit = self._hit(pos)
+        if hit and hit[0] == "day":
+            return hit[1]
+        if hit and hit[0] == "block":
+            aid = hit[1]
+            for ds, lst in (self._acts or {}).items():
+                for a in lst:
+                    if a.get("id") == aid:
+                        try:
+                            return date.fromisoformat(ds)
+                        except ValueError:
+                            break
+            return None
+        # Empty body: map x → column
+        if pos.x() < self.GUT_W:
+            return None
+        cw = (self.width() - self.GUT_W) / 7.0
+        if cw <= 0:
+            return None
+        col = int((pos.x() - self.GUT_W) / cw)
+        if 0 <= col < 7:
+            return self._monday + timedelta(days=col)
+        return None
+
     def mouseMoveEvent(self, ev):
         pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
         self.setCursor(Qt.PointingHandCursor if self._hit(pos) else Qt.ArrowCursor)
@@ -761,12 +876,97 @@ class WeekViewWidget(QWidget):
         pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
         hit = self._hit(pos)
         if not hit:
+            self._selected_id = None
+            self.activity_selected.emit("")
+            self.update()
             return
         kind, val = hit
         if kind == "block":
-            self.block_clicked.emit(val)
+            # Single click selects only — double-click opens the editor.
+            self._selected_id = val
+            self.activity_selected.emit(val)
+            self.update()
         else:
             self.day_clicked.emit(val)
+
+    def mouseDoubleClickEvent(self, ev):
+        if ev.button() != Qt.LeftButton:
+            return
+        pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
+        hit = self._hit(pos)
+        if hit and hit[0] == "block":
+            self._selected_id = hit[1]
+            self.activity_selected.emit(hit[1])
+            self.block_clicked.emit(hit[1])  # MainWindow → edit dialog
+            self.update()
+
+    def contextMenuEvent(self, ev):
+        pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
+        hit = self._hit(pos)
+        day = self._day_at_pos(pos)
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{ background: {theme.C_SURFACE.name()}; color: {theme.C_TEXT.name()};
+                     border: 1px solid {theme.C_BORDER2.name()}; padding: 4px; }}
+            QMenu::item {{ padding: 6px 14px; border-radius: {theme.RAD}px; }}
+            QMenu::item:selected {{ background: {theme.C_SURF2.name()}; }}
+        """)
+        edit_act = dup_act = copy_act = del_act = None
+        aid = None
+        if hit and hit[0] == "block":
+            aid = hit[1]
+            self.activity_selected.emit(aid)
+            title = "?"
+            for lst in (self._acts or {}).values():
+                for a in lst:
+                    if a.get("id") == aid:
+                        title = a.get("title") or "?"
+                        break
+            edit_act = menu.addAction(f"✏  Edit '{title}'…")
+            dup_act  = menu.addAction("⧉  Duplicate block")
+            copy_act = menu.addAction("📋  Copy block")
+            menu.addSeparator()
+            del_act  = menu.addAction(f"🗑  Delete '{title}'")
+            menu.addSeparator()
+
+        paste_act = menu.addAction("📋  Paste block")
+        day_open = day_copy = day_dup = day_paste = None
+        if day is not None:
+            menu.addSeparator()
+            day_lbl = day.strftime("%a %b %d")
+            day_open  = menu.addAction(f"→  Open {day_lbl}")
+            day_copy  = menu.addAction(f"📅  Copy day ({day_lbl})")
+            day_dup   = menu.addAction(
+                f"📅  Duplicate day → {(day + timedelta(days=1)).strftime('%a %b %d')}")
+            day_paste = menu.addAction(f"📅  Paste day onto {day_lbl}")
+            menu.addSeparator()
+            day_clear = menu.addAction(f"🗑  Clear day ({day_lbl})…")
+        else:
+            day_clear = None
+
+        chosen = menu.exec(ev.globalPos())
+        if not chosen:
+            return
+        if hit and hit[0] == "block" and chosen == edit_act:
+            self.block_clicked.emit(aid)
+        elif hit and hit[0] == "block" and chosen == dup_act:
+            self.activity_dup_req.emit(aid)
+        elif hit and hit[0] == "block" and chosen == copy_act:
+            self.activity_copy_req.emit(aid)
+        elif hit and hit[0] == "block" and chosen == del_act:
+            self.activity_delete_req.emit(aid)
+        elif chosen == paste_act:
+            self.activity_paste_req.emit(day)  # column day, or None
+        elif day is not None and chosen == day_open:
+            self.day_clicked.emit(day)
+        elif day is not None and chosen == day_copy:
+            self.day_copy_req.emit(day)
+        elif day is not None and chosen == day_dup:
+            self.day_dup_req.emit(day)
+        elif day is not None and chosen == day_paste:
+            self.day_paste_req.emit(day)
+        elif day is not None and chosen == day_clear:
+            self.day_clear_req.emit(day)
 
 class _DayCellGrid(QWidget):
     """Shared base for the read-only date grids (Month, Year).

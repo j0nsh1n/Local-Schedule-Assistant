@@ -16,6 +16,8 @@ The tools (search for `name == "<tool>"` to jump to one)
                      add_recurring, clear_range
     Planners         schedule_tasks (fit UNORDERED tasks into real free time),
                      plan_day (build an ORDERED day around fixed anchors),
+                     plan_days (same plan on many days — date ranges via
+                     expand_date_targets so they cannot drift),
                      make_room (insert an appointment, ripple the rest),
                      reflow_from_now (running late),
                      plan_for_deadline (spread work across days)
@@ -56,11 +58,11 @@ from typing import Dict, List
 import core
 from core import (
     ACTIVITY_TYPES,
-    _WEEKDAYS,
     _earliest_fit,
     _free_slots,
     allday_cal_events,
     coerce_end_min,
+    expand_date_targets,
     find_free_placement,
     fmt_dur,
     fmt_time,
@@ -106,6 +108,132 @@ class AIToolsMixin:
             pool = exact if exact else [a for a in pool
                                         if a["startMin"] <= tm < a["endMin"]]
         return pool
+
+    def _atype(self, tid, default: str):
+        return next((t for t in ACTIVITY_TYPES if t["id"] == str(tid)),
+                    next(t for t in ACTIVITY_TYPES if t["id"] == default))
+
+    def _blocks_from_spec(self, ds: str, raw_blocks) -> tuple:
+        """Build activity dicts from a replace_day-style block list for date `ds`.
+        Returns (blocks, n_skipped)."""
+        new_blocks, skipped = [], 0
+        for b in raw_blocks[:40]:
+            if not isinstance(b, dict) or not b.get("start") or not b.get("end"):
+                skipped += 1
+                continue
+            try:
+                sm = parse_hhmm(str(b["start"]))
+                em = coerce_end_min(sm, parse_hhmm(str(b["end"])))
+            except (KeyError, ValueError, TypeError):
+                skipped += 1
+                continue
+            if em <= sm:
+                skipped += 1
+                continue
+            at_t = self._atype(b.get("type", "study"), "study")
+            new_blocks.append({
+                "id": new_id(), "date": ds, "startMin": sm, "endMin": em,
+                "type": at_t["id"], "color": at_t["color"],
+                "title": str(b.get("title") or at_t["label"]),
+            })
+        return new_blocks, skipped
+
+    def _layout_plan_day(self, ds: str, args: Dict) -> tuple:
+        """Pure layout for plan_day / plan_days. Returns (blocks, unplaced, error_or_None)."""
+        raw_tasks = args.get("tasks")
+        if isinstance(raw_tasks, str):
+            try:
+                raw_tasks = json.loads(raw_tasks)
+            except Exception:
+                return [], [], "Error: 'tasks' must be a list of {title, minutes, …}."
+        if not isinstance(raw_tasks, list) or not raw_tasks:
+            return [], [], "Error: give a non-empty ordered 'tasks' list."
+        raw_fixed = args.get("fixed") or []
+        if isinstance(raw_fixed, str):
+            try:
+                raw_fixed = json.loads(raw_fixed)
+            except Exception:
+                raw_fixed = []
+
+        ws = (parse_hhmm(str(args["start"])) if args.get("start")
+              else parse_hhmm(self._settings.get("plan_day_start", "08:00")))
+        if ds == date.today().isoformat() and not args.get("start"):
+            ws = max(ws, datetime.now().hour * 60 + datetime.now().minute)
+
+        # Fixed anchors first; they (and calendar events) are obstacles tasks flow around.
+        new_blocks, occ = [], list(self._cal_intervals(ds))
+        for f in (raw_fixed if isinstance(raw_fixed, list) else []):
+            if not isinstance(f, dict) or not f.get("start"):
+                continue
+            try:
+                fs = parse_hhmm(str(f["start"]))
+            except ValueError:
+                continue
+            try:
+                fe = (parse_hhmm(str(f["end"])) if f.get("end")
+                      else fs + max(5, int(f.get("minutes", 60))))
+            except (TypeError, ValueError):
+                fe = fs + 60
+            fe = min(fe, core.DAY_END)
+            if fe <= fs:
+                continue
+            at_f = self._atype(f.get("type", "extra"), "extra")
+            new_blocks.append({"id": new_id(), "date": ds, "startMin": fs, "endMin": fe,
+                               "type": at_f["id"], "color": at_f["color"],
+                               "title": str(f.get("title") or at_f["label"])})
+            occ.append((fs, fe))
+
+        # Ordered tasks: full focus time, split into chunks with breaks, past anchors.
+        brk_t = self._atype("free", "free")
+        cursor, unplaced = ws, []
+        for t in raw_tasks[:12]:
+            if not isinstance(t, dict):
+                continue
+            try:
+                total = max(5, int(float(t.get("minutes") or 60)))
+            except (TypeError, ValueError):
+                total = 60
+            at_t = self._atype(t.get("type", "study"), "study")
+            try:
+                chunk = max(5, int(t["chunk"])) if t.get("chunk") else total
+            except (TypeError, ValueError):
+                chunk = total
+            chunk = min(chunk, total)
+            try:
+                brk = max(0, int(t.get("break", 15 if chunk < total else 0)))
+            except (TypeError, ValueError):
+                brk = 15 if chunk < total else 0
+            n_chunks = -(-total // chunk)
+            left = total
+            idx = 0
+            while left > 0:
+                clen = min(chunk, left)
+                slot = _earliest_fit(occ, cursor, clen)
+                if slot is None:
+                    unplaced.append(str(t.get("title") or at_t["label"]))
+                    break
+                idx += 1
+                ttl = (f"{t.get('title') or at_t['label']} ({idx})"
+                       if n_chunks > 1 else str(t.get("title") or at_t["label"]))
+                new_blocks.append({"id": new_id(), "date": ds, "startMin": slot,
+                                   "endMin": slot + clen, "type": at_t["id"],
+                                   "color": at_t["color"], "title": ttl})
+                occ.append((slot, slot + clen))
+                cursor = slot + clen
+                left -= clen
+                if left > 0 and brk > 0:
+                    bslot = _earliest_fit(occ, cursor, brk)
+                    if bslot == cursor:
+                        new_blocks.append({"id": new_id(), "date": ds, "startMin": bslot,
+                                           "endMin": bslot + brk, "type": brk_t["id"],
+                                           "color": brk_t["color"], "title": "Break"})
+                        occ.append((bslot, bslot + brk))
+                        cursor = bslot + brk
+
+        if not new_blocks:
+            return [], unplaced, ("Error: couldn't place anything — check the start time "
+                                  "and task minutes.")
+        return new_blocks, unplaced, None
 
     def _ai_execute(self, name: str, args: Dict) -> str:
         """Run one AI tool call against the schedule. Returns a result string
@@ -361,39 +489,24 @@ class AIToolsMixin:
                 tid = str(args.get("type", "study"))
                 at_t = next((t for t in ACTIVITY_TYPES if t["id"] == tid), ACTIVITY_TYPES[0])
                 title = str(args.get("title") or at_t["label"])
-                targets = []
-                if args.get("dates"):
-                    for d in args["dates"]:
-                        rd = resolve_date(d, self._cur_date)
-                        if rd:
-                            targets.append(rd)
-                elif args.get("weekdays"):
-                    wanted = set()
-                    for w in args["weekdays"]:
-                        wl = str(w).strip().lower()
-                        if wl in ("weekday", "weekdays"):
-                            wanted |= {0, 1, 2, 3, 4}
-                        elif wl in ("weekend", "weekends"):
-                            wanted |= {5, 6}
-                        elif wl in ("daily", "everyday", "every day", "all"):
-                            wanted |= set(range(7))
-                        elif wl in _WEEKDAYS:
-                            wanted.add(_WEEKDAYS[wl])
-                    if not wanted:
-                        return "Error: couldn't read 'weekdays'."
-                    try:
-                        weeks = max(1, min(8, int(args.get("weeks", 1))))
-                    except (TypeError, ValueError):
-                        weeks = 1
-                    for i in range(7 * weeks):
-                        d = self._cur_date + timedelta(days=i)
-                        if d.weekday() in wanted:
-                            targets.append(d.isoformat())
-                else:
-                    return "Error: give 'weekdays' (e.g. ['monday']) or a 'dates' list."
-                targets = sorted(set(targets))[:60]
-                if not targets:
-                    return "Error: no matching dates."
+                targets, err = expand_date_targets(
+                    self._cur_date,
+                    dates=args.get("dates"),
+                    weekdays=args.get("weekdays"),
+                    weeks=args.get("weeks", 1),
+                    start_date=args.get("start_date"),
+                    end_date=args.get("end_date"),
+                )
+                if err:
+                    return (f"Error: {err} For a named range like 'July 27 to August 2' "
+                            f"pass start_date=\"7/27\" and end_date=\"8/2\" (or dates=[…]). "
+                            f"Do NOT invent ISO dates — the app resolves Month/Day.")
+                # Nudge weak models: weekdays alone always anchors on the VIEWED day.
+                used_default_anchor = (
+                    not args.get("dates")
+                    and args.get("start_date") is None
+                    and args.get("end_date") is None
+                )
                 conflicts = []
                 for tds in targets:
                     if any(b["startMin"] < em and b["endMin"] > sm
@@ -407,6 +520,10 @@ class AIToolsMixin:
                 self._refresh_view()
                 out = (f"Added '{title}' {fmt_time(sm)}–{fmt_time(em)} on {len(targets)} "
                        f"day(s): {', '.join(targets)}.")
+                if used_default_anchor:
+                    out += (f" (Window started from the viewed day "
+                            f"{self._cur_date.isoformat()} — if the user named different "
+                            f"dates, re-call with start_date+end_date or dates=[…].)")
                 if conflicts:
                     out += f" Note: overlaps existing blocks on {', '.join(conflicts)}."
                 return out
@@ -611,88 +728,9 @@ class AIToolsMixin:
                 return out
 
             if name == "plan_day":
-                raw_tasks = args.get("tasks")
-                if isinstance(raw_tasks, str):
-                    try: raw_tasks = json.loads(raw_tasks)
-                    except Exception: return "Error: 'tasks' must be a list of {title, minutes, …}."
-                if not isinstance(raw_tasks, list) or not raw_tasks:
-                    return "Error: give a non-empty ordered 'tasks' list."
-                raw_fixed = args.get("fixed") or []
-                if isinstance(raw_fixed, str):
-                    try: raw_fixed = json.loads(raw_fixed)
-                    except Exception: raw_fixed = []
-
-                def _atype(tid, default):
-                    return next((t for t in ACTIVITY_TYPES if t["id"] == str(tid)),
-                                next(t for t in ACTIVITY_TYPES if t["id"] == default))
-
-                ws = (parse_hhmm(str(args["start"])) if args.get("start")
-                      else parse_hhmm(self._settings.get("plan_day_start", "08:00")))
-                if ds == date.today().isoformat() and not args.get("start"):
-                    ws = max(ws, datetime.now().hour * 60 + datetime.now().minute)
-
-                # Fixed anchors first; they (and calendar events) are obstacles tasks flow around.
-                new_blocks, occ = [], list(self._cal_intervals(ds))
-                for f in (raw_fixed if isinstance(raw_fixed, list) else []):
-                    if not isinstance(f, dict) or not f.get("start"):
-                        continue
-                    try:
-                        fs = parse_hhmm(str(f["start"]))
-                    except ValueError:
-                        continue
-                    try:
-                        fe = parse_hhmm(str(f["end"])) if f.get("end") else fs + max(5, int(f.get("minutes", 60)))
-                    except (TypeError, ValueError):
-                        fe = fs + 60
-                    fe = min(fe, core.DAY_END)
-                    if fe <= fs:
-                        continue
-                    at_f = _atype(f.get("type", "extra"), "extra")
-                    new_blocks.append({"id": new_id(), "date": ds, "startMin": fs, "endMin": fe,
-                                       "type": at_f["id"], "color": at_f["color"],
-                                       "title": str(f.get("title") or at_f["label"])})
-                    occ.append((fs, fe))
-
-                # Ordered tasks: each gets its full focus time, split into chunks with breaks,
-                # flowing past anchors/meetings. Breaks do NOT count toward a task's minutes.
-                brk_t = _atype("free", "free")
-                cursor, unplaced = ws, []
-                for t in raw_tasks[:12]:
-                    if not isinstance(t, dict):
-                        continue
-                    try: total = max(5, int(float(t.get("minutes") or 60)))
-                    except (TypeError, ValueError): total = 60
-                    at_t = _atype(t.get("type", "study"), "study")
-                    try: chunk = max(5, int(t["chunk"])) if t.get("chunk") else total
-                    except (TypeError, ValueError): chunk = total
-                    chunk = min(chunk, total)
-                    try: brk = max(0, int(t.get("break", 15 if chunk < total else 0)))
-                    except (TypeError, ValueError): brk = 15 if chunk < total else 0
-                    n_chunks = -(-total // chunk)
-                    left = total
-                    idx = 0
-                    while left > 0:
-                        clen = min(chunk, left)
-                        slot = _earliest_fit(occ, cursor, clen)
-                        if slot is None:
-                            unplaced.append(str(t.get("title") or at_t["label"])); break
-                        idx += 1
-                        ttl = (f"{t.get('title') or at_t['label']} ({idx})"
-                               if n_chunks > 1 else str(t.get("title") or at_t["label"]))
-                        new_blocks.append({"id": new_id(), "date": ds, "startMin": slot,
-                                           "endMin": slot + clen, "type": at_t["id"],
-                                           "color": at_t["color"], "title": ttl})
-                        occ.append((slot, slot + clen)); cursor = slot + clen; left -= clen
-                        if left > 0 and brk > 0:
-                            bslot = _earliest_fit(occ, cursor, brk)
-                            if bslot == cursor:   # only a contiguous break (skip if an anchor butts up)
-                                new_blocks.append({"id": new_id(), "date": ds, "startMin": bslot,
-                                                   "endMin": bslot + brk, "type": brk_t["id"],
-                                                   "color": brk_t["color"], "title": "Break"})
-                                occ.append((bslot, bslot + brk)); cursor = bslot + brk
-
-                if not new_blocks:
-                    return "Error: couldn't place anything — check the start time and task minutes."
+                new_blocks, unplaced, err = self._layout_plan_day(ds, args)
+                if err:
+                    return err
                 self._all_acts = [a for a in self._all_acts if a.get("date") != ds] + new_blocks
                 save_all_activities(self._all_acts)
                 self._refresh_view()
@@ -701,6 +739,79 @@ class AIToolsMixin:
                 out = f"Planned {ds}: {lines}."
                 if unplaced:
                     out += " | Couldn't fully fit: " + ", ".join(dict.fromkeys(unplaced))
+                return out
+
+            if name == "plan_days":
+                # Multi-day plan: ONE call for "same schedule every day this week".
+                # Prefer this over a loop of add_recurring / plan_day so dates can't drift.
+                targets, err = expand_date_targets(
+                    self._cur_date,
+                    dates=args.get("dates"),
+                    weekdays=args.get("weekdays"),
+                    weeks=args.get("weeks", 1),
+                    start_date=args.get("start_date"),
+                    end_date=args.get("end_date"),
+                )
+                if err:
+                    return (f"Error: {err} Example: start_date=\"7/27\", end_date=\"8/2\" "
+                            f"or dates=[\"7/27\",\"7/28\",…]. Pass Month/Day or the user's "
+                            f"words — never invent a year.")
+                raw_blocks = args.get("blocks")
+                if isinstance(raw_blocks, str):
+                    try: raw_blocks = json.loads(raw_blocks)
+                    except Exception:
+                        return "Error: 'blocks' must be a list of {start, end, title, …}."
+                use_blocks = isinstance(raw_blocks, list) and len(raw_blocks) > 0
+                use_plan = bool(args.get("tasks"))
+                if not use_blocks and not use_plan:
+                    return ("Error: give either 'blocks' (exact times for each slot — best when "
+                            "the user listed start/end times) OR 'tasks'+optional 'fixed' "
+                            "(plan_day layout).")
+                if use_blocks and use_plan:
+                    return ("Error: pass 'blocks' OR 'tasks'/'fixed', not both. "
+                            "Exact times → blocks; ordered tasks around anchors → tasks+fixed.")
+
+                clear = args.get("clear", True)
+                if isinstance(clear, str):
+                    clear = clear.strip().lower() not in ("0", "false", "no")
+                summaries = []
+                all_unplaced = []
+                for tds in targets:
+                    if use_blocks:
+                        new_blocks, skipped = self._blocks_from_spec(tds, raw_blocks)
+                        if not new_blocks:
+                            return (f"Error: no valid blocks for {tds}"
+                                    + (f" ({skipped} invalid skipped)." if skipped else "."))
+                        if clear:
+                            self._all_acts = [a for a in self._all_acts if a.get("date") != tds]
+                        self._all_acts.extend(new_blocks)
+                        lines = ", ".join(
+                            f"'{b['title']}' {fmt_time(b['startMin'])}–{fmt_time(b['endMin'])}"
+                            for b in sorted(new_blocks, key=lambda x: x["startMin"]))
+                        summaries.append(f"{tds}: {len(new_blocks)} blocks ({lines})")
+                    else:
+                        day_args = {
+                            "start": args.get("start"),
+                            "fixed": args.get("fixed"),
+                            "tasks": args.get("tasks"),
+                        }
+                        new_blocks, unplaced, perr = self._layout_plan_day(tds, day_args)
+                        if perr:
+                            return f"Error on {tds}: {perr}"
+                        if clear:
+                            self._all_acts = [a for a in self._all_acts if a.get("date") != tds]
+                        self._all_acts.extend(new_blocks)
+                        if unplaced:
+                            all_unplaced.extend(f"{u}@{tds}" for u in unplaced)
+                        summaries.append(f"{tds}: {len(new_blocks)} blocks")
+
+                save_all_activities(self._all_acts)
+                self._refresh_view()
+                out = (f"Planned {len(targets)} day(s) "
+                       f"[{targets[0]} … {targets[-1]}]: " + "; ".join(summaries) + ".")
+                if all_unplaced:
+                    out += " | Couldn't fully fit: " + ", ".join(dict.fromkeys(all_unplaced))
+                out += " Verify with list_blocks on each day if anything looks off."
                 return out
 
             if name == "make_room":

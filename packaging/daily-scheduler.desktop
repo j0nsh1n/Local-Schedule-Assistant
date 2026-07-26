@@ -5,5 +5,6 @@ Comment=Daily planner with a local AI assistant
 Exec=DailyScheduler
 Icon=daily-scheduler
 Terminal=false
-Categories=Office;Calendar;
+Categories=Office;Calendar;Qt;
 StartupNotify=true
+StartupWMClass=daily-scheduler

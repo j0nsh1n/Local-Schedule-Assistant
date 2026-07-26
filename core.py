@@ -43,7 +43,7 @@ from typing import Optional, List, Dict
 
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "4.4.0"
+__version__  = "4.6.1"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -442,9 +442,20 @@ def purge_old_alert_marks(keep_day: str) -> None:
 # Replaces the old behaviour where model / notify / DND reset to defaults every
 # launch (only "Start with Windows" survived, via its Startup-folder .lnk).
 SETTINGS_FILE = DATA_DIR / "settings.json"
+# LLM backends: local Ollama (default) or cloud APIs with a user-supplied key.
+LLM_PROVIDERS = (
+    "ollama",             # local — no API key
+    "openai",             # api.openai.com
+    "openai_compatible",  # any OpenAI-style base URL (OpenRouter, Groq, SpaceXAI, …)
+    "anthropic",          # api.anthropic.com
+)
+
 DEFAULT_SETTINGS = {
     "theme":            DEFAULT_THEME,
     "model":            DEFAULT_MODEL,
+    "llm_provider":     "ollama",  # see LLM_PROVIDERS
+    "llm_api_key":      "",        # never log; only sent to the chosen provider
+    "llm_base_url":     "",        # openai_compatible (and optional OpenAI override)
     "notify_on":        True,
     "notify_lead_min":  0,        # alert this many minutes before a block starts (0 = at start)
     "notify_end_chime": False,    # off by default — start alerts only
@@ -479,13 +490,33 @@ def load_settings() -> Dict:
             s.update({k: v for k, v in data.items() if k in DEFAULT_SETTINGS})
     except Exception:
         pass
+    # Normalize provider id
+    prov = str(s.get("llm_provider") or "ollama").strip().lower()
+    if prov not in LLM_PROVIDERS:
+        prov = "ollama"
+    s["llm_provider"] = prov
+    s["llm_api_key"] = str(s.get("llm_api_key") or "")
+    s["llm_base_url"] = str(s.get("llm_base_url") or "").strip()
     return s
 
 def save_settings(s: Dict) -> None:
     try:
-        SETTINGS_FILE.write_text(json.dumps(s, indent=2))
+        # Never write secrets into crash logs elsewhere; settings.json is local-only.
+        out = dict(s)
+        if out.get("llm_provider") not in LLM_PROVIDERS:
+            out["llm_provider"] = "ollama"
+        SETTINGS_FILE.write_text(json.dumps(out, indent=2))
     except Exception:
         pass
+
+def mask_api_key(key: str) -> str:
+    """Safe display form — never show the full secret in UI labels/logs."""
+    k = (key or "").strip()
+    if not k:
+        return "(not set)"
+    if len(k) <= 8:
+        return "••••" + k[-2:]
+    return k[:3] + "…" + k[-4:]
 
 def parse_hhmm(s: str) -> int:
     """'18:30' / '6:30 pm' / '6 pm' / '24:00' → minutes from midnight.
@@ -571,6 +602,121 @@ def resolve_date(s, base: date) -> Optional[str]:
     if not cands:
         return None
     return min(cands, key=lambda c: abs((c - base).days)).isoformat()
+
+def parse_weekday_set(weekdays) -> Optional[set]:
+    """Parse model weekday tokens into a set of weekday ints (Mon=0…Sun=6).
+    Accepts names, 'weekdays'/'weekends'/'daily'. Returns None if empty/unreadable."""
+    if not weekdays:
+        return None
+    if isinstance(weekdays, str):
+        weekdays = [weekdays]
+    wanted: set = set()
+    for w in weekdays:
+        wl = str(w).strip().lower()
+        if wl in ("weekday", "weekdays"):
+            wanted |= {0, 1, 2, 3, 4}
+        elif wl in ("weekend", "weekends"):
+            wanted |= {5, 6}
+        elif wl in ("daily", "everyday", "every day", "all"):
+            wanted |= set(range(7))
+        elif wl in _WEEKDAYS:
+            wanted.add(_WEEKDAYS[wl])
+    return wanted or None
+
+def expand_date_targets(
+    base: date,
+    *,
+    dates=None,
+    weekdays=None,
+    weeks=1,
+    start_date=None,
+    end_date=None,
+    max_days: int = 60,
+) -> tuple:
+    """Expand multi-day tool args into a sorted unique list of ISO dates.
+
+    Precedence:
+      1. explicit `dates` list (each item resolved via resolve_date)
+      2. `start_date` + `end_date` inclusive range (optional weekday filter)
+      3. `weekdays` (+ optional `start_date`, `weeks`, or `end_date`)
+
+    Returns (iso_list, error_message_or_None). Pure — no I/O.
+    Keeps date math OUT of the model so '7/27–8/2' can't land on the wrong week
+    when the viewed day is elsewhere."""
+    # ── 1. explicit list ───────────────────────────────────────────────────
+    if dates:
+        if isinstance(dates, str):
+            dates = [dates]
+        out = []
+        for d in dates:
+            rd = resolve_date(d, base)
+            if rd:
+                out.append(rd)
+        out = sorted(set(out))[:max_days]
+        if not out:
+            return [], "couldn't understand any date in 'dates'."
+        return out, None
+
+    wanted = parse_weekday_set(weekdays)
+
+    # ── 2. start_date + end_date range ─────────────────────────────────────
+    if start_date is not None and end_date is not None:
+        s_iso = resolve_date(start_date, base)
+        e_iso = resolve_date(end_date, base)
+        if not s_iso:
+            return [], f"couldn't understand start_date '{start_date}'."
+        if not e_iso:
+            return [], f"couldn't understand end_date '{end_date}'."
+        s_d = date.fromisoformat(s_iso)
+        e_d = date.fromisoformat(e_iso)
+        if e_d < s_d:
+            return [], (f"end_date {e_iso} is before start_date {s_iso}. "
+                        f"Pass the earlier date as start_date.")
+        if (e_d - s_d).days + 1 > max_days:
+            return [], f"range is longer than {max_days} days — narrow it."
+        out = []
+        cur = s_d
+        while cur <= e_d:
+            if wanted is None or cur.weekday() in wanted:
+                out.append(cur.isoformat())
+            cur += timedelta(days=1)
+        if not out:
+            return [], "no days in that range match the given weekdays."
+        return out, None
+
+    # ── 3. weekdays from an anchor (start_date or viewed day) ───────────────
+    if wanted is not None:
+        try:
+            n_weeks = max(1, min(8, int(weeks if weeks is not None else 1)))
+        except (TypeError, ValueError):
+            n_weeks = 1
+        anchor_iso = resolve_date(start_date, base) if start_date is not None else base.isoformat()
+        if not anchor_iso:
+            return [], f"couldn't understand start_date '{start_date}'."
+        anchor = date.fromisoformat(anchor_iso)
+        # Optional end_date alone with weekdays (no start required above if only end?)
+        if end_date is not None and start_date is None:
+            # treat as range from base/anchor through end_date
+            e_iso = resolve_date(end_date, base)
+            if not e_iso:
+                return [], f"couldn't understand end_date '{end_date}'."
+            return expand_date_targets(
+                base, weekdays=weekdays, start_date=anchor_iso, end_date=e_iso,
+                max_days=max_days)
+
+        out = []
+        for i in range(7 * n_weeks):
+            d = anchor + timedelta(days=i)
+            if d.weekday() in wanted:
+                out.append(d.isoformat())
+            if len(out) >= max_days:
+                break
+        if not out:
+            return [], "no matching weekdays in that window."
+        return out, None
+
+    return [], ("give 'dates' (list), or start_date+end_date (range), "
+                "or 'weekdays' (e.g. ['monday'] / 'daily' / 'weekdays').")
 
 # ── Interval helpers ───────────────────────────────────────────────────────
 def _merge(intervals):
