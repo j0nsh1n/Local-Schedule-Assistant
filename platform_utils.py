@@ -112,6 +112,42 @@ def show_desktop_notification(
         return False
 
 
+class DesktopNotifyThread(QThread):
+    """Run show_desktop_notification() OFF the GUI thread.
+
+    That call is a `gdbus` subprocess with a 5 s timeout, and the unknown-icon
+    retry can make it two — so a wedged session bus would freeze the window for
+    up to ~10 s if it ran inline. This project has been bitten by exactly that
+    before (the v2.5.5 boot hang was a blocking `ollama list` on the GUI
+    thread), so the D-Bus call never runs synchronously.
+
+    `result` carries the outcome PLUS the original alert text, so the receiver
+    can fall back to the tray/popup without having to look up the sender (whose
+    deleteLater may already be queued)."""
+    result = Signal(bool, str, str, str)   # ok, title, body, kind
+
+    def __init__(self, notify_title, title, body, kind, *,
+                 timeout_ms=12000, urgency=2, parent=None):
+        super().__init__(parent)
+        # NB: never assign self.start/run/quit/wait on a QThread — those shadow
+        # the real methods (the CalFetchThread footgun).
+        self._notify_title = notify_title
+        self._title = title
+        self._body = body
+        self._kind = kind
+        self._timeout_ms = timeout_ms
+        self._urgency = urgency
+
+    def run(self):
+        try:
+            ok = show_desktop_notification(
+                self._notify_title, self._body,
+                timeout_ms=self._timeout_ms, urgency=self._urgency)
+        except Exception:
+            ok = False
+        self.result.emit(bool(ok), self._title, self._body, self._kind)
+
+
 # ── Run-at-login ─────────────────────────────────────────────────────────────
 # Windows: a .lnk in the user's Startup folder — the most visible/reliable method; it
 # shows in Task Manager > Startup and Settings, and the user can see the file directly.

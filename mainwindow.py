@@ -78,7 +78,7 @@ from core import (
 from theme import _rgba, _splitter_qss
 from gcal import GoogleAuthThread
 from platform_utils import (
-    is_startup_enabled, play_alert_sound, set_startup, show_desktop_notification,
+    DesktopNotifyThread, is_startup_enabled, play_alert_sound, set_startup,
 )
 from views import MonthViewWidget, SidebarWidget, TimelineWidget, WeekViewWidget, YearViewWidget
 from dialogs import AddActivityDialog, AlertPopup, SettingsDialog, SetupWidget
@@ -99,6 +99,7 @@ class MainWindow(AIToolsMixin, QMainWindow):
         self._cal_by_date: Dict[str, List[Dict]] = {}
         self._fetched_keys: set = set()
         self._cal_threads: List[QThread] = []
+        self._notify_threads: List[QThread] = []   # in-flight DesktopNotifyThreads
         self._all_acts:    List[Dict] = load_all_activities()
         self._ai_undo:     List[List[Dict]] = []   # schedule snapshots for AI undo
         self._manual_undo: List[List[Dict]] = []   # v4.0: Ctrl+Z (manual edits + AI turns)
@@ -1349,7 +1350,11 @@ class MainWindow(AIToolsMixin, QMainWindow):
 
         Windows: DND override uses our always-on-top AlertPopup; otherwise tray
         toast. Fallback to the popup if tray/DBus is unavailable.
-        `kind` is start | end | test — drives badge/color on the custom card."""
+        `kind` is start | end | test — drives badge/color on the custom card.
+
+        The D-Bus call runs on a worker thread (see DesktopNotifyThread), so a
+        wedged session bus can't freeze the window; the sound plays immediately
+        either way, and the fallback only runs if the daemon actually refused."""
         if self._settings.get("notify_sound", True):
             self._play_alert_sound()
         # Linux: system notification daemon owns corner placement.
@@ -1357,10 +1362,33 @@ class MainWindow(AIToolsMixin, QMainWindow):
             # Critical urgency when "override DND" is on; normal otherwise.
             urg = 2 if self._dnd_override else 1
             prefix = {"end": "Ended · ", "test": "Test · "}.get(kind, "")
-            if show_desktop_notification(
-                    f"{prefix}{title}" if prefix else title,
-                    body, timeout_ms=12000, urgency=urg):
-                return
+            t = DesktopNotifyThread(f"{prefix}{title}" if prefix else title,
+                                    title, body, kind, timeout_ms=12000, urgency=urg)
+            # Hold a ref until finished: an unreferenced QThread can be GC'd
+            # mid-run and segfault (the v3.7.1 OllamaCheckThread crash).
+            self._notify_threads.append(t)
+            t.result.connect(self._on_notify_result)
+            t.finished.connect(self._on_notify_finished)
+            t.start()
+            return
+        self._alert_fallback(title, body, kind)
+
+    def _on_notify_result(self, ok, title, body, kind):
+        """Queued back onto the GUI thread by Qt (bound slot on a QObject), so
+        it is safe to build widgets here."""
+        if not ok:
+            self._alert_fallback(title, body, kind)
+
+    def _on_notify_finished(self):
+        t = self.sender()
+        if t in self._notify_threads:
+            self._notify_threads.remove(t)
+        if t is not None:
+            t.deleteLater()
+
+    def _alert_fallback(self, title, body, kind: str = "start"):
+        """Tray toast normally; our own always-on-top card when DND override is
+        on (a toast can be suppressed by DND) or when there is no tray yet."""
         if self._dnd_override or not self._tray:
             self._show_alert_popup(title, body, kind=kind, play_sound=False)
         else:

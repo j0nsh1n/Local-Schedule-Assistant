@@ -142,6 +142,55 @@ ok, fake = call(title="", body="")
 check("empty title falls back to the app name",
       "Daily Scheduler" in " ".join(fake.calls[0][0]))
 
+
+# ── DesktopNotifyThread: the call must not block the GUI thread ─────────────
+# _alert() runs on the GUI thread from a 20 s QTimer. gdbus has a 5 s timeout
+# (x2 with the icon retry), so running it inline could freeze the window — the
+# same failure mode as the v2.5.5 boot hang. These checks pin the async wiring.
+print("── DesktopNotifyThread runs off the GUI thread ──")
+import time  # noqa: E402
+from PySide6.QtCore import QThread, QCoreApplication  # noqa: E402
+
+qapp = QCoreApplication.instance() or QCoreApplication(sys.argv)
+
+check("DesktopNotifyThread is a QThread",
+      issubclass(platform_utils.DesktopNotifyThread, QThread))
+
+# A deliberately slow notification must not hold up the caller.
+def _slow_run(argv, **kw):
+    time.sleep(1.0)
+    return _FakeCompleted(returncode=1, stdout="")
+
+fake = _FakeSubprocess()
+fake.run = _slow_run
+platform_utils.platform = _FakePlatform("Linux")
+platform_utils.subprocess = fake
+got = []
+try:
+    th = platform_utils.DesktopNotifyThread("N", "T", "B", "start", urgency=2)
+    th.result.connect(lambda ok, t_, b_, k_: got.append((ok, t_, b_, k_)))
+    t0 = time.monotonic()
+    th.start()
+    started_in = time.monotonic() - t0          # start() must return immediately
+    check(f"start() returns immediately ({started_in*1000:.0f} ms)", started_in < 0.25)
+    deadline = time.monotonic() + 10
+    while not got and time.monotonic() < deadline:
+        qapp.processEvents()
+        th.wait(20)
+    qapp.processEvents()
+finally:
+    platform_utils.platform = _real_platform
+    platform_utils.subprocess = _real_subprocess
+
+check("result signal fired", len(got) == 1)
+if got:
+    ok, t_, b_, k_ = got[0]
+    check("failure reported as False so the caller can fall back", ok is False)
+    check("original title carried back for the fallback", t_ == "T")
+    check("body carried back", b_ == "B")
+    check("kind carried back", k_ == "start")
+check("thread finished cleanly", th.isFinished())
+
 print(f"\n{sum(results)}/{len(results)} passed")
 print("RESULT:", "PASS" if all(results) else "FAIL")
 sys.exit(0 if all(results) else 1)

@@ -112,13 +112,21 @@ single repaint path and also updates the Now/Next line.
   undo snapshot first, so ↶ Undo / `Ctrl+Z` restore the whole thing.
 - **Alerts fire exactly once**, even with two app instances running — the
   claim is an atomic `O_CREAT|O_EXCL` marker file, not an in-memory set.
-- **How an alert is drawn depends on the OS** (`MainWindow._alert`). On Linux
-  it goes to the desktop notification daemon over D-Bus, because Wayland does
-  not let a client place its own window — the daemon puts it in whatever corner
-  the user configured, and "override DND" maps to *critical* urgency. Windows
-  (and any Linux box where that call fails) falls back to the hand-drawn
-  `AlertPopup`, which pins itself to the corner of the screen the main window
-  is on. Never assume the custom popup is what the user sees.
+- **How an alert is drawn depends on the OS and on your settings**
+  (`MainWindow._alert`). On Linux it goes to the desktop notification daemon
+  over D-Bus, because Wayland does not let a client place its own window — the
+  daemon puts it in whatever corner the user configured, and "override DND"
+  maps to *critical* urgency. Windows, and any Linux box where that call fails,
+  drop to `_alert_fallback`, which is a **tray toast** normally and the
+  hand-drawn `AlertPopup` only when DND-override is on (a toast can be
+  suppressed by Do Not Disturb) or when the tray isn't up yet. So there are
+  three possible presentations — never assume the custom popup is what the user
+  sees.
+- **The D-Bus call never runs on the GUI thread** (`DesktopNotifyThread`). It's
+  a `gdbus` subprocess with a 5 s timeout, doubled by the icon retry, so inline
+  it could freeze the window for ~10 s on a wedged session bus. This is the same
+  mistake that caused the v2.5.5 boot hang (`ollama list` blocking during
+  construction) and the v4.1.0 GUI stutter — don't reintroduce it.
 - **Data is local and plain JSON**, under `~/.daily-scheduler/`, with three
   recovery layers: `.bak` (one save back), 14 dated dailies, and in-session undo.
 
