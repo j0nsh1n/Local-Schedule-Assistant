@@ -333,17 +333,50 @@ class SetupWidget(QWidget):
 #  pipeline, so it shows even with Do Not Disturb / Focus Assist on.
 #  Planner-style card (square tiles + left accent), not OS balloon chrome.
 # ══════════════════════════════════════════════════════════════════════════
+
+def alert_corner_top_left(screen_geo, popup_w: int, popup_h: int,
+                          margin: int = 16, stack_idx: int = 0, gap: int = 8):
+    """Top-left of a bottom-right-stacked toast on `screen_geo` (QRect-like).
+
+    Pure geometry — works for multi-monitor (uses geo.x/y + width/height, not
+    the exclusive right/bottom edges). stack_idx 0 = lowest toast."""
+    x = int(screen_geo.x()) + int(screen_geo.width()) - int(popup_w) - margin
+    y = (int(screen_geo.y()) + int(screen_geo.height()) - int(popup_h) - margin
+         - int(stack_idx) * (int(popup_h) + gap))
+    return x, y
+
+
 class AlertPopup(QWidget):
     def __init__(self, title, body, icon: QIcon, kind: str = "start"):
-        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
-        # Stable title so compositor window rules can target the popup — on Wayland
-        # apps can't place their own windows, but e.g. a KWin rule matching this
-        # title can force bottom-right + keep-above.
+        # IMPORTANT: do NOT use Qt.Tool. On KWin/Plasma that maps to a "Utility"
+        # window type (often labeled "unimportant"), and placement / keep-above
+        # rules then fail or the toast is centered. Use a normal top-level
+        # Window + stays-on-top instead.
+        flags = (Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+                 | Qt.WindowDoesNotAcceptFocus)
+        super().__init__(None, flags)
+        # Stable title + role so compositor window rules can target the popup
+        # (title match is the most reliable on Wayland).
         self.setWindowTitle("Daily Scheduler Alert")
+        self.setObjectName("DailySchedulerAlert")
+        try:
+            self.setWindowRole("alert")   # X11 WM_WINDOW_ROLE; ignored on pure Wayland
+        except Exception:
+            pass
         self.setAttribute(Qt.WA_ShowWithoutActivating)   # don't steal focus
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)           # free itself when dismissed
+        # Prefer notification-ish type on platforms that honor it (mostly X11).
+        try:
+            self.setAttribute(Qt.WA_X11NetWmWindowTypeNotification, True)
+        except Exception:
+            pass
         self.setFixedWidth(380)
+        # Corner pin target (set by show_corner). Wayland often ignores the first
+        # move(); we re-apply after show/layout so X11/KWin honor bottom-right.
+        self._pin_screen = None
+        self._pin_stack = 0
+        self._pin_margin = 16
 
         # kind: start | end | test — accent + badge text
         is_end = kind == "end"
@@ -409,9 +442,71 @@ class AlertPopup(QWidget):
         self._timer.start(12000)
 
     def show_at(self, x, y):
+        """Legacy: place with bottom edge at y (top-left computed from height)."""
         self.adjustSize()
-        self.move(x, y - self.height())
-        self.show()  # no opacity effect — keeps the alert snappy under DND
+        self.move(int(x), int(y) - self.height())
+        self.show()
+        # Re-pin once layout settles (same as show_corner).
+        QTimer.singleShot(0, lambda: self.move(int(x), int(y) - self.height()))
+
+    def show_corner(self, screen, stack_idx: int = 0, margin: int = 16):
+        """Show bottom-right on `screen` (QScreen), stacking upward for multiples."""
+        self._pin_screen = screen
+        self._pin_stack = max(0, int(stack_idx))
+        self._pin_margin = margin
+        self.adjustSize()
+        self._reposition()
+        if screen is not None:
+            try:
+                self.setScreen(screen)
+            except Exception:
+                pass
+        self.show()
+        # Wayland/X11: position is often applied only after the surface is mapped.
+        QTimer.singleShot(0, self._reposition)
+        QTimer.singleShot(50, self._reposition)
+        QTimer.singleShot(150, self._reposition)
+
+    def _reposition(self):
+        """Pin to bottom-right of the target screen (global coordinates)."""
+        from PySide6.QtWidgets import QApplication
+        scr = self._pin_screen
+        if scr is None:
+            scr = QApplication.primaryScreen()
+        if scr is None:
+            return
+        self.adjustSize()
+        geo = scr.availableGeometry()
+        x, y = alert_corner_top_left(
+            geo, self.width(), self.height(),
+            margin=self._pin_margin, stack_idx=self._pin_stack)
+        try:
+            self.setScreen(scr)
+        except Exception:
+            pass
+        wh = self.windowHandle()
+        if wh is not None:
+            try:
+                wh.setScreen(scr)
+            except Exception:
+                pass
+            try:
+                from PySide6.QtCore import QPoint
+                wh.setPosition(QPoint(x, y))
+            except Exception:
+                pass
+        self.move(x, y)
+        self.setGeometry(x, y, self.width(), self.height())
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if self._pin_screen is not None:
+            QTimer.singleShot(0, self._reposition)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if self._pin_screen is not None and self.isVisible():
+            self._reposition()
 
     def mousePressEvent(self, _ev):
         self.close()

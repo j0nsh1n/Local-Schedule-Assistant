@@ -4,6 +4,11 @@ Where the OS-specific behaviour is quarantined. Anything that branches on
 Windows vs. Linux belongs here rather than in the widget modules.
 
 Contents
+    Desktop notifications  show_desktop_notification() — FreeDesktop/gdbus.
+                           Linux only (returns False everywhere else, which is
+                           what routes Windows to the tray/AlertPopup path).
+                           Used because Wayland won't let a client position its
+                           own toast; the notification daemon owns placement.
     Run-at-login ......... set_startup / is_startup_enabled.
                            Windows: a Startup-folder .lnk (NOT a registry Run
                            key — that worked but never showed in Task Manager).
@@ -41,6 +46,106 @@ from PySide6.QtCore import (
 import core
 from core import LATEST_RELEASE_API, RELEASES_PAGE, is_newer_version
 
+
+# ── Desktop notifications (Linux) ───────────────────────────────────────────
+# On Wayland, Qt cannot freely position frameless "toast" windows — the
+# compositor centers them. FreeDesktop Notifications (Plasma's daemon) place
+# alerts in the configured corner. Prefer that path on Linux; custom AlertPopup
+# remains the Windows / fallback path.
+
+def show_desktop_notification(
+    title: str,
+    body: str,
+    *,
+    timeout_ms: int = 12000,
+    urgency: int = 2,
+    icon: str = "daily-scheduler",
+) -> bool:
+    """Show a system notification via org.freedesktop.Notifications (gdbus).
+
+    urgency: 0=low, 1=normal, 2=critical (helps pierce Do Not Disturb on KDE).
+    Returns True if the call was accepted. Best-effort; never raises."""
+    if platform.system() != "Linux":
+        return False
+    # gdbus is always available on modern Fedora/KDE; notify-send is broken on
+    # some Nobara setups (libnotify symbol mismatch), so we don't use it.
+    title = (title or "Daily Scheduler").replace("\x00", "")
+    body = (body or "").replace("\x00", "")
+    urgency = 0 if urgency < 0 else 2 if urgency > 2 else int(urgency)
+    timeout_ms = max(1000, min(int(timeout_ms), 60000))
+    # GVariant dict for hints. desktop-entry ties the toast to our .desktop file.
+    hints = (
+        f"{{'urgency': <byte 0x{urgency:x}>, "
+        f"'desktop-entry': <'daily-scheduler'>, "
+        f"'category': <'reminder'>}}"
+    )
+    try:
+        r = subprocess.run(
+            [
+                "gdbus", "call", "--session",
+                "--dest", "org.freedesktop.Notifications",
+                "--object-path", "/org/freedesktop/Notifications",
+                "--method", "org.freedesktop.Notifications.Notify",
+                "Daily Scheduler",
+                "0",
+                icon or "dialog-information",
+                title,
+                body,
+                "[]",
+                hints,
+                f"int32 {timeout_ms}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if r.returncode == 0 and "uint32" in (r.stdout or ""):
+            return True
+        # Retry with a generic icon if our app icon name isn't known to the daemon.
+        if icon and icon != "dialog-information":
+            return show_desktop_notification(
+                title, body, timeout_ms=timeout_ms, urgency=urgency,
+                icon="dialog-information",
+            )
+        return False
+    except Exception:
+        return False
+
+
+class DesktopNotifyThread(QThread):
+    """Run show_desktop_notification() OFF the GUI thread.
+
+    That call is a `gdbus` subprocess with a 5 s timeout, and the unknown-icon
+    retry can make it two — so a wedged session bus would freeze the window for
+    up to ~10 s if it ran inline. This project has been bitten by exactly that
+    before (the v2.5.5 boot hang was a blocking `ollama list` on the GUI
+    thread), so the D-Bus call never runs synchronously.
+
+    `result` carries the outcome PLUS the original alert text, so the receiver
+    can fall back to the tray/popup without having to look up the sender (whose
+    deleteLater may already be queued)."""
+    result = Signal(bool, str, str, str)   # ok, title, body, kind
+
+    def __init__(self, notify_title, title, body, kind, *,
+                 timeout_ms=12000, urgency=2, parent=None):
+        super().__init__(parent)
+        # NB: never assign self.start/run/quit/wait on a QThread — those shadow
+        # the real methods (the CalFetchThread footgun).
+        self._notify_title = notify_title
+        self._title = title
+        self._body = body
+        self._kind = kind
+        self._timeout_ms = timeout_ms
+        self._urgency = urgency
+
+    def run(self):
+        try:
+            ok = show_desktop_notification(
+                self._notify_title, self._body,
+                timeout_ms=self._timeout_ms, urgency=self._urgency)
+        except Exception:
+            ok = False
+        self.result.emit(bool(ok), self._title, self._body, self._kind)
 
 
 # ── Run-at-login ─────────────────────────────────────────────────────────────
