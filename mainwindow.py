@@ -77,7 +77,9 @@ from core import (
 )
 from theme import _rgba, _splitter_qss
 from gcal import GoogleAuthThread
-from platform_utils import is_startup_enabled, play_alert_sound, set_startup
+from platform_utils import (
+    is_startup_enabled, play_alert_sound, set_startup, show_desktop_notification,
+)
 from views import MonthViewWidget, SidebarWidget, TimelineWidget, WeekViewWidget, YearViewWidget
 from dialogs import AddActivityDialog, AlertPopup, SettingsDialog, SetupWidget
 from aipanel import AIPanel
@@ -1339,12 +1341,26 @@ class MainWindow(AIToolsMixin, QMainWindow):
 
     # ── Alerting ─────────────────────────────────────────────────────────────
     def _alert(self, title, body, *, kind: str = "start"):
-        """Fire a block alert. With DND override on, draw our own always-on-top popup
-        (+ sound) so it shows even under Do Not Disturb; otherwise a normal tray toast.
-        If the tray icon is not ready yet, fall back to the in-app popup so the alert
-        is never silently dropped. `kind` is start | end | test — drives badge/color."""
+        """Fire a block alert.
+
+        Linux (esp. Wayland): prefer FreeDesktop Notifications — Plasma places
+        them in the configured corner. Custom Qt toasts are centered by the
+        compositor and cannot be fixed from the client.
+
+        Windows: DND override uses our always-on-top AlertPopup; otherwise tray
+        toast. Fallback to the popup if tray/DBus is unavailable.
+        `kind` is start | end | test — drives badge/color on the custom card."""
         if self._settings.get("notify_sound", True):
             self._play_alert_sound()
+        # Linux: system notification daemon owns corner placement.
+        if platform.system() == "Linux":
+            # Critical urgency when "override DND" is on; normal otherwise.
+            urg = 2 if self._dnd_override else 1
+            prefix = {"end": "Ended · ", "test": "Test · "}.get(kind, "")
+            if show_desktop_notification(
+                    f"{prefix}{title}" if prefix else title,
+                    body, timeout_ms=12000, urgency=urg):
+                return
         if self._dnd_override or not self._tray:
             self._show_alert_popup(title, body, kind=kind, play_sound=False)
         else:
@@ -1357,6 +1373,28 @@ class MainWindow(AIToolsMixin, QMainWindow):
         vol  = int(self._settings.get("notify_volume", 80) or 80) / 100.0
         play_alert_sound(self, tone=tone, volume=vol)
 
+    def _alert_target_screen(self):
+        """Screen for alert toasts: prefer the monitor with this window, else
+        the one under the cursor, else primary. Dual-head setups often put
+        'primary' on the right (x=2560); using the main window's screen keeps
+        alerts on the display the user is looking at."""
+        scr = None
+        try:
+            wh = self.windowHandle()
+            if wh is not None:
+                scr = wh.screen()
+        except Exception:
+            scr = None
+        if scr is None:
+            try:
+                from PySide6.QtGui import QCursor
+                scr = QApplication.screenAt(QCursor.pos())
+            except Exception:
+                scr = None
+        if scr is None:
+            scr = QApplication.primaryScreen()
+        return scr
+
     def _show_alert_popup(self, title, body, *, kind: str = "start", play_sound: bool = True):
         if play_sound and self._settings.get("notify_sound", True):
             self._play_alert_sound()
@@ -1364,11 +1402,11 @@ class MainWindow(AIToolsMixin, QMainWindow):
         popup.destroyed.connect(lambda *_: self._popups.remove(popup)
                                 if popup in self._popups else None)
         self._popups.append(popup)
-        geo = QApplication.primaryScreen().availableGeometry()
+        # Stack newer popups upward on the chosen screen's bottom-right corner.
+        # (Wayland may still ignore free placement — show_corner re-applies after
+        # map; KWin rule on title "Daily Scheduler Alert" is the fallback.)
         idx = max(0, len(self._popups) - 1)
-        # Stack newer popups upward; taller card (~110px) than the old toast
-        popup.show_at(geo.right() - popup.width() - 16,
-                      geo.bottom() - 16 - idx * 118)
+        popup.show_corner(self._alert_target_screen(), stack_idx=idx)
 
     def _toggle_startup(self, enabled):
         ok = set_startup(enabled)

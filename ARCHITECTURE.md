@@ -39,7 +39,7 @@ the graph stays acyclic.
 | `gcal.py` | Google auth + fetch threads, event normalisation. Read-only data. | ~215 |
 | `ai.py` | Ollama process control, threads, tool *schemas*, per-model prompts. | ~1,215 |
 | `ai_tools.py` | What the tools actually *do* to the schedule (`AIToolsMixin`). | ~990 |
-| `platform_utils.py` | Run-at-login, alert sounds, update check — all OS branching. | ~300 |
+| `platform_utils.py` | Run-at-login, alert sounds, desktop notifications, update check — all OS branching. | ~365 |
 | `views.py` | Day / Week / Month / Year / sidebar, all custom-painted. | ~950 |
 | `dialogs.py` | Add-activity, setup, alert popup, settings. | ~810 |
 | `aipanel.py` | Chat UI and the turn loop. | ~895 |
@@ -112,6 +112,13 @@ single repaint path and also updates the Now/Next line.
   undo snapshot first, so ↶ Undo / `Ctrl+Z` restore the whole thing.
 - **Alerts fire exactly once**, even with two app instances running — the
   claim is an atomic `O_CREAT|O_EXCL` marker file, not an in-memory set.
+- **How an alert is drawn depends on the OS** (`MainWindow._alert`). On Linux
+  it goes to the desktop notification daemon over D-Bus, because Wayland does
+  not let a client place its own window — the daemon puts it in whatever corner
+  the user configured, and "override DND" maps to *critical* urgency. Windows
+  (and any Linux box where that call fails) falls back to the hand-drawn
+  `AlertPopup`, which pins itself to the corner of the screen the main window
+  is on. Never assume the custom popup is what the user sees.
 - **Data is local and plain JSON**, under `~/.daily-scheduler/`, with three
   recovery layers: `.bak` (one save back), 14 dated dailies, and in-session undo.
 

@@ -4,6 +4,11 @@ Where the OS-specific behaviour is quarantined. Anything that branches on
 Windows vs. Linux belongs here rather than in the widget modules.
 
 Contents
+    Desktop notifications  show_desktop_notification() — FreeDesktop/gdbus.
+                           Linux only (returns False everywhere else, which is
+                           what routes Windows to the tray/AlertPopup path).
+                           Used because Wayland won't let a client position its
+                           own toast; the notification daemon owns placement.
     Run-at-login ......... set_startup / is_startup_enabled.
                            Windows: a Startup-folder .lnk (NOT a registry Run
                            key — that worked but never showed in Task Manager).
@@ -41,6 +46,70 @@ from PySide6.QtCore import (
 import core
 from core import LATEST_RELEASE_API, RELEASES_PAGE, is_newer_version
 
+
+# ── Desktop notifications (Linux) ───────────────────────────────────────────
+# On Wayland, Qt cannot freely position frameless "toast" windows — the
+# compositor centers them. FreeDesktop Notifications (Plasma's daemon) place
+# alerts in the configured corner. Prefer that path on Linux; custom AlertPopup
+# remains the Windows / fallback path.
+
+def show_desktop_notification(
+    title: str,
+    body: str,
+    *,
+    timeout_ms: int = 12000,
+    urgency: int = 2,
+    icon: str = "daily-scheduler",
+) -> bool:
+    """Show a system notification via org.freedesktop.Notifications (gdbus).
+
+    urgency: 0=low, 1=normal, 2=critical (helps pierce Do Not Disturb on KDE).
+    Returns True if the call was accepted. Best-effort; never raises."""
+    if platform.system() != "Linux":
+        return False
+    # gdbus is always available on modern Fedora/KDE; notify-send is broken on
+    # some Nobara setups (libnotify symbol mismatch), so we don't use it.
+    title = (title or "Daily Scheduler").replace("\x00", "")
+    body = (body or "").replace("\x00", "")
+    urgency = 0 if urgency < 0 else 2 if urgency > 2 else int(urgency)
+    timeout_ms = max(1000, min(int(timeout_ms), 60000))
+    # GVariant dict for hints. desktop-entry ties the toast to our .desktop file.
+    hints = (
+        f"{{'urgency': <byte 0x{urgency:x}>, "
+        f"'desktop-entry': <'daily-scheduler'>, "
+        f"'category': <'reminder'>}}"
+    )
+    try:
+        r = subprocess.run(
+            [
+                "gdbus", "call", "--session",
+                "--dest", "org.freedesktop.Notifications",
+                "--object-path", "/org/freedesktop/Notifications",
+                "--method", "org.freedesktop.Notifications.Notify",
+                "Daily Scheduler",
+                "0",
+                icon or "dialog-information",
+                title,
+                body,
+                "[]",
+                hints,
+                f"int32 {timeout_ms}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if r.returncode == 0 and "uint32" in (r.stdout or ""):
+            return True
+        # Retry with a generic icon if our app icon name isn't known to the daemon.
+        if icon and icon != "dialog-information":
+            return show_desktop_notification(
+                title, body, timeout_ms=timeout_ms, urgency=urgency,
+                icon="dialog-information",
+            )
+        return False
+    except Exception:
+        return False
 
 
 # ── Run-at-login ─────────────────────────────────────────────────────────────
