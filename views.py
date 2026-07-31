@@ -303,6 +303,8 @@ class TimelineWidget(QWidget):
 
         # ── live move / resize of an existing block ─────────────────────────
         if self._edit_mode:
+            if self._press_min is None or self._edit_orig is None:
+                return
             self._moved = True
             delta = y_to_min(y) - self._press_min
             os_, oe = self._edit_orig
@@ -413,7 +415,7 @@ class TimelineWidget(QWidget):
             return
 
         # ── finish creating a block ─────────────────────────────────────────
-        if self._drag_start is None:
+        if self._drag_start is None or self._drag_cur is None:
             return
         s, e = sorted((self._drag_start, self._drag_cur))
         self._drag_start = self._drag_cur = None

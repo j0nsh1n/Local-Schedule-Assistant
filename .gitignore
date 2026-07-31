@@ -30,6 +30,8 @@ settings.json
 _*.txt
 
 # ── Local-only dev reference (not part of the published project) ──
+# Uppercase CONTEXT.md / CLAUDE.md only — root context.md is tracked governance
+# (agents.md). Case-sensitive filesystems: do not add a broad "context.md" ignore.
 CONTEXT.md
 CLAUDE.md
 # tests/ is committed (v4.0) so contributors and CI can verify — synthetic data only

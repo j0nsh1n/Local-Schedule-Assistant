@@ -96,7 +96,7 @@ Your data lives in `~/.daily-scheduler/` either way.
 
 ### Option B — run from source
 
-Requires **Python 3.10+**.
+Requires **Python 3.14**.
 
 ```bat
 git clone https://github.com/j0nsh1n/Local-Schedule-Assistant.git
@@ -133,12 +133,11 @@ Uninstall with `./install-launcher.sh --uninstall`.
   [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/)**
   or the icon won't show; the app still works — closing the window without a tray
   just keeps it running, relaunch to surface it.
-- **Alert popups on Wayland:** the always-on-top reminder popup may appear
-  center-screen instead of the bottom-right corner (Wayland doesn't let apps
-  position their own windows). Cosmetic only. On KDE you can restore corner
-  placement with a window rule (System Settings → Window Management → Window
-  Rules) matching the exact window title `Daily Scheduler Alert`: set
-  *Position* (Apply initially) and *Keep above* (Force).
+- **Reminders on Linux:** the app prefers the desktop’s FreeDesktop notification
+  service (system toasts — correct corner/placement via Plasma/GNOME). A custom
+  always-on-top Qt popup is only the fallback if that path is unavailable; on
+  pure Wayland, client-placed windows can still land center-screen in that
+  fallback case only.
 - **Ollama:** install the Linux build from [ollama.com](https://ollama.com/download);
   AMD GPUs use the bundled ROCm (RDNA2+ supported out of the box).
 

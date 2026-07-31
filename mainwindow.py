@@ -1011,7 +1011,8 @@ class MainWindow(AIToolsMixin, QMainWindow):
             anim.setEndValue(1.0)
             anim.setEasingCurve(QEasingCurve.Type.OutQuad)
             def _clear():
-                panel.setGraphicsEffect(None)
+                # None clears the effect; stubs often reject Optional.
+                panel.setGraphicsEffect(None)  # type: ignore[arg-type]
             anim.finished.connect(_clear)
             self._ai_slide = anim
             anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
@@ -1025,7 +1026,7 @@ class MainWindow(AIToolsMixin, QMainWindow):
             panel.setMaximumWidth(0)
             self._body_split.setCollapsible(2, True)
             panel.hide()
-            panel.setGraphicsEffect(None)
+            panel.setGraphicsEffect(None)  # type: ignore[arg-type]
             # Return AI width to the calendar
             self._body_split.setSizes([cal + (sizes[2] if len(sizes) > 2 else 0), side, 0])
             self._persist_layout_splits()
@@ -1381,7 +1382,7 @@ class MainWindow(AIToolsMixin, QMainWindow):
 
     def _on_notify_finished(self):
         t = self.sender()
-        if t in self._notify_threads:
+        if isinstance(t, QThread) and t in self._notify_threads:
             self._notify_threads.remove(t)
         if t is not None:
             t.deleteLater()
