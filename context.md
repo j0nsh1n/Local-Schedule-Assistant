@@ -1,11 +1,10 @@
 # context.md — Daily Scheduler
 
 ## Current State
-- Branch: `chore/governance-3.14-pyright` (from main after PR #45 merge).
-  App version **4.6.2**; last published release tag **v4.6.1** (tag cut in
-  progress for v4.6.2).
+- Branch: `main` @ v4.6.2 release. App version **4.6.2**; tag **v4.6.2**
+  published (assets via release CI).
 - **Python 3.14** pinned; **pyright** adopted (0 errors local).
-- Notifications: on main via PR #45; human confirmed native toasts work.
+- Notifications: PR #45 + confirmed native FreeDesktop toasts.
 - Cloud LLM: leave as-is. Deps: `>=` floors. No Dependabot.
 
 ## Repo Landmarks
@@ -49,8 +48,7 @@
 
 ## Session Handoff
 - **Date:** 2026-07-31
-- **Branch:** `fix/v4.6.2-notifications` → merge/release path for v4.6.2
-- **Done:** Governance, Python 3.14, pyright/CodeQL, notify fixes, changelog
-  finalized for 4.6.2; commit/PR/release in progress per human request.
-- **Next:** After release lands on main, prune branch; start next task from
-  roadmap backlog or human ask.
+- **Branch:** `main`
+- **Done:** PR #46 merged (governance, 3.14, pyright); `v4.6.2` tagged and
+  GitHub release published; release workflows building assets.
+- **Next:** Confirm win/linux assets on the release page; backlog or next ask.

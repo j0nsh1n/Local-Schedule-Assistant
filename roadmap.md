@@ -32,7 +32,7 @@ works) and via PR review. One phase may span several small PRs.
   - Attach win + linux (+ AppImage if built) assets and checksums.
 - Complete when: GitHub release `v4.6.2` published with assets; app version
   on main matches tag.
-- Status: [~] 2026-07-31 — cutting release
+- Status: [x] 2026-07-31 — tag `v4.6.2` published; CI builds assets
 
 ## Phase 4 — Dependency & CI hardening
 - Tasks:
