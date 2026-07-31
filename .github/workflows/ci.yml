@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.14"]
     steps:
       - uses: actions/checkout@v4
 
@@ -21,8 +21,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install ruff
-        run: pip install ruff
+      - name: Install ruff + pyright
+        run: pip install ruff pyright
 
       # Static checks only — no need to install the heavy GUI deps (PySide6),
       # since both tools analyse the source without importing it.
@@ -31,6 +31,14 @@ jobs:
 
       - name: Lint (real-bug rules)
         run: ruff check *.py --select E9,F63,F7,F82
+
+      # Types: project config in pyrightconfig.json (basic; Qt enum noise suppressed).
+      # Install runtime deps so PySide6/google stubs resolve; analysis does not import for GUI.
+      - name: Install deps for type resolution
+        run: pip install -r requirements.txt
+
+      - name: Type check (pyright)
+        run: pyright
 
   # Pure planning logic (v4.3.0). core.py has been Qt-free since the v4.2.0 split,
   # so this needs no PySide6 and no display — it finishes in well under a second and
@@ -44,7 +52,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Run Qt-free core suite
         run: python tests/test_core_pure.py
@@ -58,7 +66,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install deps + system libs for offscreen Qt
         run: |

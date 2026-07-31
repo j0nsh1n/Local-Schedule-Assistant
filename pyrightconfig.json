@@ -1,0 +1,37 @@
+{
+  "include": [
+    "app.py",
+    "core.py",
+    "theme.py",
+    "gcal.py",
+    "ai.py",
+    "ai_tools.py",
+    "aipanel.py",
+    "platform_utils.py",
+    "views.py",
+    "dialogs.py",
+    "mainwindow.py"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    "tests",
+    "packaging",
+    "build",
+    "dist_exe"
+  ],
+  "pythonVersion": "3.14",
+  "pythonPlatform": "All",
+  "typeCheckingMode": "basic",
+  "venvPath": ".",
+  "venv": ".venv",
+  "reportMissingImports": true,
+  "reportMissingModuleSource": false,
+  "reportAttributeAccessIssue": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportOptionalSubscript": "none",
+  "reportOptionalIterable": "none",
+  "reportOptionalOperand": "none",
+  "reportPossiblyUnboundVariable": "warning",
+  "reportGeneralTypeIssues": "warning"
+}

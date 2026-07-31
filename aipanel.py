@@ -157,7 +157,9 @@ class AIPanel(QWidget):
         hl.addLayout(tr)
 
         mr = QHBoxLayout()
-        mr.addWidget(QLabel("Model:", styleSheet=f"color:{theme.C_MUTED.name()}; font-size:10px;"))
+        _model_lbl = QLabel("Model:")
+        _model_lbl.setStyleSheet(f"color:{theme.C_MUTED.name()}; font-size:10px;")
+        mr.addWidget(_model_lbl)
         self._model_in = QComboBox(); self._model_in.setEditable(True)
         self._model_in.setFixedHeight(24)
         self._model_in.addItems(self._model_choices())

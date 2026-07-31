@@ -220,7 +220,7 @@ def main():
 
     # The window is built via _build_window() — immediately for a normal launch, but
     # DEFERRED at Windows sign-in (see the startup-delay block below).
-    holder = {"win": None}
+    holder: dict[str, MainWindow | None] = {"win": None}
 
     def _build_window():
         if holder["win"] is not None:

@@ -293,8 +293,8 @@ def _migrate_types(acts: List[Dict]) -> List[Dict]:
     block's colour to match the current palette. Runs silently on load."""
     by_id = {t["id"]: t for t in ACTIVITY_TYPES}
     for a in acts:
-        tid = a.get("type")
-        tid = _OLD_TYPE_MAP.get(tid, tid)
+        raw = a.get("type")
+        tid = _OLD_TYPE_MAP.get(raw, raw) if isinstance(raw, str) else None
         if tid not in by_id:
             tid = "study"
         a["type"]  = tid
