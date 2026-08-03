@@ -217,7 +217,8 @@ Prefer a hosted model? **Settings → AI Assistant**:
 | **OpenAI-compatible** | API key + base URL (e.g. Groq, OpenRouter, or any `/v1` host) |
 
 Paste the key (stored only in `~/.daily-scheduler/settings.json` on this machine), set the
-model id (e.g. `gpt-4o-mini`, `claude-sonnet-4-5`), and chat. **Cloud mode sends your AI
+model id (e.g. `gpt-5.6-luna`, `claude-sonnet-5` — the Settings picker seeds current
+ids; you can type any model your key can call), and chat. **Cloud mode sends your AI
 prompts and schedule context to that provider** — use local Ollama if you want everything
 private. The key is never logged or included in crash dumps.
 

@@ -47,8 +47,8 @@
 - Version jump 4.4 → 4.6 (no 4.5.x).
 
 ## Session Handoff
-- **Date:** 2026-07-31
-- **Branch:** `main`
-- **Done:** PR #46 merged (governance, 3.14, pyright); `v4.6.2` tagged and
-  GitHub release published; release workflows building assets.
-- **Next:** Confirm win/linux assets on the release page; backlog or next ask.
+- **Date:** 2026-08-02
+- **Branch:** `fix/cloud-model-suggestions-2026`
+- **Done:** Refreshed `CLOUD_MODEL_SUGGESTIONS` to GPT-5.6 + Claude 5 family
+  API ids; README + tests + CHANGELOG.
+- **Next:** Merge PR; optional later: fetch models live from provider APIs.

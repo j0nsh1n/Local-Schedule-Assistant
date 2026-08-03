@@ -7,15 +7,10 @@ Versions match `core.__version__` / Git tags (`vX.Y.Z`).
 
 ## [Unreleased]
 
-### Added
-- Project governance files: `agents.md`, filled `spec.md` / `roadmap.md`,
-  `context.md`, and this changelog.
-- GitHub CodeQL workflow (Python) under `.github/workflows/codeql.yml`.
-- Pyright type checking (`pyrightconfig.json`, CI job, `pyright` must pass).
-
 ### Changed
-- Runtime pin: **Python 3.14** (`.python-version`, CI, release builds, README,
-  launchers).
+- Cloud LLM model picker seeds updated to current OpenAI (GPT-5.6 family)
+  and Anthropic (Claude Sonnet/Opus/Fable 5, Haiku 4.5) API ids; README
+  examples match.
 
 ## [4.6.2] - 2026-07-31
 

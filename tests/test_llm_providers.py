@@ -90,5 +90,20 @@ print("── thread defaults ──")
 t = ai.OllamaThread([], "m", provider="openai", api_key="")
 check("thread stores provider", t.provider == "openai")
 
+print("── cloud model suggestions ──")
+sugs = ai.CLOUD_MODEL_SUGGESTIONS
+check("has openai/anthropic/compatible keys",
+      set(sugs) >= {"openai", "anthropic", "openai_compatible"})
+check("openai seeds current GPT-5.6 family",
+      "gpt-5.6-luna" in sugs["openai"] and "gpt-5.6-sol" in sugs["openai"])
+check("anthropic seeds Sonnet/Opus 5",
+      "claude-sonnet-5" in sugs["anthropic"] and "claude-opus-5" in sugs["anthropic"])
+# Guard against reintroducing retired picker seeds as the only options
+legacy = {"gpt-4o", "gpt-4o-mini", "gpt-4.1", "o4-mini", "claude-opus-4-1"}
+check("openai list not only legacy 4.x/o-series",
+      not set(sugs["openai"]).issubset(legacy))
+check("default openai seed is first entry", sugs["openai"][0] == "gpt-5.6-luna")
+check("default anthropic seed is sonnet-5", sugs["anthropic"][0] == "claude-sonnet-5")
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)
