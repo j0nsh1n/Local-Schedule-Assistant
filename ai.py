@@ -525,16 +525,32 @@ class OllamaCheckThread(QThread):
 OPENAI_DEFAULT_BASE = "https://api.openai.com/v1"
 ANTHROPIC_DEFAULT_BASE = "https://api.anthropic.com"
 
-# Suggested cloud model tags (picker seeds; user can type any id).
+# Suggested cloud model ids (picker seeds; user can type any id the key can call).
+# Refresh against provider docs when the lists feel stale:
+#   OpenAI:    https://developers.openai.com/api/docs/models
+#   Anthropic: https://platform.claude.com/docs/en/about-claude/models/overview
+# First entry is the default when switching provider from an Ollama tag.
 CLOUD_MODEL_SUGGESTIONS = {
     "openai": [
-        "gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini",
+        "gpt-5.6-luna",   # cost-sensitive GPT-5.6
+        "gpt-5.6-terra",  # balanced
+        "gpt-5.6-sol",    # flagship (alias: gpt-5.6)
+        "gpt-5.6",
+        "gpt-5.5",
+        "gpt-5.4-mini",
     ],
     "openai_compatible": [
-        "gpt-4o-mini", "claude-sonnet-4-5", "gemini-2.5-flash",
+        # Common cross-host ids (OpenRouter, Groq, etc. — host-specific names vary)
+        "gpt-5.6-luna",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+        "gemini-2.5-flash",
     ],
     "anthropic": [
-        "claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1",
+        "claude-sonnet-5",    # speed + intelligence default
+        "claude-haiku-4-5",   # fastest / cheapest current Haiku
+        "claude-opus-5",      # agentic / complex work
+        "claude-fable-5",     # highest capability widely released
     ],
 }
 
