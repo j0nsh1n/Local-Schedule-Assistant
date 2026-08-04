@@ -7,6 +7,8 @@ Versions match `core.__version__` / Git tags (`vX.Y.Z`).
 
 ## [Unreleased]
 
+## [4.6.3] - 2026-08-04
+
 ### Changed
 - Cloud LLM model picker seeds updated to current OpenAI (GPT-5.6 family)
   and Anthropic (Claude Sonnet/Opus/Fable 5, Haiku 4.5) API ids; README

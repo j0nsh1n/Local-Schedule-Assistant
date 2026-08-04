@@ -1,11 +1,9 @@
 # context.md — Daily Scheduler
 
 ## Current State
-- Branch: `main` @ v4.6.2 release. App version **4.6.2**; tag **v4.6.2**
-  published (assets via release CI).
-- **Python 3.14** pinned; **pyright** adopted (0 errors local).
-- Notifications: PR #45 + confirmed native FreeDesktop toasts.
-- Cloud LLM: leave as-is. Deps: `>=` floors. No Dependabot.
+- Branch: `main`. App version **4.6.3** (cloud model picker refresh).
+- Prior release **v4.6.2** (notifications). **Python 3.14** + pyright.
+- Notifications: FreeDesktop native path. Deps: `>=` floors. No Dependabot.
 
 ## Repo Landmarks
 - Entry: `app.py`, `run.sh` / `run.bat`
@@ -47,8 +45,7 @@
 - Version jump 4.4 → 4.6 (no 4.5.x).
 
 ## Session Handoff
-- **Date:** 2026-08-02
-- **Branch:** `fix/cloud-model-suggestions-2026`
-- **Done:** Refreshed `CLOUD_MODEL_SUGGESTIONS` to GPT-5.6 + Claude 5 family
-  API ids; README + tests + CHANGELOG.
-- **Next:** Merge PR; optional later: fetch models live from provider APIs.
+- **Date:** 2026-08-04
+- **Branch:** `main`
+- **Done:** PR #47 merged (model seeds); bump to 4.6.3 and cut release.
+- **Next:** Optional: fetch cloud models live from provider APIs.
