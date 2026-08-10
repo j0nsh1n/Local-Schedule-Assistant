@@ -1,8 +1,8 @@
 # context.md — Daily Scheduler
 
 ## Current State
-- Branch: `main`. App version **4.6.3** (cloud model picker refresh).
-- Prior release **v4.6.2** (notifications). **Python 3.14** + pyright.
+- Branch: `feat/export-day` (toward **4.6.4**). Day export + version bump.
+- Prior release **v4.6.3** (cloud model seeds). **Python 3.14** + pyright.
 - Notifications: FreeDesktop native path. Deps: `>=` floors. No Dependabot.
 
 ## Repo Landmarks
@@ -46,6 +46,6 @@
 
 ## Session Handoff
 - **Date:** 2026-08-04
-- **Branch:** `main`
-- **Done:** PR #47 merged (model seeds); bump to 4.6.3 and cut release.
-- **Next:** Optional: fetch cloud models live from provider APIs.
+- **Branch:** `feat/export-day`
+- **Done:** Day export (text/JSON); version **4.6.4**; PR opened.
+- **Next:** Review/merge PR; release when human asks.

@@ -17,6 +17,7 @@ Contents
     Crash / error logging  install_crash_logging() — app.log + crash.log
     Local storage ........ load/save activities (+ .bak rotation)
     Rolling backups ...... dated dailies, pruned to BACKUP_KEEP
+    Day export ........... format one day's blocks as text or JSON (Qt-free)
     Notification de-dup .. claim_block_alert() — exactly-once across processes
     Settings ............. DEFAULT_SETTINGS, load/save, time parsing
     Interval helpers ..... the scheduling math: free slots, placement,
@@ -43,7 +44,7 @@ from typing import Optional, List, Dict
 
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "4.6.3"
+__version__  = "4.6.4"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
@@ -306,6 +307,112 @@ def load_all_activities() -> List[Dict]:
         return _migrate_types(json.loads(DATA_FILE.read_text()))
     except Exception:
         return []
+
+def activities_on_date(acts: List[Dict], d: date) -> List[Dict]:
+    """Editable blocks whose `date` field matches `d` (ISO). Sorted by start."""
+    ds = d.isoformat() if isinstance(d, date) else str(d)
+    day = [a for a in (acts or []) if a.get("date") == ds]
+    day.sort(key=lambda a: (int(a.get("startMin") or 0), int(a.get("endMin") or 0)))
+    return day
+
+def day_export_dict(
+    acts: List[Dict],
+    d: date,
+    cal_events: Optional[List[Dict]] = None,
+) -> Dict:
+    """One-day snapshot for file export. Pure; does not touch disk.
+
+    `blocks` are the app's editable activities. Optional `calendar` is a
+    read-only Google overlay (same shape as in-app cal events) when the caller
+    wants a full day picture — omitted or empty when not provided.
+    """
+    blocks = []
+    for a in activities_on_date(acts, d):
+        blocks.append({
+            "id": a.get("id"),
+            "title": a.get("title") or "",
+            "type": a.get("type") or "study",
+            "startMin": int(a.get("startMin") or 0),
+            "endMin": int(a.get("endMin") or 0),
+            "color": a.get("color") or "",
+            "date": d.isoformat(),
+        })
+    out: Dict = {
+        "format": "daily-scheduler-day",
+        "version": 1,
+        "app_version": APP_VERSION,
+        "date": d.isoformat(),
+        "blocks": blocks,
+    }
+    if cal_events:
+        cal_out = []
+        for e in cal_events:
+            if (e.get("date") or d.isoformat()) != d.isoformat():
+                continue
+            cal_out.append({
+                "title": e.get("title") or "",
+                "startMin": int(e.get("startMin") or 0),
+                "endMin": int(e.get("endMin") or 0),
+                "allDay": bool(e.get("allDay")),
+            })
+        cal_out.sort(key=lambda x: (not x["allDay"], x["startMin"], x["endMin"]))
+        out["calendar"] = cal_out
+    return out
+
+def format_day_export_json(
+    acts: List[Dict],
+    d: date,
+    cal_events: Optional[List[Dict]] = None,
+) -> str:
+    """Pretty JSON for one day (UTF-8 text)."""
+    return json.dumps(day_export_dict(acts, d, cal_events), indent=2, ensure_ascii=False)
+
+def format_day_export_text(
+    acts: List[Dict],
+    d: date,
+    cal_events: Optional[List[Dict]] = None,
+) -> str:
+    """Human-readable day schedule (easy to paste into chat/email)."""
+    label = d.strftime("%A, %Y-%m-%d")
+    lines = [f"Daily Scheduler — {label}", "=" * max(24, len(label) + 18), ""]
+    blocks = activities_on_date(acts, d)
+    if not blocks:
+        lines.append("(no editable blocks)")
+    else:
+        lines.append("Schedule")
+        lines.append("--------")
+        for a in blocks:
+            sm = int(a.get("startMin") or 0)
+            em = int(a.get("endMin") or 0)
+            title = (a.get("title") or "").strip() or "(untitled)"
+            typ = a.get("type") or ""
+            typ_bit = f"  [{typ}]" if typ else ""
+            lines.append(f"{fmt_time(sm)}–{fmt_time(em)}  {title}{typ_bit}")
+        lines.append("")
+        lines.append(f"{len(blocks)} block(s)")
+    if cal_events:
+        # Only events that belong on this day
+        cal = [e for e in cal_events
+               if (e.get("date") or d.isoformat()) == d.isoformat()]
+        if cal:
+            lines.append("")
+            lines.append("Google Calendar (read-only overlay)")
+            lines.append("----------------------------------")
+            cal_sorted = sorted(
+                cal,
+                key=lambda e: (not is_all_day_event(e),
+                               int(e.get("startMin") or 0),
+                               int(e.get("endMin") or 0)))
+            for e in cal_sorted:
+                title = (e.get("title") or "").strip() or "(no title)"
+                if is_all_day_event(e):
+                    lines.append(f"all day     {title}")
+                else:
+                    sm = int(e.get("startMin") or 0)
+                    em = int(e.get("endMin") or 0)
+                    lines.append(f"{fmt_time(sm)}–{fmt_time(em)}  {title}")
+    lines.append("")
+    return "\n".join(lines)
 
 def save_all_activities(acts: List[Dict]) -> None:
     try:

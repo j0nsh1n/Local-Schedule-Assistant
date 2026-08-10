@@ -7,6 +7,13 @@ Versions match `core.__version__` / Git tags (`vX.Y.Z`).
 
 ## [Unreleased]
 
+## [4.6.4] - 2026-08-04
+
+### Added
+- **Export day…** from Day/Week right-click menus — save one day as
+  human-readable `.txt` or structured `.json` (editable blocks + Google
+  overlay if loaded). Does not change the schedule.
+
 ## [4.6.3] - 2026-08-04
 
 ### Changed

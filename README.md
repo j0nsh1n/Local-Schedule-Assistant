@@ -251,6 +251,9 @@ works fully offline without any of this.
 
 ## Everyday use
 
+- **Export a day.** Right-click empty space (or a block) on the **Day** or **Week**
+  view → **Export day…**. Save as readable `.txt` or structured `.json` (your blocks
+  plus any loaded Google Calendar overlay for that day). Does not change the schedule.
 - **Close ≠ quit.** Closing the window hides the app to the system tray so reminders keep
   firing. Really quit via the tray icon → **Quit**.
 - **Launching it again** just brings the running window to the front (single instance).

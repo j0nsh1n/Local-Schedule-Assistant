@@ -82,6 +82,7 @@ class TimelineWidget(QWidget):
     day_dup_req         = Signal()           # duplicate viewed day → next day
     day_paste_req       = Signal()           # paste day clipboard onto viewed day
     day_clear_req       = Signal()           # wipe all editable blocks on viewed day
+    day_export_req      = Signal()           # export viewed day to a text/JSON file
 
     SNAP   = 5    # minutes — drag/resize snaps to this grid (5-min precision)
     EDGE_PX = 7   # pixels near a block's top/bottom that trigger resize
@@ -460,6 +461,7 @@ class TimelineWidget(QWidget):
         day_copy = menu.addAction("📅  Copy day")
         day_dup  = menu.addAction("📅  Duplicate day → next day")
         day_paste = menu.addAction("📅  Paste day")
+        day_export = menu.addAction("⬇  Export day…")
         menu.addSeparator()
         day_clear = menu.addAction("🗑  Clear day…")
         chosen = menu.exec(ev.globalPos())
@@ -481,6 +483,8 @@ class TimelineWidget(QWidget):
             self.day_dup_req.emit()
         elif chosen == day_paste:
             self.day_paste_req.emit()
+        elif chosen == day_export:
+            self.day_export_req.emit()
         elif chosen == day_clear:
             self.day_clear_req.emit()
 
@@ -666,6 +670,7 @@ class WeekViewWidget(QWidget):
     day_dup_req   = Signal(object)   # datetime.date → copy onto date+1
     day_paste_req = Signal(object)   # datetime.date
     day_clear_req = Signal(object)   # datetime.date — wipe editable blocks
+    day_export_req = Signal(object)  # datetime.date — save text/JSON export
 
     HDR_H = 34    # day-name strip
     AD_H  = 18    # all-day banner under the name (0 height when empty)
@@ -941,10 +946,12 @@ class WeekViewWidget(QWidget):
             day_dup   = menu.addAction(
                 f"📅  Duplicate day → {(day + timedelta(days=1)).strftime('%a %b %d')}")
             day_paste = menu.addAction(f"📅  Paste day onto {day_lbl}")
+            day_export = menu.addAction(f"⬇  Export day ({day_lbl})…")
             menu.addSeparator()
             day_clear = menu.addAction(f"🗑  Clear day ({day_lbl})…")
         else:
             day_clear = None
+            day_export = None
 
         chosen = menu.exec(ev.globalPos())
         if not chosen:
@@ -967,6 +974,8 @@ class WeekViewWidget(QWidget):
             self.day_dup_req.emit(day)
         elif day is not None and chosen == day_paste:
             self.day_paste_req.emit(day)
+        elif day is not None and chosen == day_export:
+            self.day_export_req.emit(day)
         elif day is not None and chosen == day_clear:
             self.day_clear_req.emit(day)
 
