@@ -24,7 +24,7 @@ def check(name, cond):
     results.append(bool(cond))
     print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
 
-check("version 4.6.4", core.APP_VERSION == "4.6.4")
+check("version 4.6.5", core.APP_VERSION == "4.6.5")
 
 # model_is_installed
 check("exact match", ai.model_is_installed("qwen3:14b", ["qwen3:14b"]))

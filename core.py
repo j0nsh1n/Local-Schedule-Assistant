@@ -44,7 +44,7 @@ from typing import Optional, List, Dict
 
 
 # ── App metadata ───────────────────────────────────────────────────────────
-__version__  = "4.6.4"
+__version__  = "4.6.5"
 APP_VERSION  = __version__
 
 # Auto-update check (roadmap #2): compare the newest GitHub release's tag against
