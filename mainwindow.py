@@ -32,12 +32,13 @@ import sys
 import platform
 import calendar as _cal
 from datetime import datetime, date, timedelta
+from pathlib import Path
 from typing import Optional, List, Dict
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QScrollArea, QDialog, QStackedWidget, QMessageBox, QMenu, QSystemTrayIcon,
-    QGraphicsOpacityEffect, QSplitter,
+    QGraphicsOpacityEffect, QSplitter, QFileDialog,
     QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QAbstractSpinBox,
 )
 from PySide6.QtCore import (
@@ -60,6 +61,8 @@ from core import (
     allday_cal_events,
     claim_block_alert,
     end_alert_due,
+    format_day_export_json,
+    format_day_export_text,
     fmt_time,
     load_all_activities,
     load_settings,
@@ -195,6 +198,7 @@ class MainWindow(AIToolsMixin, QMainWindow):
         self._timeline.day_dup_req.connect(lambda: self._duplicate_day())
         self._timeline.day_paste_req.connect(lambda: self._paste_day())
         self._timeline.day_clear_req.connect(lambda: self._clear_day())
+        self._timeline.day_export_req.connect(lambda: self._export_day())
         self._scroll.setWidget(self._timeline)
 
         self._allday_banner = QLabel()
@@ -224,6 +228,7 @@ class MainWindow(AIToolsMixin, QMainWindow):
         self._week_view.day_dup_req.connect(self._duplicate_day)
         self._week_view.day_paste_req.connect(self._paste_day)
         self._week_view.day_clear_req.connect(self._clear_day)
+        self._week_view.day_export_req.connect(self._export_day)
         self._month_view = MonthViewWidget()
         self._month_view.day_clicked.connect(self._goto_date)
         self._year_view = YearViewWidget()
@@ -941,6 +946,44 @@ class MainWindow(AIToolsMixin, QMainWindow):
         self._set_status(
             f"Cleared {len(acts)} block(s) from {d.strftime('%a %b %d')}  "
             f"(Ctrl+Z to undo)")
+
+    def _export_day(self, d=None):
+        """Save one day as a human-readable .txt or structured .json file.
+
+        Includes editable blocks plus any loaded Google Calendar overlay for
+        that date (read-only section). Cancelable; never mutates the schedule.
+        """
+        if not isinstance(d, date):
+            d = self._cur_date
+        default_name = f"schedule-{d.isoformat()}.txt"
+        path, selected = QFileDialog.getSaveFileName(
+            self,
+            f"Export day — {d.strftime('%A, %b %d %Y')}",
+            str(Path.home() / default_name),
+            "Text (*.txt);;JSON (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        cal = self._day_cal(d)
+        as_json = path.lower().endswith(".json") or "JSON" in (selected or "")
+        if as_json and not path.lower().endswith(".json"):
+            path = path + ".json"
+        elif not as_json and not path.lower().endswith((".txt", ".json", ".md")):
+            path = path + ".txt"
+            as_json = False
+        try:
+            if as_json:
+                body = format_day_export_json(self._all_acts, d, cal)
+            else:
+                body = format_day_export_text(self._all_acts, d, cal)
+            Path(path).write_text(body, encoding="utf-8")
+        except OSError as e:
+            QMessageBox.warning(self, "Export failed", str(e))
+            self._set_status(f"Export failed: {e}", True)
+            return
+        n = sum(1 for a in self._all_acts if a.get("date") == d.isoformat())
+        self._set_status(
+            f"Exported {d.strftime('%a %b %d')} ({n} block(s)) → {path}")
 
     # ── Layout splitters (calendar | sidebar | AI, and types | summary) ────
     def _on_body_split_moved(self, *_):

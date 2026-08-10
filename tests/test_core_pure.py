@@ -152,6 +152,38 @@ check("empty days are omitted", wk.count("\n") <= 2)
 check("nothing upcoming yields an empty string",
       core.week_ahead_lines({}, date(2026, 7, 20), days=7) == "")
 
+print("── day export (text + JSON) ──")
+d_exp = date(2026, 8, 4)
+export_acts = [
+    {"id": "a1", "date": "2026-08-04", "startMin": 540, "endMin": 600,
+     "title": "Math", "type": "study", "color": "#8b5cf6"},
+    {"id": "a2", "date": "2026-08-04", "startMin": 720, "endMin": 780,
+     "title": "Lunch", "type": "meals", "color": "#f97316"},
+    {"id": "a3", "date": "2026-08-05", "startMin": 600, "endMin": 660,
+     "title": "Other day", "type": "study", "color": "#8b5cf6"},
+]
+cal_exp = [
+    {"title": "Dentist", "startMin": 900, "endMin": 960, "allDay": False,
+     "date": "2026-08-04"},
+    {"title": "Holiday", "startMin": 0, "endMin": 1440, "allDay": True,
+     "date": "2026-08-04"},
+]
+on_day = core.activities_on_date(export_acts, d_exp)
+check("activities_on_date filters and sorts",
+      [a["title"] for a in on_day] == ["Math", "Lunch"])
+txt = core.format_day_export_text(export_acts, d_exp, cal_exp)
+check("text has date header", "2026-08-04" in txt)
+check("text lists blocks in order", txt.index("Math") < txt.index("Lunch"))
+check("text includes cal overlay", "Dentist" in txt and "Holiday" in txt)
+check("text omits other days", "Other day" not in txt)
+js = core.format_day_export_json(export_acts, d_exp, cal_exp)
+payload = __import__("json").loads(js)
+check("json format tag", payload.get("format") == "daily-scheduler-day")
+check("json block count", len(payload.get("blocks") or []) == 2)
+check("json calendar count", len(payload.get("calendar") or []) == 2)
+empty_txt = core.format_day_export_text([], d_exp)
+check("empty day still exports", "no editable blocks" in empty_txt)
+
 print("── round-trip through storage (temp dir only) ──")
 acts = [blk(600, 660, "synthetic")]
 core.save_all_activities(acts)
