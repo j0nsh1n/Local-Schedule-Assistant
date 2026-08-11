@@ -35,6 +35,62 @@ x3, y3 = alert_corner_top_left(g3, 380, 110, margin=16, stack_idx=0)
 check("secondary corner x", x3 == 2560 - 380 - 16)
 check("secondary not on primary", x3 < 2560)
 
+
+# ── Window TYPE per platform (regression: v4.6.2 shipped Qt.Window everywhere)
+# On Windows/macOS the toast must be a Qt.Tool so WS_EX_TOOLWINDOW keeps it out
+# of the taskbar and Alt-Tab — a frameless card that auto-dismisses after 12 s
+# must not leave a ghost taskbar button. On Linux/KWin Qt.Tool maps to "Utility",
+# where placement/keep-above rules are ignored and the toast gets centred, so
+# there it must be a plain Qt.Window. Offscreen/Linux testing cannot see the
+# Windows half of this, hence the explicit per-platform assertion.
+import dialogs
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication
+
+qapp = QApplication.instance() or QApplication(sys.argv)
+
+
+class _FakePlatform:
+    def __init__(self, name): self._name = name
+    def system(self): return self._name
+
+
+_real_platform = dialogs.platform
+
+def _window_type(osname):
+    dialogs.platform = _FakePlatform(osname)
+    try:
+        w = dialogs.AlertPopup("t", "b", QIcon(), kind="start")
+        wt = w.windowFlags() & Qt.WindowType_Mask
+        w.deleteLater()
+        return wt
+    finally:
+        dialogs.platform = _real_platform
+
+for osname in ("Windows", "Darwin"):
+    wt = _window_type(osname)
+    check(f"{osname}: is a Qt.Tool (stays out of the taskbar / Alt-Tab)",
+          wt == Qt.Tool)
+
+check("Linux: is a plain Qt.Window (KWin 'Utility' breaks placement)",
+      _window_type("Linux") == Qt.Window)
+
+# Flags that must hold everywhere.
+for osname in ("Windows", "Linux"):
+    dialogs.platform = _FakePlatform(osname)
+    try:
+        w = dialogs.AlertPopup("t", "b", QIcon(), kind="start")
+        f = w.windowFlags()
+        check(f"{osname}: frameless", bool(f & Qt.FramelessWindowHint))
+        check(f"{osname}: stays on top", bool(f & Qt.WindowStaysOnTopHint))
+        check(f"{osname}: never steals focus",
+              w.testAttribute(Qt.WA_ShowWithoutActivating))
+        w.deleteLater()
+    finally:
+        dialogs.platform = _real_platform
+
+
 print(f"\n{sum(results)}/{len(results)} passed")
 print("RESULT:", "PASS" if all(results) else "FAIL")
 sys.exit(0 if all(results) else 1)

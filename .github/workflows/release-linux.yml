@@ -45,8 +45,13 @@ jobs:
 
       - name: Build Linux onedir package
         run: |
+          # Collect shiboken6 with PySide6 (same Windows crash class if missing).
           pyinstaller --noconfirm --onedir --name DailyScheduler \
             --collect-all PySide6 \
+            --collect-all shiboken6 \
+            --hidden-import shiboken6 \
+            --copy-metadata PySide6 \
+            --copy-metadata shiboken6 \
             --add-data "LICENSE:." \
             app.py
           chmod +x dist/DailyScheduler/DailyScheduler

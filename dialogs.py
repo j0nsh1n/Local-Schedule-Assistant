@@ -348,11 +348,16 @@ def alert_corner_top_left(screen_geo, popup_w: int, popup_h: int,
 
 class AlertPopup(QWidget):
     def __init__(self, title, body, icon: QIcon, kind: str = "start"):
-        # IMPORTANT: do NOT use Qt.Tool. On KWin/Plasma that maps to a "Utility"
-        # window type (often labeled "unimportant"), and placement / keep-above
-        # rules then fail or the toast is centered. Use a normal top-level
-        # Window + stays-on-top instead.
-        flags = (Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+        # The window TYPE has to differ by platform — both choices are load-bearing:
+        #   Linux/KWin: Qt.Tool maps to the "Utility" window type, where placement
+        #     and keep-above rules are ignored and the toast gets centred. Needs a
+        #     plain Qt.Window.
+        #   Windows/macOS: Qt.Tool sets WS_EX_TOOLWINDOW, which is what keeps a
+        #     frameless 12-second toast OUT of the taskbar and Alt-Tab. v4.6.2
+        #     applied the Linux fix everywhere, so every alert spawned a ghost
+        #     taskbar button on Windows — invisible to Linux/offscreen testing.
+        _wtype = Qt.Window if platform.system() == "Linux" else Qt.Tool
+        flags = (_wtype | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
                  | Qt.WindowDoesNotAcceptFocus)
         super().__init__(None, flags)
         # Stable title + role so compositor window rules can target the popup
@@ -440,14 +445,6 @@ class AlertPopup(QWidget):
         self._timer = QTimer(self); self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.close)
         self._timer.start(12000)
-
-    def show_at(self, x, y):
-        """Legacy: place with bottom edge at y (top-left computed from height)."""
-        self.adjustSize()
-        self.move(int(x), int(y) - self.height())
-        self.show()
-        # Re-pin once layout settles (same as show_corner).
-        QTimer.singleShot(0, lambda: self.move(int(x), int(y) - self.height()))
 
     def show_corner(self, screen, stack_idx: int = 0, margin: int = 16):
         """Show bottom-right on `screen` (QScreen), stacking upward for multiples."""
@@ -863,8 +860,11 @@ class SettingsDialog(QDialog):
         popup.destroyed.connect(
             lambda *_: self._preview_popups.remove(popup)
             if popup in getattr(self, "_preview_popups", []) else None)
-        geo = QApplication.primaryScreen().availableGeometry()
-        popup.show_at(geo.right() - popup.width() - 16, geo.bottom() - 16)
+        # Preview on the screen this dialog is on — same rule the real alert path
+        # uses (MainWindow._alert_target_screen). primaryScreen() would put the
+        # preview on a different monitor than the actual alerts on a dual-head
+        # setup, which makes the preview misleading.
+        popup.show_corner(self.screen() or QApplication.primaryScreen())
 
     def _open_folder(self):
         try:

@@ -7,6 +7,18 @@ Versions match `core.__version__` / Git tags (`vX.Y.Z`).
 
 ## [Unreleased]
 
+## [4.6.5] - 2026-08-10
+
+### Fixed
+- **Windows package launch:** PyInstaller now collects **shiboken6** with
+  PySide6. v4.6.4 (and earlier) freezes could crash at startup with
+  `Failed to execute script 'app'` /
+  `ImportError: ...\shiboken6 does not exist`. CI asserts the `shiboken6`
+  directory is present in the onedir tree.
+- **Windows alert taskbar:** reminder popups use `Qt.Tool` on Windows/macOS
+  again (stay out of the taskbar / Alt-Tab) while Linux keeps `Qt.Window`
+  for KWin placement. Regression from v4.6.2.
+
 ## [4.6.4] - 2026-08-04
 
 ### Added
