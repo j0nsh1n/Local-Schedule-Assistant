@@ -21,8 +21,15 @@ for arg in "$@"; do
 done
 
 python3 -m pip install -q pyinstaller -r requirements.txt
+# Collect shiboken6 explicitly — required by PySide6's DLL search at import.
+# Without it, freezes can fail with: ImportError: .../shiboken6 does not exist
+# (bootloader: "Failed to execute script 'app'" from entry module app.py).
 python3 -m PyInstaller --noconfirm --onedir --name DailyScheduler \
   --collect-all PySide6 \
+  --collect-all shiboken6 \
+  --hidden-import shiboken6 \
+  --copy-metadata PySide6 \
+  --copy-metadata shiboken6 \
   --add-data "LICENSE:." \
   app.py
 

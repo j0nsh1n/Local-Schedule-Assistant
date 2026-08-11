@@ -37,8 +37,14 @@ jobs:
 
       - name: Build Windows onedir package
         run: |
+          # shiboken6 must be collected separately; PySide6's import-time DLL
+          # probe raises ImportError: "...\shiboken6 does not exist" otherwise.
           pyinstaller --noconfirm --onedir --windowed --name DailyScheduler `
             --collect-all PySide6 `
+            --collect-all shiboken6 `
+            --hidden-import shiboken6 `
+            --copy-metadata PySide6 `
+            --copy-metadata shiboken6 `
             --add-data "LICENSE;." `
             app.py
           # Zip the whole folder (exe + _internal)
@@ -48,16 +54,20 @@ jobs:
           "$hash  DailyScheduler-win64.zip" | Set-Content -NoNewline dist\DailyScheduler-win64.zip.sha256
           Write-Host "SHA256: $hash"
 
-      - name: Smoke-test --version
-        # --windowed freezes have no console; still accept a non-zero exit if
-        # Qt can't open a display in CI — we only need the freeze to exist.
+      - name: Smoke-test package layout
+        # --windowed freezes have no console; assert freeze layout is complete.
+        # Missing shiboken6 is the classic "Failed to execute script 'app'" crash.
         run: |
-          if (Test-Path dist\DailyScheduler\DailyScheduler.exe) {
-            Write-Host "Built: dist\DailyScheduler\DailyScheduler.exe"
-            Get-ChildItem dist\DailyScheduler | Select-Object Name, Length
-          } else {
-            throw "DailyScheduler.exe missing after build"
+          $root = "dist\DailyScheduler"
+          $exe = Join-Path $root "DailyScheduler.exe"
+          if (-not (Test-Path $exe)) { throw "DailyScheduler.exe missing after build" }
+          $shibo = Get-ChildItem -Path $root -Recurse -Directory -Filter "shiboken6" -ErrorAction SilentlyContinue
+          if (-not $shibo) {
+            throw "shiboken6 package dir missing under $root — PySide6 will fail at import on Windows"
           }
+          Write-Host "Built: $exe"
+          Write-Host "shiboken6 at: $($shibo[0].FullName)"
+          Get-ChildItem $root | Select-Object Name, Length
 
       - name: Attach to the release
         env:

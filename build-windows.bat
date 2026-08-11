@@ -11,8 +11,17 @@ cd /d "%~dp0"
 py -m pip install -q pyinstaller -r requirements.txt
 if errorlevel 1 exit /b 1
 
+REM PySide6 imports shiboken6 at startup for DLL search paths. On Windows a
+REM freeze that only --collect-all PySide6 can leave shiboken6 out of _internal,
+REM which crashes at launch with:
+REM   ImportError: ...\shiboken6 does not exist
+REM (bootloader text: "Failed to execute script 'app'" — the entry module is app.py).
 py -m PyInstaller --noconfirm --onedir --windowed --name DailyScheduler ^
   --collect-all PySide6 ^
+  --collect-all shiboken6 ^
+  --hidden-import shiboken6 ^
+  --copy-metadata PySide6 ^
+  --copy-metadata shiboken6 ^
   --add-data "LICENSE;." ^
   --distpath dist_exe --workpath build --specpath . ^
   app.py

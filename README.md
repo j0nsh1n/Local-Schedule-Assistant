@@ -330,11 +330,18 @@ Or by hand:
 
 ```bat
 pip install pyinstaller
-py -m PyInstaller --noconfirm --onedir --windowed --name DailyScheduler --collect-all PySide6 app.py
+py -m PyInstaller --noconfirm --onedir --windowed --name DailyScheduler ^
+  --collect-all PySide6 --collect-all shiboken6 ^
+  --hidden-import shiboken6 --copy-metadata PySide6 --copy-metadata shiboken6 ^
+  app.py
 ```
 
 Result: `dist\DailyScheduler\DailyScheduler.exe` plus `_internal\` (~270 MB total).
 `build-windows.bat` also writes `dist_exe\DailyScheduler-win64.zip` for the release.
+
+**Windows launch crash** `Failed to execute script 'app'` / `shiboken6 does not exist`:
+the freeze must ship the whole **folder** (exe + `_internal\`), not a lone `.exe`,
+and the build must `--collect-all shiboken6` (PySide6 needs it for DLL paths).
 
 **Linux** (local / personal builds only — public assets are CI-built):
 
